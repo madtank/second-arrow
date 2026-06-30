@@ -1,0 +1,364 @@
+:root {
+  /* Calm, neutral palette */
+  --bg: #f4f2ec;
+  --surface: #ffffff;
+  --ink: #2c2c28;
+  --muted: #6f6f68;
+  --accent: #6b7d6e; /* soft sage green */
+  --accent-ink: #3f4d42;
+  --accent-soft: #e8ede8;
+  --border: #e3e0d8;
+  --warm: #b08968; /* gentle clay for the "I'm angry" action */
+  --radius: 14px;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  --maxw: 720px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.6;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header / nav */
+.site-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--accent-ink);
+  text-decoration: none;
+  letter-spacing: 0.01em;
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.nav-link {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.95rem;
+}
+
+.nav-link.active {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+/* Layout */
+.content {
+  flex: 1;
+  width: 100%;
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding: 1rem;
+  text-align: center;
+}
+
+/* Typography helpers */
+h1 {
+  font-size: 1.8rem;
+  line-height: 1.25;
+  margin: 0 0 0.5rem;
+}
+
+h2 {
+  font-size: 1.25rem;
+  margin: 1.75rem 0 0.5rem;
+  color: var(--accent-ink);
+}
+
+.lede {
+  font-size: 1.15rem;
+  color: var(--ink);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.85rem;
+}
+
+.center {
+  text-align: center;
+}
+
+/* Cards */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.2rem;
+  box-shadow: var(--shadow);
+  margin-bottom: 1rem;
+}
+
+.card-link {
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  transition: border-color 0.15s ease;
+}
+
+.card-link:hover {
+  border-color: var(--accent);
+}
+
+.card h3 {
+  margin: 0 0 0.3rem;
+  font-size: 1.1rem;
+}
+
+.card-index {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  padding: 0.6rem 1.1rem;
+  border-radius: 999px;
+  font-size: 1rem;
+  text-decoration: none;
+  cursor: pointer;
+  text-align: center;
+  font-family: inherit;
+}
+
+.btn:hover {
+  filter: brightness(0.96);
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--accent-ink);
+}
+
+.btn-warm {
+  background: var(--warm);
+  border-color: var(--warm);
+}
+
+.btn-block {
+  display: block;
+  width: 100%;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+/* Tags */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.5rem 0;
+}
+
+.tag {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+}
+
+/* Hero (home) */
+.hero {
+  text-align: center;
+  padding: 1.5rem 0 0.5rem;
+}
+
+.hero .quote {
+  font-size: 1.35rem;
+  color: var(--accent-ink);
+  font-weight: 600;
+  margin: 0.5rem 0 1.25rem;
+}
+
+.hero-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 360px;
+  margin: 1.5rem auto 0;
+}
+
+/* Forms / practice */
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+textarea,
+input[type="text"] {
+  width: 100%;
+  font-family: inherit;
+  font-size: 1rem;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  resize: vertical;
+}
+
+textarea:focus,
+input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* Selectable option chips */
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.option {
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.65rem 0.9rem;
+  font-size: 1rem;
+  font-family: inherit;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.option.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+/* Practice timer */
+.timer {
+  font-size: 3rem;
+  font-weight: 700;
+  color: var(--accent-ink);
+  text-align: center;
+  margin: 1rem 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.breathe {
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  margin: 1.5rem auto;
+  animation: breathe 8s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(0.8); opacity: 0.6; }
+  50% { transform: scale(1.1); opacity: 1; }
+}
+
+.step-progress {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Journal entries */
+.entry-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.entry dl {
+  margin: 0.5rem 0 0;
+}
+
+.entry dt {
+  font-weight: 600;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.entry dd {
+  margin: 0.1rem 0 0;
+}
+
+.notice {
+  background: var(--accent-soft);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  font-size: 0.9rem;
+  color: var(--accent-ink);
+  margin: 1rem 0;
+}
+
+@media (min-width: 600px) {
+  .hero-actions {
+    flex-direction: row;
+    justify-content: center;
+  }
+  .hero-actions .btn {
+    flex: 1;
+  }
+}

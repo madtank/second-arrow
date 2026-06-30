@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Second Arrow additions ---
+# Node / frontend
+node_modules/
+frontend/dist/
+*.local
+
+# SQLite database (created on first run)
+*.db
+backend/second_arrow.db
+
+# TypeScript build info
+*.tsbuildinfo
