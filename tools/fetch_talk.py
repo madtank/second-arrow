@@ -124,46 +124,72 @@ def update_index(index_path: Path, *, slug: str, entry: str) -> None:
     index_path.write_text(content + entry, encoding="utf-8")
 
 
-def fetch_youtube(url: str, talk_dir: Path) -> dict:
-    """Return {'title', 'uploader', 'transcript_text' or None, 'audio_path' or None}."""
+YDL_COMMON = {"quiet": True, "no_warnings": True, "noplaylist": True}
+
+
+def probe_youtube(url: str) -> dict:
+    """Return {'title', 'uploader'} without downloading anything."""
     import yt_dlp
 
-    common = {"quiet": True, "no_warnings": True, "noplaylist": True}
-    with yt_dlp.YoutubeDL(common) as ydl:
+    with yt_dlp.YoutubeDL(dict(YDL_COMMON)) as ydl:
         info = ydl.extract_info(url, download=False)
-    title = info.get("title") or "talk"
-    uploader = info.get("uploader") or ""
+    return {"title": info.get("title") or "talk", "uploader": info.get("uploader") or ""}
 
-    subs = info.get("subtitles") or {}
-    autos = info.get("automatic_captions") or {}
-    caption_tracks = None
-    for source in (subs, autos):
-        for lang, tracks in source.items():
-            if lang.startswith("en"):
-                caption_tracks = tracks
-                break
-        if caption_tracks:
-            break
 
-    if caption_tracks:
-        vtt_url = next((t["url"] for t in caption_tracks if t.get("ext") == "vtt"), None)
-        if vtt_url:
-            with urllib.request.urlopen(vtt_url) as resp:
-                vtt = resp.read().decode("utf-8", errors="replace")
-            text = parse_vtt(vtt)
-            if text:
-                return {"title": title, "uploader": uploader, "transcript_text": text, "audio_path": None}
+def fetch_youtube_captions(url: str, talk_dir: Path) -> str | None:
+    """Download English captions (manual preferred over auto) into talk_dir.
 
-    audio_target = talk_dir / "audio.m4a"
+    YouTube's timedtext URLs reject plain urllib clients, so the subtitle
+    download goes through yt-dlp itself. Returns parsed transcript text,
+    or None when no usable captions exist.
+    """
+    import yt_dlp
+
+    # Genuine English tracks only — "en.*" would also match auto-translated
+    # tracks (en-de, en-ja, ...) whose downloads can 429 and abort the run.
+    languages = ["en", "en-en", "en-orig"]
     opts = {
-        **common,
+        **YDL_COMMON,
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": languages,
+        "subtitlesformat": "vtt",
+        "outtmpl": str(talk_dir / "captions"),
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+    except yt_dlp.utils.DownloadError:
+        pass  # a partial failure may still have written usable .vtt files
+    vtt_files = sorted(talk_dir.glob("captions*.vtt"))
+    if not vtt_files:
+        return None
+    by_name = {f.name: f for f in vtt_files}
+    chosen = next(
+        (by_name[f"captions.{lang}.vtt"] for lang in languages if f"captions.{lang}.vtt" in by_name),
+        vtt_files[0],
+    )
+    text = parse_vtt(chosen.read_text(encoding="utf-8", errors="replace"))
+    for vtt_file in vtt_files:
+        vtt_file.unlink()
+    return text or None
+
+
+def download_youtube_audio(url: str, talk_dir: Path) -> Path:
+    import yt_dlp
+
+    opts = {
+        **YDL_COMMON,
         "format": "bestaudio[ext=m4a]/bestaudio",
         "outtmpl": str(talk_dir / "audio.%(ext)s"),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
-    audio_path = next(talk_dir.glob("audio.*"), audio_target)
-    return {"title": title, "uploader": uploader, "transcript_text": None, "audio_path": audio_path}
+    audio_path = next(iter(sorted(talk_dir.glob("audio.*"))), None)
+    if audio_path is None:
+        raise SystemExit(f"YouTube audio download produced no file in {talk_dir}")
+    return audio_path
 
 
 def download_file(url: str, dest: Path) -> Path:
@@ -212,28 +238,23 @@ def main() -> None:
     kind = classify_url(args.url)
 
     if kind == "youtube":
-        provisional = args.title or "talk"
-        talk_dir = args.library / slugify(provisional)
+        meta = probe_youtube(args.url)
+        title = args.title or meta["title"]
+        teacher = args.teacher or meta["uploader"] or "Unknown"
+        talk_dir = args.library / slugify(title)
         talk_dir.mkdir(parents=True, exist_ok=True)
-        result = fetch_youtube(args.url, talk_dir)
-        title = args.title or result["title"]
-        teacher = args.teacher or result["uploader"] or "Unknown"
-        slug = slugify(title)
-        final_dir = args.library / slug
-        if final_dir != talk_dir:
-            final_dir.parent.mkdir(parents=True, exist_ok=True)
-            talk_dir.rename(final_dir)
-        if result["transcript_text"]:
-            (final_dir / "transcript.md").write_text(
+        transcript_text = fetch_youtube_captions(args.url, talk_dir)
+        if transcript_text:
+            (talk_dir / "transcript.md").write_text(
                 render_transcript_markdown(
-                    text=result["transcript_text"], title=title, teacher=teacher,
+                    text=transcript_text, title=title, teacher=teacher,
                     source_url=args.url, origin="youtube captions",
                 ),
                 encoding="utf-8",
             )
         else:
-            audio_path = next(final_dir.glob("audio.*"))
-            transcribe(audio_path, talk_dir=final_dir, title=title, teacher=teacher,
+            audio_path = download_youtube_audio(args.url, talk_dir)
+            transcribe(audio_path, talk_dir=talk_dir, title=title, teacher=teacher,
                        source_url=args.url, model=args.model)
     else:
         if kind == "page":
