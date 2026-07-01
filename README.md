@@ -34,6 +34,9 @@ picks up where the last one left off.
 - **A local shelf page** (`tools/build_shelf.py`) renders the library as a
   calm, self-contained `library/shelf.html` — primers, players, and notes,
   clickable from the browser.
+- **A served chat shelf** (`tools/serve_shelf.py`) serves the same page at
+  `http://localhost:8765` with a guide chat panel — Claude by default, or a
+  local Ollama model (`--brain ollama`) for offline study.
 - Study memory (`STUDY.md`) and the journal stay private and out of git.
 
 The web app described below still runs fine, but it's a dormant MVP — the

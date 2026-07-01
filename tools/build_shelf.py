@@ -127,7 +127,102 @@ STYLE = """
            border-top: 1px solid #e8e0d3; padding-top: 1rem; }
   code { background: #f2ece1; padding: 0.1em 0.35em; border-radius: 4px;
          font-size: 0.85em; }
+  #chat-messages { height: 320px; overflow-y: auto; padding: 0.25rem 0;
+                   border-top: 1px solid #f0e9dd; }
+  .chat-msg { white-space: pre-wrap; margin: 0.6rem 0; padding: 0.5rem 0.8rem;
+              border-radius: 8px; font-size: 0.95rem; }
+  .chat-user { background: #efe7d9; margin-left: 2.5rem; }
+  .chat-guide { background: #f6f1e7; margin-right: 2.5rem; }
+  .chat-thinking { color: #a99e8e; font-style: italic; }
+  #chat-form { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+  #chat-form textarea { flex: 1; font: inherit; color: inherit; resize: vertical;
+                        background: #fffdf9; border: 1px solid #e8e0d3;
+                        border-radius: 8px; padding: 0.5rem 0.75rem; }
+  #chat-form button { font: inherit; color: #5a4d3a; background: #efe7d9;
+                      border: none; border-radius: 8px; padding: 0 1.25rem;
+                      cursor: pointer; }
+  #chat-form button:disabled { opacity: 0.5; cursor: default; }
 """
+
+
+# The panel starts hidden and only appears when /health answers — so the
+# static file:// shelf keeps working unchanged. Guide replies are rendered
+# with textContent (never innerHTML): model output stays inert text.
+CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
+<h2>the guide</h2>
+<p class="meta" id="chat-brain"></p>
+<div id="chat-messages"></div>
+<form id="chat-form">
+<textarea id="chat-input" rows="2" placeholder="Where are you right now?"></textarea>
+<button type="submit" id="chat-send">Send</button>
+</form>
+</section>
+
+<script>
+(function () {
+  var panel = document.getElementById("guide-chat");
+  var list = document.getElementById("chat-messages");
+  var form = document.getElementById("chat-form");
+  var input = document.getElementById("chat-input");
+  var send = document.getElementById("chat-send");
+  var history = [];
+
+  function add(role, text) {
+    var div = document.createElement("div");
+    div.className = "chat-msg chat-" + role;
+    div.textContent = text; // textContent only — model output stays inert text
+    list.appendChild(div);
+    list.scrollTop = list.scrollHeight;
+    return div;
+  }
+
+  fetch("/health").then(function (r) { return r.json(); }).then(function (h) {
+    if (!h.ok) return;
+    document.getElementById("chat-brain").textContent =
+      "listening · brain: " + h.brain;
+    panel.hidden = false;
+  }).catch(function () { /* static file:// shelf — panel stays hidden */ });
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    var text = input.value.trim();
+    if (!text || send.disabled) return;
+    input.value = "";
+    add("user", text);
+    history.push({ role: "user", content: text });
+    var pending = add("guide", "thinking…");
+    pending.classList.add("chat-thinking");
+    send.disabled = true;
+    fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: history })
+    }).then(function (r) {
+      return r.json().then(function (data) {
+        if (!r.ok || data.error) throw new Error(data.error || "HTTP " + r.status);
+        return data;
+      });
+    }).then(function (data) {
+      pending.classList.remove("chat-thinking");
+      pending.textContent = data.reply;
+      history.push({ role: "assistant", content: data.reply });
+    }).catch(function (error) {
+      pending.classList.remove("chat-thinking");
+      pending.textContent = "The guide is out of reach — " + error.message;
+    }).finally(function () {
+      send.disabled = false;
+      input.focus();
+    });
+  });
+
+  input.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+})();
+</script>"""
 
 
 def render_card(talk: dict, files: dict, reach: str | None) -> str:
@@ -195,6 +290,8 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 </header>
 
 {body}
+
+{CHAT_PANEL}
 
 <footer>
 Private — generated from your library.

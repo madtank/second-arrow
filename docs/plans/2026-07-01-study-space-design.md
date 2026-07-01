@@ -153,10 +153,11 @@ phone), revisit with real usage behind the decision.
 - **Study shelf page** — DONE: `tools/build_shelf.py` renders a private,
   clickable `library/shelf.html` (talk cards, primer players, notes) so the
   library is browsable outside a terminal.
-- **Offline guide via local models (Ollama)** — the remaining cloud piece is
-  the conversation itself. Eventually: a local model (via Ollama) reading the
-  same transcripts, `STUDY.md`, and notes, chatting inside the shelf page so
-  study works fully offline. Honest constraint to design around: local models
+- **Offline guide via local models (Ollama)** — in progress:
+  `tools/serve_shelf.py` serves the shelf with a guide chat panel and has the
+  Ollama plug (`--brain ollama`), grounded by retrieval — the server packs the
+  persona, `STUDY.md`, the index, and the top keyword-matched transcript
+  chunks into the system prompt. Honest constraint to design around: local models
   are weaker discussion partners, so the offline guide should lean on
   retrieval (quote the transcript, surface notes) more than free-form
   teaching. Everything else is already local: Whisper transcription, Kokoro

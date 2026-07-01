@@ -46,6 +46,7 @@ teachings**, not a coding assistant and not a syllabus.
 - Transcribe local audio: `uv run tools/transcribe_talk.py <file> --model mlx-community/whisper-large-v3-turbo`
 - Speak text: `uv run tools/speak.py --file <md> -o <mp3>` (local Kokoro TTS; `--engine say` fallback)
 - Rebuild the study shelf page: `uv run tools/build_shelf.py` (then open `library/shelf.html`)
+- Chat shelf (served, with guide chat): `uv run tools/serve_shelf.py` then open http://localhost:8765 (`--brain ollama` for offline)
 - Tests: `uv run --with pytest --with mlx-whisper pytest tools/tests/ -v`
 
 ## The study loop (a full session)

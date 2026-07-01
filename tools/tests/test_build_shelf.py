@@ -149,3 +149,21 @@ def test_render_shelf_talk_without_audio_gets_source_link(tmp_path):
     assert "Listen at the source" in html
     # Its transcript is linked relatively.
     assert 'href="far-talk/transcript.md"' in html
+
+
+def test_render_shelf_includes_chat_panel_hidden_by_default(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The panel exists but starts hidden; it only appears when the served
+    # shelf's /health check succeeds — the static file:// shelf is unchanged.
+    assert 'id="guide-chat"' in html
+    assert "hidden" in html
+    assert "/health" in html
+    assert "/api/chat" in html
+    assert "the guide" in html.lower()
+
+
+def test_chat_js_renders_replies_as_text_never_html(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Model output must be rendered inert: textContent + pre-wrap only.
+    assert "textContent" in html
+    assert "innerHTML" not in html
