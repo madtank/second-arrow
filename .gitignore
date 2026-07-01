@@ -51,6 +51,10 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Local Codex brainstorming boards and generated learning artifacts
+.superpowers/
+output/
+
 # Translations
 *.mo
 *.pot
