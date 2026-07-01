@@ -1,5 +1,8 @@
 import importlib.util
+import json
 from pathlib import Path
+
+import pytest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "serve_shelf.py"
 SPEC = importlib.util.spec_from_file_location("serve_shelf", MODULE_PATH)
@@ -107,15 +110,33 @@ def test_build_ollama_payload_grounds_the_system_prompt():
 # --- build_claude_cmd ---------------------------------------------------
 
 
-def test_build_claude_cmd_first_turn():
+def test_build_claude_cmd_first_turn_streams_with_scoped_writes():
     cmd = serve_shelf.build_claude_cmd("where am I?")
-    assert cmd == ["claude", "-p", "where am I?", "--output-format", "json"]
+    assert cmd[:3] == ["claude", "-p", "where am I?"]
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in cmd
+    assert "--include-partial-messages" in cmd
+    # A global defaultMode like "auto" would auto-accept every write; the
+    # chat brain pins "default" so only the explicit allowlist passes.
+    assert cmd[cmd.index("--permission-mode") + 1] == "default"
+    assert cmd[cmd.index("--allowedTools") + 1] == serve_shelf.chat_allowed_tools()
+    assert "--resume" not in cmd
 
 
 def test_build_claude_cmd_resume_turn():
     cmd = serve_shelf.build_claude_cmd("and then?", session_id="abc-123")
-    assert cmd[:5] == ["claude", "-p", "and then?", "--output-format", "json"]
-    assert cmd[5:] == ["--resume", "abc-123"]
+    assert cmd[-2:] == ["--resume", "abc-123"]
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+
+
+def test_chat_allowed_tools_covers_exactly_the_memory_scopes():
+    rules = serve_shelf.chat_allowed_tools().split(",")
+    scopes = ("STUDY.md", "journal/**", "library/**/notes.md", "library/INDEX.md")
+    expected = {f"{tool}({scope})" for scope in scopes for tool in ("Edit", "Write")}
+    assert set(rules) == expected
+    assert len(rules) == len(expected)  # no stray rules
+    # Nothing grants Bash or unscoped tools.
+    assert all("(" in rule and rule.split("(")[0] in ("Edit", "Write") for rule in rules)
 
 
 # --- trim_history -------------------------------------------------------
@@ -181,6 +202,164 @@ def test_strip_think_removes_reasoning_block():
     raw = "<think>let me ponder\nanger...</think>\nIt grows on anger."
     assert serve_shelf.strip_think(raw) == "It grows on anger."
     assert serve_shelf.strip_think("plain reply") == "plain reply"
+
+
+def test_build_ollama_payload_can_ask_for_streaming():
+    payload = serve_shelf.build_ollama_payload(
+        [{"role": "user", "content": "hi"}], model="qwen3", stream=True
+    )
+    assert payload["stream"] is True
+
+
+# --- parse_stream_line (claude --output-format stream-json) --------------
+# Shapes below are captured from a real `claude -p --output-format
+# stream-json --verbose --include-partial-messages` run.
+
+
+def test_parse_stream_line_text_delta():
+    line = json.dumps(
+        {
+            "type": "stream_event",
+            "session_id": "57d69c96",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "text_delta", "text": "hello there "},
+            },
+        }
+    )
+    assert serve_shelf.parse_stream_line(line) == {
+        "text": "hello there ",
+        "session_id": "57d69c96",
+        "done": False,
+    }
+
+
+def test_parse_stream_line_ignores_thinking_and_signature_deltas():
+    for delta in (
+        {"type": "thinking_delta", "thinking": "let me ponder"},
+        {"type": "signature_delta", "signature": "CAIS..."},
+    ):
+        line = json.dumps(
+            {
+                "type": "stream_event",
+                "session_id": "s-1",
+                "event": {"type": "content_block_delta", "index": 0, "delta": delta},
+            }
+        )
+        parsed = serve_shelf.parse_stream_line(line)
+        assert parsed["text"] is None
+        assert parsed["done"] is False
+
+
+def test_parse_stream_line_init_event_carries_session_id():
+    line = json.dumps(
+        {"type": "system", "subtype": "init", "session_id": "s-9", "tools": ["Edit"]}
+    )
+    assert serve_shelf.parse_stream_line(line) == {
+        "text": None,
+        "session_id": "s-9",
+        "done": False,
+    }
+
+
+def test_parse_stream_line_result_event_is_done():
+    line = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "hello there friend",
+            "session_id": "s-9",
+        }
+    )
+    assert serve_shelf.parse_stream_line(line) == {
+        "text": None,
+        "session_id": "s-9",
+        "done": True,
+    }
+
+
+def test_parse_stream_line_error_result_raises():
+    line = json.dumps({"type": "result", "is_error": True, "result": "boom"})
+    with pytest.raises(ValueError, match="boom"):
+        serve_shelf.parse_stream_line(line)
+
+
+def test_parse_stream_line_blank_line_is_inert():
+    assert serve_shelf.parse_stream_line("  \n") == {
+        "text": None,
+        "session_id": None,
+        "done": False,
+    }
+
+
+def test_parse_stream_line_garbage_raises_json_error():
+    with pytest.raises(json.JSONDecodeError):
+        serve_shelf.parse_stream_line("not json at all")
+
+
+# --- parse_ollama_stream_line ---------------------------------------------
+
+
+def test_parse_ollama_stream_line_content_chunk():
+    line = json.dumps(
+        {"model": "qwen3", "message": {"role": "assistant", "content": "gro"}, "done": False}
+    )
+    assert serve_shelf.parse_ollama_stream_line(line) == {"text": "gro", "done": False}
+
+
+def test_parse_ollama_stream_line_final_chunk_is_done():
+    line = json.dumps(
+        {"model": "qwen3", "message": {"role": "assistant", "content": ""}, "done": True}
+    )
+    assert serve_shelf.parse_ollama_stream_line(line) == {"text": None, "done": True}
+
+
+def test_parse_ollama_stream_line_error_raises():
+    with pytest.raises(ValueError, match="model not found"):
+        serve_shelf.parse_ollama_stream_line(json.dumps({"error": "model not found"}))
+
+
+def test_parse_ollama_stream_line_blank_is_inert():
+    assert serve_shelf.parse_ollama_stream_line("\n") == {"text": None, "done": False}
+
+
+# --- ThinkFilter (streaming strip_think) ----------------------------------
+
+
+def test_think_filter_passes_plain_text_through():
+    think = serve_shelf.ThinkFilter()
+    assert think.feed("It grows ") == "It grows "
+    assert think.feed("on anger.") == "on anger."
+    assert think.flush() == ""
+
+
+def test_think_filter_drops_block_within_one_chunk():
+    think = serve_shelf.ThinkFilter()
+    out = think.feed("<think>ponder ponder</think>\n\nIt grows on anger.")
+    assert out + think.flush() == "It grows on anger."
+
+
+def test_think_filter_drops_block_split_across_chunks():
+    think = serve_shelf.ThinkFilter()
+    pieces = ["<thi", "nk>let me ", "ponder</th", "ink>\nIt grows", " on anger."]
+    out = "".join(think.feed(piece) for piece in pieces) + think.flush()
+    assert out == "It grows on anger."
+
+
+def test_think_filter_flush_releases_a_held_false_alarm():
+    think = serve_shelf.ThinkFilter()
+    # "<" could be the start of "<think>", so it is held back...
+    assert think.feed("2 <") == "2 "
+    # ...and released once the stream ends without completing the tag.
+    assert think.flush() == "<"
+
+
+def test_think_filter_unclosed_think_yields_nothing():
+    think = serve_shelf.ThinkFilter()
+    assert think.feed("<think>still pondering") == ""
+    assert think.flush() == ""
 
 
 def test_resolve_ollama_model_prefers_configured_then_falls_back():

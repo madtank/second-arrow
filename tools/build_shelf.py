@@ -146,8 +146,10 @@ STYLE = """
 
 
 # The panel starts hidden and only appears when /health answers — so the
-# static file:// shelf keeps working unchanged. Guide replies are rendered
-# with textContent (never innerHTML): model output stays inert text.
+# static file:// shelf keeps working unchanged. Guide replies stream in as
+# chunked plain text (fetch + ReadableStream); errors before the stream
+# starts arrive as JSON. Replies are rendered with textContent (never
+# innerHTML): model output stays inert text.
 CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 <h2>the guide</h2>
 <p class="meta" id="chat-brain"></p>
@@ -198,14 +200,43 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages: history })
     }).then(function (r) {
-      return r.json().then(function (data) {
-        if (!r.ok || data.error) throw new Error(data.error || "HTTP " + r.status);
-        return data;
-      });
-    }).then(function (data) {
-      pending.classList.remove("chat-thinking");
-      pending.textContent = data.reply;
-      history.push({ role: "assistant", content: data.reply });
+      var type = r.headers.get("content-type") || "";
+      if (!r.ok || type.indexOf("application/json") !== -1) {
+        // pre-stream failure: the server still answers with JSON {error}.
+        // (A JSON {reply} from an older non-streaming server also works.)
+        return r.json().then(function (data) {
+          if (r.ok && data.reply) return data.reply;
+          throw new Error(data.error || "HTTP " + r.status);
+        });
+      }
+      // The reply streams as chunked plain text: append each decoded
+      // chunk as it arrives. textContent only — replies stay inert text.
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder();
+      var reply = "";
+      function pump() {
+        return reader.read().then(function (step) {
+          var chunk = decoder.decode(step.done ? new Uint8Array() : step.value,
+                                     { stream: !step.done });
+          if (chunk) {
+            if (!reply) {
+              pending.classList.remove("chat-thinking");
+              pending.textContent = "";
+            }
+            reply += chunk;
+            pending.textContent += chunk;
+            list.scrollTop = list.scrollHeight;
+          }
+          return step.done ? reply : pump();
+        });
+      }
+      return pump();
+    }).then(function (reply) {
+      if (pending.classList.contains("chat-thinking")) {
+        pending.classList.remove("chat-thinking");
+        pending.textContent = reply || "The guide said nothing — try again.";
+      }
+      if (reply) history.push({ role: "assistant", content: reply });
     }).catch(function (error) {
       pending.classList.remove("chat-thinking");
       pending.textContent = "The guide is out of reach — " + error.message;

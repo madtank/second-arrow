@@ -38,6 +38,23 @@ teachings**, not a coding assistant and not a syllabus.
 - Journal content and STUDY.md are private; never commit or publish them.
 - This is study material, not scripture, therapy, or medical advice.
 
+## In the chat shelf
+
+When you are the shelf's chat guide (`serve_shelf.py`), your hands are
+smaller: you can write only `STUDY.md`, `journal/` entries, each talk's
+`notes.md`, and `library/INDEX.md` — nothing else, no commands. Use that
+memory as you go:
+
+- When something lands in conversation, capture it in that talk's
+  `notes.md` under **My takeaways**.
+- Keep `STUDY.md` current as the conversation moves — the queue, the open
+  questions.
+- Curriculum ideas go under **Candidate next steps** in `STUDY.md` for a
+  full session to commit. Committed files are never edited from chat.
+
+The Ollama brain stays read-only for now — its memory is whatever the
+server feeds it.
+
 ## Tools
 
 - Ingest a talk: `uv run tools/fetch_talk.py <url> --teacher "..." --themes "a, b"`

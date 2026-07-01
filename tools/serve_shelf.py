@@ -12,19 +12,32 @@ so importing it is fast, in-process, and fails loudly if it breaks.
 Routes:
     GET  /          the shelf page (library/shelf.html, freshly rebuilt)
     GET  /health    {"ok": true, "brain": "claude"|"ollama"}
-    POST /api/chat  {"messages": [{"role", "content"}, ...]} -> {"reply", "brain"}
+    POST /api/chat  {"messages": [{"role", "content"}, ...]} -> streamed reply
     /<talk>/...     library/ served statically (Range supported, audio seeks)
+
+Chat replies stream as chunked plain text (`text/plain; charset=utf-8`,
+one raw text fragment per chunk — no SSE framing; the panel just appends
+each decoded chunk with textContent). Failures BEFORE the stream starts
+still return JSON {"error": ...} with a 4xx/5xx status; failures MID-stream
+degrade gracefully: whatever text already arrived is kept and one plain
+error sentence is appended.
 
 Two brains:
     --brain claude (default)  runs the authenticated Claude CLI headless in
-        this repo, so it inherits the CLAUDE.md guide persona and can read
-        library/ itself. Headless mode auto-denies writes/Bash — that is the
-        safety boundary. Conversation continuity via `--resume <session_id>`,
-        falling back to folding trimmed history into the prompt.
-    --brain ollama  talks to a local Ollama (http://localhost:11434). Local
-        models are weak rememberers, so the server does the remembering: a
-        condensed guide persona + STUDY.md + library/INDEX.md + the top
-        keyword-matched transcript chunks are packed into the system prompt.
+        this repo (`--output-format stream-json --include-partial-messages`),
+        so it inherits the CLAUDE.md guide persona and can read library/
+        itself. Writes are scoped: `--permission-mode default` plus an
+        --allowedTools allowlist grant Edit/Write ONLY on STUDY.md,
+        journal/**, library/**/notes.md, and library/INDEX.md — no Bash,
+        nothing else. That is the safety boundary (see chat_allowed_tools).
+        Conversation continuity via `--resume <session_id>`, falling back
+        to folding trimmed history into the prompt.
+    --brain ollama  talks to a local Ollama (http://localhost:11434) with
+        "stream": true, read-only. Local models are weak rememberers, so the
+        server does the remembering: a condensed guide persona + STUDY.md +
+        library/INDEX.md + the top keyword-matched transcript chunks are
+        packed into the system prompt. <think> blocks are filtered out of
+        the stream (ThinkFilter).
 
 Run with:
     uv run tools/serve_shelf.py                # then open http://localhost:8765
@@ -39,6 +52,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -157,17 +171,55 @@ def build_ollama_payload(
     study: str = "",
     index: str = "",
     chunks: list[tuple[str, str]] = (),
+    stream: bool = False,
 ) -> dict:
     system = build_system_prompt(study, index, list(chunks))
     return {
         "model": model,
         "messages": [{"role": "system", "content": system}, *messages],
-        "stream": False,
+        "stream": stream,
     }
 
 
+# The chat guide's durable memory: the ONLY paths it may write from chat.
+# Everything else (code, curriculum, committed docs) needs a full session.
+CHAT_WRITE_SCOPES = (
+    "STUDY.md",
+    "journal/**",
+    "library/**/notes.md",
+    "library/INDEX.md",
+)
+
+
+def chat_allowed_tools(scopes: tuple[str, ...] = CHAT_WRITE_SCOPES) -> str:
+    """Comma-joined --allowedTools rules: Edit+Write per scope, nothing else.
+
+    Verified against the real CLI: `--allowedTools "Edit(STUDY.md),..."`
+    with `--permission-mode default` lets those edits through and leaves
+    every other write pending-denied in headless mode. (This CLI version
+    has no separate MultiEdit tool — Edit covers multi-edits.)
+    """
+    return ",".join(
+        f"{tool}({scope})" for scope in scopes for tool in ("Edit", "Write")
+    )
+
+
 def build_claude_cmd(prompt: str, session_id: str | None = None) -> list[str]:
-    cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    cmd = [
+        "claude",
+        "-p",
+        prompt,
+        "--output-format",
+        "stream-json",
+        "--verbose",  # stream-json in -p mode requires it
+        "--include-partial-messages",
+        # A user-level defaultMode like "auto" would auto-accept ANY write;
+        # pinning "default" makes the allowlist below the whole boundary.
+        "--permission-mode",
+        "default",
+        "--allowedTools",
+        chat_allowed_tools(),
+    ]
     if session_id:
         cmd += ["--resume", session_id]
     return cmd
@@ -194,7 +246,9 @@ def parse_claude_output(stdout: str) -> tuple[str, str | None]:
     """Pull (reply, session_id) out of `claude --output-format json` stdout.
 
     Depending on CLI version the JSON is either a single result object or a
-    list of events whose last "result"-typed item holds the reply.
+    list of events whose last "result"-typed item holds the reply. (The
+    server itself now streams via parse_stream_line; this is the one-shot
+    counterpart, kept for scripts and fallback use.)
     """
     data = json.loads(stdout)
     if isinstance(data, list):
@@ -207,9 +261,125 @@ def parse_claude_output(stdout: str) -> tuple[str, str | None]:
     return (data.get("result") or "").strip(), data.get("session_id")
 
 
+def parse_stream_line(line: str) -> dict:
+    """Parse one line of `claude -p --output-format stream-json` output.
+
+    Returns {"text": str|None, "session_id": str|None, "done": bool}:
+    text is a visible reply fragment (only content_block_delta/text_delta —
+    thinking and signature deltas stay hidden), session_id rides on most
+    events (the system/init event carries it first), done marks the final
+    "result" event. Raises json.JSONDecodeError on a garbled line and
+    ValueError when the result event reports is_error.
+    """
+    parsed: dict = {"text": None, "session_id": None, "done": False}
+    line = line.strip()
+    if not line:
+        return parsed
+    data = json.loads(line)
+    if not isinstance(data, dict):
+        return parsed
+    session_id = data.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        parsed["session_id"] = session_id
+    if data.get("type") == "stream_event":
+        event = data.get("event") or {}
+        delta = event.get("delta") or {}
+        if (
+            event.get("type") == "content_block_delta"
+            and delta.get("type") == "text_delta"
+        ):
+            parsed["text"] = delta.get("text") or None
+    elif data.get("type") == "result":
+        if data.get("is_error"):
+            raise ValueError(str(data.get("result") or "claude reported an error"))
+        parsed["done"] = True
+    return parsed
+
+
+def parse_ollama_stream_line(line: str) -> dict:
+    """Parse one NDJSON line from Ollama /api/chat with "stream": true.
+
+    Returns {"text": str|None, "done": bool}. Raises json.JSONDecodeError
+    on a garbled line and ValueError when Ollama reports an error.
+    """
+    line = line.strip()
+    if not line:
+        return {"text": None, "done": False}
+    data = json.loads(line)
+    if data.get("error"):
+        raise ValueError(str(data["error"]))
+    text = data.get("message", {}).get("content") or None
+    return {"text": text, "done": bool(data.get("done"))}
+
+
 def strip_think(text: str) -> str:
-    """Drop <think>...</think> reasoning blocks some local models emit."""
+    """Drop <think>...</think> reasoning blocks some local models emit.
+
+    One-shot counterpart of ThinkFilter (which handles streamed chunks).
+    """
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def _partial_tag_suffix(text: str, tag: str) -> int:
+    """Length of the longest suffix of text that is a proper prefix of tag."""
+    for size in range(min(len(tag) - 1, len(text)), 0, -1):
+        if tag.startswith(text[-size:]):
+            return size
+    return 0
+
+
+class ThinkFilter:
+    """strip_think for streams: drop <think>...</think> across chunk edges.
+
+    feed() returns the visible part of each chunk, holding back any tail
+    that might be the start of a split tag; flush() releases a held false
+    alarm once the stream ends. Leading whitespace before the first visible
+    text is swallowed so the bubble doesn't open with blank lines.
+    """
+
+    OPEN = "<think>"
+    CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._in_think = False
+        self._started = False
+
+    def _emit(self, visible: str) -> str:
+        if not self._started:
+            visible = visible.lstrip()
+        if visible:
+            self._started = True
+        return visible
+
+    def feed(self, chunk: str) -> str:
+        text = self._pending + chunk
+        self._pending = ""
+        out: list[str] = []
+        while text:
+            tag = self.CLOSE if self._in_think else self.OPEN
+            index = text.find(tag)
+            if index == -1:
+                keep = _partial_tag_suffix(text, tag)
+                if keep:
+                    self._pending = text[-keep:]
+                    text = text[:-keep]
+                if not self._in_think:
+                    out.append(text)
+                text = ""
+            elif self._in_think:
+                self._in_think = False
+                text = text[index + len(tag) :]
+            else:
+                out.append(text[:index])
+                self._in_think = True
+                text = text[index + len(tag) :]
+        return self._emit("".join(out))
+
+    def flush(self) -> str:
+        visible = "" if self._in_think else self._pending
+        self._pending = ""
+        return self._emit(visible)
 
 
 def resolve_ollama_model(configured: str, installed: list[str]) -> str:
@@ -251,44 +421,91 @@ def load_transcripts(library: Path) -> dict[str, str]:
     return transcripts
 
 
-# --- the two brains -----------------------------------------------------
+# --- the two brains (both stream) ----------------------------------------
+
+STREAM_BROKE = "the stream broke off here. Ask again and I'll pick it back up."
 
 
-def ask_claude(messages: list[dict], state: dict) -> str:
-    session_id = state.get("session_id")
-    prompt = messages[-1]["content"] if session_id else history_prompt(messages)
-    cmd = build_claude_cmd(prompt, session_id)
+def _spawn_claude(prompt: str, session_id: str | None) -> subprocess.Popen:
     try:
-        proc = subprocess.run(
-            cmd,
+        return subprocess.Popen(
+            build_claude_cmd(prompt, session_id),
             cwd=REPO_ROOT,
             stdin=subprocess.DEVNULL,  # claude -p waits on a dangling stdin pipe
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
-            timeout=CLAUDE_TIMEOUT,
+            bufsize=1,  # line-buffered: one stream-json event per readline
         )
     except FileNotFoundError:
         raise BrainError(503, "The claude CLI is not on PATH — install Claude Code.")
-    except subprocess.TimeoutExpired:
-        raise BrainError(504, "The guide took too long to answer — try again.")
-    if proc.returncode != 0:
-        if session_id:  # resume proved flaky: retry fresh with folded history
-            state["session_id"] = None
-            return ask_claude(messages, state)
-        raise BrainError(
-            502, f"claude exited with {proc.returncode}: {proc.stderr.strip()[:300]}"
-        )
+
+
+def _drain_claude(proc: subprocess.Popen, state: dict):
+    """Yield text deltas from a running claude stream-json process.
+
+    Generator-returns (emitted_any_text, finished_cleanly). A single
+    garbled line is skipped; an is_error result or a bad exit just flips
+    the flag — the caller decides how to apologise.
+    """
+    emitted, finished = False, False
+    watchdog = threading.Timer(CLAUDE_TIMEOUT, proc.kill)
+    watchdog.start()
     try:
-        reply, new_session = parse_claude_output(proc.stdout)
-    except json.JSONDecodeError:
-        raise BrainError(502, "claude returned something that was not JSON.")
-    except ValueError as error:
-        raise BrainError(502, f"claude reported an error: {error}")
-    if new_session:
-        state["session_id"] = new_session
-    if not reply:
-        raise BrainError(502, "claude returned an empty reply.")
-    return reply
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            try:
+                event = parse_stream_line(line)
+            except json.JSONDecodeError:
+                continue  # one garbled line shouldn't sink the reply
+            except ValueError:
+                break  # the CLI reported an error result
+            if event["session_id"]:
+                state["session_id"] = event["session_id"]
+            if event["text"]:
+                emitted = True
+                yield event["text"]
+            if event["done"]:
+                finished = True
+        proc.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        watchdog.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    return emitted, finished and proc.returncode == 0
+
+
+def stream_claude(messages: list[dict], state: dict):
+    """Start a claude turn; return a generator of reply-text chunks.
+
+    Raises BrainError before any output if the CLI can't even start.
+    Mid-stream failures degrade gracefully: a resume that dies before
+    producing text is retried fresh with folded history (resume has proved
+    flaky); anything else keeps what arrived and appends one apology.
+    """
+    session_id = state.get("session_id")
+    prompt = messages[-1]["content"] if session_id else history_prompt(messages)
+    proc = _spawn_claude(prompt, session_id)
+
+    def generate():
+        emitted, ok = yield from _drain_claude(proc, state)
+        if not ok and not emitted and session_id:
+            state["session_id"] = None  # retry fresh with folded history
+            try:
+                retry = _spawn_claude(history_prompt(messages), None)
+            except BrainError as error:
+                yield f"The guide is out of reach — {error.message}"
+                return
+            emitted, ok = yield from _drain_claude(retry, state)
+        if not ok:
+            yield ("\n\n— " if emitted else "The guide is out of reach — ") + STREAM_BROKE
+        elif not emitted:
+            yield "The guide said nothing this time — try asking again."
+
+    return generate()
 
 
 def _ollama_json(path: str, payload: dict | None = None, timeout: int = 240) -> dict:
@@ -301,7 +518,14 @@ def _ollama_json(path: str, payload: dict | None = None, timeout: int = 240) -> 
         return json.loads(response.read())
 
 
-def ask_ollama(messages: list[dict], configured_model: str, library: Path) -> str:
+def stream_ollama(messages: list[dict], configured_model: str, library: Path):
+    """Start an Ollama turn; return a generator of reply-text chunks.
+
+    Pre-flight (reachability, model resolution, opening the streamed POST)
+    raises BrainError so the endpoint can still answer with a proper JSON
+    error; once streaming, failures keep what arrived plus one apology.
+    <think> blocks are filtered out on the way through (ThinkFilter).
+    """
     try:
         tags = _ollama_json("/api/tags", timeout=5)
     except (urllib.error.URLError, OSError, TimeoutError):
@@ -325,19 +549,47 @@ def ask_ollama(messages: list[dict], configured_model: str, library: Path) -> st
     study = study_path.read_text() if study_path.exists() else ""
     index = (library / "INDEX.md").read_text()
     chunks = pick_chunks(messages[-1]["content"], load_transcripts(library), k=4)
-    payload = build_ollama_payload(trim_history(messages), model, study, index, chunks)
-    try:
-        data = _ollama_json("/api/chat", payload)
+    payload = build_ollama_payload(
+        trim_history(messages), model, study, index, chunks, stream=True
+    )
+    request = urllib.request.Request(
+        OLLAMA_URL + "/api/chat",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:  # urlopen returns once headers arrive; the body then streams NDJSON
+        response = urllib.request.urlopen(request, timeout=120)
     except (urllib.error.URLError, OSError, TimeoutError):
         raise BrainError(
             503,
             "Ollama stopped answering mid-conversation — "
             "check `ollama serve` and try again.",
         )
-    reply = strip_think(data.get("message", {}).get("content", ""))
-    if not reply:
-        raise BrainError(502, f"Ollama ({model}) returned an empty reply.")
-    return reply
+
+    def generate():
+        think = ThinkFilter()
+        emitted = False
+        try:
+            with response:
+                for raw in response:  # one NDJSON object per line
+                    parsed = parse_ollama_stream_line(raw.decode("utf-8", "replace"))
+                    if parsed["text"]:
+                        visible = think.feed(parsed["text"])
+                        if visible:
+                            emitted = True
+                            yield visible
+                    if parsed["done"]:
+                        break
+            tail = think.flush()
+            if tail:
+                emitted = True
+                yield tail
+            if not emitted:
+                yield f"Ollama ({model}) returned an empty reply — try again."
+        except (json.JSONDecodeError, ValueError, urllib.error.URLError, OSError, TimeoutError):
+            yield ("\n\n— " if emitted else "The guide is out of reach — ") + STREAM_BROKE
+
+    return generate()
 
 
 # --- the server ---------------------------------------------------------
@@ -345,7 +597,7 @@ def ask_ollama(messages: list[dict], configured_model: str, library: Path) -> st
 
 def create_app(brain: str, ollama_model: str):
     from fastapi import FastAPI
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
 
     shelf = rebuild_shelf(LIBRARY)
@@ -382,12 +634,17 @@ def create_app(brain: str, ollama_model: str):
             )
         try:
             if brain == "claude":
-                reply = ask_claude(messages, state)
+                stream = stream_claude(messages, state)
             else:
-                reply = ask_ollama(messages, ollama_model, LIBRARY)
+                stream = stream_ollama(messages, ollama_model, LIBRARY)
         except BrainError as error:
             return JSONResponse({"error": error.message}, status_code=error.status)
-        return {"reply": reply, "brain": brain}
+        # Chunked plain text: each chunk is a raw reply fragment (no framing).
+        return StreamingResponse(
+            stream,
+            media_type="text/plain; charset=utf-8",
+            headers={"X-Brain": brain},
+        )
 
     # Mounted last so /, /health, /api/chat win; everything else — primers,
     # talk audio, transcripts — is served straight from library/ with Range
