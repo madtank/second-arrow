@@ -18,6 +18,26 @@ your desktop and later host as a responsive web app / PWA.
 
 ---
 
+## The study space
+
+These days this repo works primarily as a **personal study space**, driven by
+Claude Code sessions. The guide lives in `CLAUDE.md` — open a session and it
+picks up where the last one left off.
+
+- **Real talks** are ingested into a private, gitignored `library/` with
+  `tools/fetch_talk.py` (YouTube captions when available, local Whisper
+  transcription otherwise).
+- **Primers and reflections** can be spoken aloud with `tools/speak.py`
+  (local Kokoro TTS, with a `say` fallback) — a short spoken introduction
+  before listening to a talk, eyes closed.
+- **Curated clusters** of talks by theme live in `curriculum/`.
+- Study memory (`STUDY.md`) and the journal stay private and out of git.
+
+The web app described below still runs fine, but it's a dormant MVP — the
+center of gravity has moved to the study sessions.
+
+---
+
 ## What's inside
 
 Three main areas:
