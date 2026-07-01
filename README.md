@@ -31,6 +31,9 @@ picks up where the last one left off.
   (local Kokoro TTS, with a `say` fallback) — a short spoken introduction
   before listening to a talk, eyes closed.
 - **Curated clusters** of talks by theme live in `curriculum/`.
+- **A local shelf page** (`tools/build_shelf.py`) renders the library as a
+  calm, self-contained `library/shelf.html` — primers, players, and notes,
+  clickable from the browser.
 - Study memory (`STUDY.md`) and the journal stay private and out of git.
 
 The web app described below still runs fine, but it's a dormant MVP — the
