@@ -148,6 +148,20 @@ phone), revisit with real usage behind the decision.
    generate a spoken primer, run a full study session, write the first real
    journal entry.
 
+## Future lanes (decided 2026-07-01, not yet scheduled)
+
+- **Study shelf page** — DONE: `tools/build_shelf.py` renders a private,
+  clickable `library/shelf.html` (talk cards, primer players, notes) so the
+  library is browsable outside a terminal.
+- **Offline guide via local models (Ollama)** — the remaining cloud piece is
+  the conversation itself. Eventually: a local model (via Ollama) reading the
+  same transcripts, `STUDY.md`, and notes, chatting inside the shelf page so
+  study works fully offline. Honest constraint to design around: local models
+  are weaker discussion partners, so the offline guide should lean on
+  retrieval (quote the transcript, surface notes) more than free-form
+  teaching. Everything else is already local: Whisper transcription, Kokoro
+  TTS, the library and journal on disk.
+
 ## Boundaries
 
 - Private data (`library/`, `journal/`, `STUDY.md`, `output/`) stays
