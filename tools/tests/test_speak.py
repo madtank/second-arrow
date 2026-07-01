@@ -28,6 +28,19 @@ def test_prepare_text_drops_code_blocks():
     assert speak.prepare_text(md) == "before. after"
 
 
+def test_chunk_text_splits_on_sentence_boundaries_within_limit():
+    text = "One two. Three four. Five six."
+    chunks = speak.chunk_text(text, max_chars=20)
+    assert chunks == ["One two. Three four.", "Five six."]
+    assert all(len(chunk) <= 20 for chunk in chunks)
+    assert " ".join(chunks) == text
+
+
+def test_chunk_text_keeps_oversized_sentence_whole():
+    text = "This single sentence is much longer than the limit."
+    assert speak.chunk_text(text, max_chars=10) == [text]
+
+
 def test_say_command_builds_aiff_then_ffmpeg_conversion():
     cmds = speak.say_commands("hello world", Path("/tmp/out.mp3"))
     assert cmds[0][:2] == ["say", "-o"]

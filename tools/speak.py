@@ -50,6 +50,25 @@ def prepare_text(markdown: str) -> str:
     return " ".join(sentences).strip()
 
 
+def chunk_text(text: str, max_chars: int = 400) -> list[str]:
+    """Split text into sentence-boundary chunks of at most max_chars.
+
+    A single sentence longer than max_chars stays whole (its own chunk).
+    """
+    sentences = [s for s in re.split(r"(?<=[.!?;:])\s+", text.strip()) if s]
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if current and len(current) + 1 + len(sentence) > max_chars:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}" if current else sentence
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def say_commands(text: str, out_path: Path) -> list[list[str]]:
     aiff = str(out_path.with_suffix(".aiff"))
     return [
@@ -64,30 +83,85 @@ def speak_with_say(text: str, out_path: Path) -> None:
     out_path.with_suffix(".aiff").unlink(missing_ok=True)
 
 
-def speak_with_kokoro(text: str, out_path: Path, *, voice: str, speed: float) -> None:
-    from mlx_audio.tts.generate import generate_audio
+def _patch_kokoro_sinegen() -> None:
+    """Work around a length-rounding bug in mlx-audio's Kokoro port.
 
+    SineGen._f02sine round-trips f0 through interpolate() with
+    scale_factor=1/300 then 300; interpolate sizes its output with
+    ceil(length * scale_factor), and float error makes ceil overshoot by
+    one frame for many lengths, so the sine waves come back 300 samples
+    longer than uv and crash on broadcast ("Shapes (1,N,1) and (1,N+300,9)
+    cannot be broadcast"). Trim to the input length, which is what the
+    reference PyTorch implementation guarantees.
+    """
+    from mlx_audio.tts.models.kokoro import istftnet
+
+    if getattr(istftnet.SineGen, "_second_arrow_trim_patch", False):
+        return
+    original = istftnet.SineGen._f02sine
+
+    def _f02sine_trimmed(self, f0_values):
+        sines = original(self, f0_values)
+        return sines[:, : f0_values.shape[1], :]
+
+    istftnet.SineGen._f02sine = _f02sine_trimmed
+    istftnet.SineGen._second_arrow_trim_patch = True
+
+
+def speak_with_kokoro(text: str, out_path: Path, *, voice: str, speed: float) -> None:
+    import io
+    from contextlib import redirect_stdout
+
+    from mlx_audio.tts.generate import generate_audio
+    from mlx_audio.tts.utils import load_model
+
+    _patch_kokoro_sinegen()
+
+    # Kokoro's MLX istftnet crashes on long inputs (broadcast shape
+    # mismatch), so feed it small sentence chunks — one generate call per
+    # chunk, one wav per internal segment — and concatenate everything
+    # ourselves with ffmpeg's concat demuxer.
+    # generate_audio swallows its own exceptions (prints them and returns),
+    # so a crash can leave partial output. Scanning its captured stdout for
+    # error lines is what keeps a mid-chunk crash from becoming silently
+    # truncated audio.
+    model = load_model(model_path=KOKORO_MODEL)
     with tempfile.TemporaryDirectory() as tmp:
-        # With join_audio=True this writes a single <tmp>/speech.wav.
-        # generate_audio swallows its own exceptions (prints and returns),
-        # so the missing-file check below is the real failure detector.
-        generate_audio(
-            text=text,
-            model=KOKORO_MODEL,
-            voice=voice,
-            speed=speed,
-            output_path=tmp,
-            file_prefix="speech",
-            audio_format="wav",
-            join_audio=True,
-            verbose=False,
-        )
-        wav_files = sorted(Path(tmp).glob("speech*.wav"))
-        if not wav_files:
-            raise RuntimeError("Kokoro produced no audio output")
+        wav_files: list[Path] = []
+        for i, chunk in enumerate(chunk_text(text)):
+            prefix = f"chunk{i:03d}"
+            log = io.StringIO()
+            with redirect_stdout(log):
+                generate_audio(
+                    text=chunk,
+                    model=model,
+                    voice=voice,
+                    speed=speed,
+                    output_path=tmp,
+                    file_prefix=prefix,
+                    audio_format="wav",
+                    join_audio=False,
+                    verbose=False,
+                )
+            errors = [line for line in log.getvalue().splitlines() if "Error" in line]
+            if errors:
+                raise RuntimeError(f"Kokoro failed on chunk {i}: {errors[0]}")
+            chunk_wavs = sorted(
+                Path(tmp).glob(f"{prefix}_*.wav"),
+                key=lambda p: int(p.stem.rsplit("_", 1)[1]),
+            )
+            if not chunk_wavs:
+                raise RuntimeError(f"Kokoro produced no audio for chunk {i}")
+            wav_files.extend(chunk_wavs)
+        list_file = Path(tmp) / "concat.txt"
+        list_file.write_text("".join(f"file '{p}'\n" for p in wav_files), encoding="utf-8")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav_files[0]), str(out_path)],
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "concat", "-safe", "0", "-i", str(list_file),
+                str(out_path),
+            ],
             check=True,
         )
 
