@@ -55,6 +55,11 @@ cover/
 .superpowers/
 output/
 
+# Private study space: ingested talks, personal journal, guide memory
+library/
+journal/
+STUDY.md
+
 # Translations
 *.mo
 *.pot
