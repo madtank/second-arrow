@@ -15,6 +15,7 @@ Run with:
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 import urllib.parse
@@ -26,8 +27,18 @@ LIBRARY = Path("library")
 
 
 def slugify(value: str) -> str:
+    # Intentionally differs from transcribe_talk.slugify: no Path(value).stem,
+    # so titles containing dots keep their full text.
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower()
     return slug or "talk"
+
+
+def guess_title_from_filename(filename: str) -> str:
+    """Derive a talk title from an audio filename (mirrors transcribe_talk.guess_title)."""
+    stem = Path(filename).stem
+    title = re.sub(r"^\d{6}(?:\([^)]*\))?[_ -]*", "", stem)
+    title = title.replace("_", " ").replace("-", " ").strip().title()
+    return title or stem
 
 
 def classify_url(url: str) -> str:
@@ -196,7 +207,7 @@ def download_file(url: str, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "second-arrow-study/1.0"})
     with urllib.request.urlopen(request) as resp, open(dest, "wb") as out:
-        out.write(resp.read())
+        shutil.copyfileobj(resp, out)
     return dest
 
 
@@ -211,11 +222,15 @@ def transcribe(audio_path: Path, *, talk_dir: Path, title: str, teacher: str, so
         ],
         check=True,
     )
-    slug = slugify(title)
-    for ext in ("json", "md"):
-        produced = talk_dir / f"{slug}.{ext}"
-        if produced.exists():
-            produced.rename(talk_dir / f"transcript.{ext}")
+    # Rename whatever the subprocess actually wrote — transcribe_talk slugifies
+    # the title its own way, so recomputing the slug here can silently miss.
+    for pattern in ("*.json", "*.md"):
+        for produced in sorted(talk_dir.glob(pattern)):
+            if produced.name.startswith("transcript."):
+                continue
+            produced.rename(talk_dir / f"transcript{produced.suffix}")
+    if not (talk_dir / "transcript.md").exists():
+        raise SystemExit(f"Transcription produced no transcript.md in {talk_dir}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -267,7 +282,7 @@ def main() -> None:
         else:
             audio_url = args.url
         filename = Path(urllib.parse.urlparse(audio_url).path).name
-        title = args.title or re.sub(r"^\d{6}(?:\([^)]*\))?[_ -]*", "", Path(filename).stem).replace("_", " ").replace("-", " ").strip().title()
+        title = args.title or guess_title_from_filename(filename)
         teacher = args.teacher or "Unknown"
         slug = slugify(title)
         talk_dir = args.library / slug

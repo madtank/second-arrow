@@ -36,6 +36,11 @@ def test_find_audio_link_returns_none_when_absent():
     assert fetch_talk.find_audio_link("<p>no audio here</p>", "https://x.test/") is None
 
 
+def test_guess_title_from_filename_strips_date_prefix_and_extension():
+    assert fetch_talk.guess_title_from_filename("260612(short)_Patience.mp3") == "Patience"
+    assert fetch_talk.guess_title_from_filename("some-talk.mp3") == "Some Talk"
+
+
 def test_parse_vtt_strips_headers_timestamps_and_rolling_duplicates():
     vtt = """WEBVTT
 Kind: captions
