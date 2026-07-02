@@ -1012,6 +1012,62 @@ def test_resolve_session_rejects_bad_ids(tmp_path):
     assert excinfo.value.status == 400
 
 
+# --- episodes: rollover is an invisible seam ----------------------------------
+
+
+def test_should_rollover_only_after_the_idle_window():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+    assert serve_shelf.ROLLOVER_IDLE == 6 * 3600
+    # Fresh episode: continue.
+    assert not serve_shelf.should_rollover("2026-07-02T11:00:00+00:00", now)
+    # Just inside the window: continue; just past it: roll.
+    assert not serve_shelf.should_rollover("2026-07-02T06:00:01+00:00", now)
+    assert serve_shelf.should_rollover("2026-07-02T05:59:59+00:00", now)
+    assert serve_shelf.should_rollover("2026-06-30T12:00:00+00:00", now)
+    # A naive stamp is read as UTC rather than crashing.
+    assert serve_shelf.should_rollover("2026-07-01T00:00:00", now)
+    # Missing or garbled stamps never force a boundary.
+    assert not serve_shelf.should_rollover(None, now)
+    assert not serve_shelf.should_rollover("", now)
+    assert not serve_shelf.should_rollover("not-a-date", now)
+
+
+def test_resolve_session_with_rollover_rolls_only_default_continuation(tmp_path):
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+    _write_session(
+        tmp_path, "fresh", [("user", "hi")],
+        {"id": "fresh", "updated": "2026-07-02T11:30:00+00:00"},
+    )
+    _write_session(
+        tmp_path, "stale", [("user", "hi")],
+        {"id": "stale", "updated": "2026-07-01T08:00:00+00:00"},
+    )
+    resolve = serve_shelf.resolve_session_with_rollover
+    # A fresh current episode simply continues.
+    assert resolve(None, "fresh", tmp_path, now=now) == "fresh"
+    # A stale one quietly closes: a new id comes back (the caller's
+    # existing leave-summary trigger then fires for the old episode).
+    rolled = resolve(None, "stale", tmp_path, now=now)
+    assert rolled != "stale"
+    assert serve_shelf.SESSION_ID_RE.fullmatch(rolled)
+    # An EXPLICIT session request is honored even when stale — the aX
+    # bridge pins per-sender episodes and must never be rolled from
+    # under it.
+    assert resolve("stale", "fresh", tmp_path, now=now) == "stale"
+    # Explicit "new" still mints, as before.
+    assert resolve("new", "fresh", tmp_path, now=now) not in ("fresh", "stale")
+    # No current: the most recent stored episode is checked the same way
+    # (a restart after days away starts clean instead of resuming June).
+    assert resolve(None, None, tmp_path, now=now) == "fresh"
+    (tmp_path / "fresh.jsonl").unlink()
+    (tmp_path / "fresh.json").unlink()
+    assert resolve(None, None, tmp_path, now=now) != "stale"
+
+
 # --- session summaries -------------------------------------------------------
 
 

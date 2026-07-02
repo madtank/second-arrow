@@ -16,17 +16,22 @@ Routes:
                     "model"?} -> streamed reply. "brain" is optional and
                     per-request (the panel's toggle); it falls back to the
                     server's --brain default, unknown names are a 400.
-                    "session" picks the conversation ("new" starts fresh —
-                    new claude thread too; default: the current/most-recent
-                    one). "view" is the talk slug open on the shelf, or
-                    null — it becomes ambient context (see below). "model"
-                    (ollama brain only) picks which installed local model
-                    answers — validated against /api/tags (unknown → 400),
+                    "session" picks the episode ("new" starts fresh — new
+                    claude thread too; default: the current one, which may
+                    quietly ROLL OVER onto a fresh episode after
+                    ROLLOVER_IDLE of silence — sessions are invisible
+                    compaction now, one continuous guide as far as the
+                    user can tell; explicit ids, e.g. the aX bridge's
+                    per-sender episodes, are never rolled). "view" is the
+                    talk slug open on the shelf, or null — it becomes
+                    ambient context (see below). "model" (ollama brain
+                    only) picks which installed local model answers —
+                    validated against /api/tags (unknown → 400),
                     remembered in state.json as the default thereafter.
-                    The X-Session response header names the session that
+                    The X-Session response header names the episode that
                     recorded the turn.
     GET  /api/sessions  {"sessions": [{id,title,summary,updated}...]}, newest
-                    first, for the sidebar's Sessions list.
+                    first — kept for tooling; the panel no longer shows it.
     GET  /api/models  installed Ollama models for the panel's picker:
                     {"models": [{name, tools, size_gb}...], "current": name}
                     (tools per /api/show capabilities; 503 when Ollama is
@@ -131,8 +136,9 @@ STATE_PATH = CHAT_DIR / "state.json"
 SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # no dot-files, no slashes
 SUMMARY_TIMEOUT = 120  # seconds for the one-shot leave-summary call
 SEARCH_LIMIT = 8  # sessions returned by search_sessions
-SESSION_TITLE_MAX = 80  # caps for update_session_summary (sidebar-sized)
+SESSION_TITLE_MAX = 80  # caps for update_session_summary (recall-sized)
 SESSION_SUMMARY_MAX = 300
+ROLLOVER_IDLE = 6 * 3600  # seconds idle before an episode quietly closes
 
 # Interactive artifacts: guide-written single-file HTML pages, rendered
 # behind two walls — a sandboxed iframe (allow-scripts only, so a null
@@ -1306,6 +1312,47 @@ def resolve_session(requested, current: str | None, sessions_dir: Path) -> str:
     return requested
 
 
+def should_rollover(updated, now, idle_seconds: int = ROLLOVER_IDLE) -> bool:
+    """Has this episode been idle long enough to quietly close?
+
+    `updated` is the sidecar's ISO stamp (naive reads as UTC). Missing or
+    garbled stamps never force a boundary — when in doubt, continue.
+    """
+    if not updated or not isinstance(updated, str):
+        return False
+    try:
+        last = datetime.fromisoformat(updated)
+    except ValueError:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (now - last).total_seconds() > idle_seconds
+
+
+def resolve_session_with_rollover(
+    requested,
+    current: str | None,
+    sessions_dir: Path,
+    idle_seconds: int = ROLLOVER_IDLE,
+    now=None,
+) -> str:
+    """resolve_session, plus the invisible seam.
+
+    A DEFAULT continuation (no explicit session in the request) onto an
+    episode idle for more than idle_seconds mints a fresh id instead —
+    the caller's existing leave-summary trigger then closes the old one,
+    and the user never sees a boundary. Explicit ids ("new" included, and
+    the aX bridge's per-sender episodes) are always honored as-is.
+    """
+    sid = resolve_session(requested, current, sessions_dir)
+    if requested not in (None, ""):
+        return sid
+    meta = load_session_meta(session_meta_path(sessions_dir, sid))
+    if should_rollover(meta.get("updated"), now or datetime.now(timezone.utc), idle_seconds):
+        return new_session_id()
+    return sid
+
+
 # --- leave-summaries ---------------------------------------------------------
 
 
@@ -1986,7 +2033,12 @@ def create_app(brain: str, ollama_model: str):
             )
         view = body.get("view") if isinstance(body.get("view"), str) else None
         try:
-            sid = resolve_session(body.get("session"), current["sid"], SESSIONS_DIR)
+            # Default continuations may quietly roll onto a fresh episode
+            # after a long idle gap; explicit ids never do. The rollover
+            # falls through to the same leave-summary trigger below.
+            sid = resolve_session_with_rollover(
+                body.get("session"), current["sid"], SESSIONS_DIR
+            )
             chosen = resolve_brain(body.get("brain"), brain, probe_brains())
             model = ollama_model
             if chosen == "ollama":

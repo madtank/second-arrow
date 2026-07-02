@@ -39,6 +39,10 @@ discuss together → reflect → remember*.
 - **AI offloads recall, not understanding.** (The Karpathy constraint.) The
   guide remembers, organizes, tags, and connects; understanding is built by
   revisiting ideas through stories, talks, and reflection.
+- **HTML for everything human-facing; markdown is the machine layer.**
+  Markdown/text is the source of truth (retrieval, notes data); anything
+  composed for the user's eyes defaults to rendered HTML on the shelf —
+  raw .md links remain an escape hatch only.
 
 ## Layout
 
@@ -276,6 +280,21 @@ phone), revisit with real usage behind the decision.
   was merged (bodies were byte-identical; the stray dir removed) and
   all four entries normalized; `--backfill-thumbnails` /
   `--backfill-transcripts` filled the three YouTube talks.
+- **Iter 10 — DONE: one guide, many rooms.** The model shift, in two
+  sentences: the guide is ONE continuous presence and sessions are now
+  invisible infrastructure — episodes roll over automatically after
+  ~6h of silence (summarized by the existing leave-summary path), so
+  the user never sees a boundary, names one, or starts one. Talks are
+  rooms, home is the intro room ("Begin here"), and the curriculum got
+  a room of its own — the sidebar Sessions list and "new conversation"
+  button are gone. Alongside: the "HTML for everything human-facing;
+  markdown is the machine layer" principle landed in the contracts;
+  md_to_html gained blockquotes and numbered lists; the redundant
+  "open on YouTube" anchor was removed (the player's own logo link
+  covers it); the chat input is pinned to the viewport bottom with the
+  message list scrolling independently; and typing became intent —
+  idle keystrokes (or `/`) focus the chat without ever moving the
+  viewport, Escape hands the keys back to the page.
 
 ## Boundaries
 

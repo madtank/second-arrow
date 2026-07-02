@@ -122,32 +122,57 @@ def reach_lines(text: str) -> dict[str, str]:
 
 
 def md_to_html(text: str) -> str:
-    """Markdown-lite: #–### headings, - lists, **bold**, paragraphs. Escapes HTML."""
+    """Markdown-lite for wherever humans read: #–### headings, dashed and
+    numbered lists, > blockquotes, **bold**, paragraphs. Escapes HTML —
+    markdown is the machine layer; this is its human rendering.
+    """
     out: list[str] = []
-    in_list = False
+    state = {"ul": False, "ol": False, "quote": False}
+    closers = {"ul": "</ul>", "ol": "</ol>", "quote": "</blockquote>"}
+
+    def close(*names: str) -> None:
+        for name in names:
+            if state[name]:
+                out.append(closers[name])
+                state[name] = False
+
+    def inline(content: str) -> str:
+        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escape(content))
+
     for raw in text.splitlines():
-        line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escape(raw.strip()))
+        line = raw.strip()
         if not line:
-            if in_list:
-                out.append("</ul>")
-                in_list = False
+            close("ul", "ol", "quote")
             continue
         heading = re.match(r"(#{1,3}) (.+)", line)
-        if heading and in_list:
-            out.append("</ul>")
-            in_list = False
         if heading:
-            level = len(heading.group(1)) + 2  # keep card headings below the page h1/h2
-            out.append(f"<h{level}>{heading.group(2)}</h{level}>")
+            close("ul", "ol", "quote")
+            level = len(heading.group(1)) + 2  # keep below the page h1/h2
+            out.append(f"<h{level}>{inline(heading.group(2))}</h{level}>")
         elif line.startswith("- "):
-            if not in_list:
+            close("ol", "quote")
+            if not state["ul"]:
                 out.append("<ul>")
-                in_list = True
-            out.append(f"<li>{line[2:]}</li>")
+                state["ul"] = True
+            out.append(f"<li>{inline(line[2:])}</li>")
+        elif re.match(r"\d+\. ", line):
+            close("ul", "quote")
+            if not state["ol"]:
+                out.append("<ol>")
+                state["ol"] = True
+            out.append(f"<li>{inline(re.sub(r'^\d+\. ', '', line))}</li>")
+        elif line == ">" or line.startswith("> "):
+            close("ul", "ol")
+            if not state["quote"]:
+                out.append("<blockquote>")
+                state["quote"] = True
+            content = line[2:].strip()
+            if content:
+                out.append(f"<p>{inline(content)}</p>")
         else:
-            out.append(f"<p>{line}</p>")
-    if in_list:
-        out.append("</ul>")
+            close("ul", "ol", "quote")
+            out.append(f"<p>{inline(line)}</p>")
+    close("ul", "ol", "quote")
     return "\n".join(out)
 
 
@@ -297,15 +322,11 @@ STYLE = """
   .nav-unfetched { padding: 0.45rem 0.6rem; color: #a99e8e;
                    font-size: 0.95rem; line-height: 1.35; cursor: default; }
   .side-muted { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
-  .session-item { display: block; width: 100%; text-align: left; font: inherit;
-                  color: #5a4d3a; background: none; border: none;
-                  border-radius: 8px; padding: 0.45rem 0.6rem; cursor: pointer; }
-  .session-item:hover { background: #efe7d9; }
-  .session-item.session-active { background: #efe7d9; }
-  .session-title { display: block; font-size: 0.92rem; line-height: 1.35; }
-  .session-summary { display: block; color: #a99e8e; font-size: 0.8rem;
-                     line-height: 1.3; }
-  #chat-new { margin-left: auto; }
+  .begin-link { display: inline-block; margin: 1rem 0 0; color: #6d5f4b;
+                font-size: 0.92rem; text-decoration: none;
+                border-bottom: 1px solid #d8cbb4; }
+  .how-lines { color: #5a4d3a; font-size: 0.95rem; }
+  .how-lines p { margin: 0.45rem 0; }
   #sidebar footer { margin-top: 2.5rem; }
   #sidebar-toggle { display: none; position: fixed; top: 0.7rem; left: 0.7rem;
                     z-index: 3; font: inherit; color: #5a4d3a;
@@ -346,7 +367,6 @@ STYLE = """
   .yt-embed { margin-top: 1rem; }
   .yt-play { font: inherit; color: #5a4d3a; background: #efe7d9; border: none;
              border-radius: 8px; padding: 0.5rem 1rem; cursor: pointer; }
-  .yt-link { margin-left: 0.75rem; font-size: 0.85rem; color: #a99e8e; }
   .yt-frame { aspect-ratio: 16 / 9; }
   .yt-frame iframe { width: 100%; height: 100%; border: 0;
                      border-radius: 8px; }
@@ -369,6 +389,12 @@ STYLE = """
   .seg:hover { background: #f2ece1; }
   .seg.active { background: #efe7d9; }
   .seg-time { color: #a99e8e; font-size: 0.8rem; margin-right: 0.4rem; }
+  .cluster { border-top: 1px solid #f0e9dd; margin-top: 1.25rem;
+             padding-top: 0.75rem; }
+  .cur-onshelf { color: #6d5f4b; }
+  .cur-hint { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
+  blockquote { margin: 0.75rem 0 0.75rem 0.25rem; padding: 0.1rem 0 0.1rem 0.9rem;
+               border-left: 3px solid #d8cbb4; color: #6d5f4b; }
   .artifact-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
   .artifact-item { margin: 0.75rem 0; }
   .artifact-name { color: #6d5f4b; font-size: 0.95rem; }
@@ -391,8 +417,10 @@ STYLE = """
            border-top: 1px solid #e8e0d3; padding-top: 1rem; }
   code { background: #f2ece1; padding: 0.1em 0.35em; border-radius: 4px;
          font-size: 0.85em; }
-  #chat-messages { height: 320px; overflow-y: auto; padding: 0.25rem 0;
-                   border-top: 1px solid #f0e9dd; }
+  #guide-chat { position: sticky; bottom: 0; z-index: 2; margin-bottom: 0;
+                box-shadow: 0 -8px 20px rgba(60, 56, 51, 0.07); }
+  #chat-messages { max-height: 38vh; min-height: 5rem; overflow-y: auto;
+                   padding: 0.25rem 0; border-top: 1px solid #f0e9dd; }
   .chat-msg { white-space: pre-wrap; margin: 0.6rem 0; padding: 0.5rem 0.8rem;
               border-radius: 8px; font-size: 0.95rem; }
   .chat-user { background: #efe7d9; margin-left: 2.5rem; }
@@ -434,7 +462,6 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 <button type="button" class="brain-pill" data-brain="claude">claude · deep</button>
 <button type="button" class="brain-pill" data-brain="ollama">ollama · offline</button>
 <select id="chat-model" hidden></select>
-<button type="button" class="brain-pill" id="chat-new">new conversation</button>
 </p>
 <div id="chat-messages"></div>
 <form id="chat-form">
@@ -451,10 +478,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
   var input = document.getElementById("chat-input");
   var send = document.getElementById("chat-send");
   var pills = document.querySelectorAll("#chat-brain .brain-pill[data-brain]");
-  var newButton = document.getElementById("chat-new");
   var modelSelect = document.getElementById("chat-model");
-  var sessionsSection = document.getElementById("sessions-section");
-  var sessionList = document.getElementById("session-list");
   var history = [];
   var brain = null; // which brain the next message goes to (/health default)
   var session = null; // which conversation the next message continues
@@ -485,39 +509,6 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
   function clearMessages() {
     while (list.firstChild) list.removeChild(list.firstChild);
     history.length = 0;
-  }
-
-  // The sidebar's Sessions list: title + summary per stored conversation,
-  // textContent only. Clicking one loads its turns and continues it.
-  function renderSessions(sessions) {
-    while (sessionList.firstChild) sessionList.removeChild(sessionList.firstChild);
-    sessions.forEach(function (item) {
-      var button = document.createElement("button");
-      button.type = "button";
-      button.className = "session-item"
-        + (item.id === session ? " session-active" : "");
-      var title = document.createElement("span");
-      title.className = "session-title";
-      title.textContent = item.title || "Conversation";
-      button.appendChild(title);
-      if (item.summary) {
-        var summary = document.createElement("span");
-        summary.className = "session-summary";
-        summary.textContent = item.summary; // model-written: stays inert text
-        button.appendChild(summary);
-      }
-      button.addEventListener("click", function () {
-        session = item.id;
-        restoreHistory(item.id);
-      });
-      sessionList.appendChild(button);
-    });
-  }
-
-  function loadSessions() {
-    fetch("/api/sessions").then(function (r) { return r.json(); }).then(function (data) {
-      renderSessions(data.sessions || []);
-    }).catch(function () { /* an older server has no /api/sessions */ });
   }
 
   // The local-model picker: visible only while the ollama pill is active
@@ -597,6 +588,9 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     if (rest) el.appendChild(document.createTextNode(rest));
   }
 
+  // One continuous guide: on load, the current episode's recent turns
+  // come back and the conversation simply continues — episodes are the
+  // server's invisible memory compaction, never a visible boundary.
   function restoreHistory(sid) {
     var url = "/api/history"
       + (sid ? "?session=" + encodeURIComponent(sid) : "");
@@ -609,7 +603,6 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
         if (turn.role === "assistant") renderRich(div, turn.content);
         history.push({ role: turn.role, content: turn.content });
       });
-      loadSessions(); // re-render so the open session is highlighted
     }).catch(function () { /* an older server has no /api/history */ });
   }
 
@@ -635,19 +628,10 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     });
     markActive();
     panel.hidden = false;
-    sessionsSection.hidden = false; // served mode: the sidebar list wakes up
-    restoreHistory(); // the current session comes back after a reload
+    restoreHistory(); // the conversation continues across reloads
     loadModels(); // fill the local-model picker (served mode only)
     mountArtifacts(); // artifact links become sandboxed live views
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
-
-  newButton.addEventListener("click", function () {
-    session = "new"; // the next message starts a fresh session (and thread)
-    clearMessages();
-    add("system", "— new conversation —");
-    loadSessions();
-    input.focus();
-  });
 
   form.addEventListener("submit", function (event) {
     event.preventDefault();
@@ -709,13 +693,12 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       }
       renderRich(pending, reply); // bubble completed: dress the markdown
       history.push({ role: "assistant", content: reply });
-      loadSessions(); // recency order (and any fresh summaries) shift
     }).catch(function (error) {
       pending.classList.remove("chat-thinking");
       pending.textContent = "The guide is out of reach — " + error.message;
     }).finally(function () {
       send.disabled = false;
-      input.focus();
+      input.focus({ preventScroll: true });
     });
   });
 
@@ -723,6 +706,30 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       form.requestSubmit();
+    }
+    if (event.key === "Escape") {
+      input.blur(); // keys go back to the page: space scrolls, players work
+    }
+  });
+
+  // typing is intent, never steal: a printable key pressed while nothing
+  // else owns the keyboard lands in the guide's textarea. "/" focuses
+  // without inserting itself. Anything focusable — inputs, selects, the
+  // players, the sandboxed learning tools (their own windows entirely) —
+  // keeps its keys; space stays with the page for scrolling.
+  document.addEventListener("keydown", function (event) {
+    if (panel.hidden || event.metaKey || event.ctrlKey || event.altKey) return;
+    var target = event.target;
+    if (target !== document.body && target !== document.documentElement) return;
+    if (event.key === "/") {
+      event.preventDefault(); // focus without the slash
+      input.focus({ preventScroll: true });
+      return;
+    }
+    if (event.key.length === 1 && event.key !== " ") {
+      // Never move the viewport: the text lands in the pinned input,
+      // visible peripherally; the user keeps reading what they read.
+      input.focus({ preventScroll: true });
     }
   });
 })();
@@ -746,7 +753,9 @@ LAYOUT_SCRIPT = """<script>
 
   function show() {
     var hash = location.hash || "#home";
-    var id = hash.indexOf("#talk/") === 0 ? "talk-" + hash.slice(6) : "view-home";
+    var id = "view-home";
+    if (hash.indexOf("#talk/") === 0) id = "talk-" + hash.slice(6);
+    else if (hash === "#curriculum") id = "view-curriculum";
     if (!document.getElementById(id)) id = "view-home"; // unknown hash: go home
     views.forEach(function (view) {
       view.classList.toggle("active", view.id === id);
@@ -782,17 +791,6 @@ LAYOUT_SCRIPT = """<script>
       if (duration && duration - t < 15) localStorage.removeItem(posKey(slug));
       else if (t > 1) localStorage.setItem(posKey(slug), String(Math.floor(t)));
     } catch (e) { /* storage blocked: resume is a nicety */ }
-    // Keep the external link honest: it jumps to where you are.
-    var holder = document.querySelector('.yt-embed[data-slug="' + slug + '"]');
-    var link = holder && holder.querySelector(".yt-link");
-    if (link) {
-      var base = link.getAttribute("data-href") || link.getAttribute("href");
-      link.setAttribute("data-href", base);
-      var at = Math.floor(loadPos(slug));
-      link.setAttribute("href", at > 0
-        ? base + (base.indexOf("?") >= 0 ? "&" : "?") + "t=" + at + "s"
-        : base);
-    }
   }
 
   // --- the transcript player: click a segment, be there -----------------
@@ -969,11 +967,11 @@ def render_card(talk: dict, files: dict, reach: str | None) -> str:
                 )
             else:
                 button = '<button type="button" class="yt-play">Play here ▸</button>'
+            # No separate "open on YouTube" anchor: the embedded
+            # player's own logo link already covers that need.
             parts.append(
                 f'<div class="yt-embed" data-embed="{escape(embed)}" '
-                f'data-slug="{escape(slug)}">\n{button}\n'
-                f'<a class="yt-link" href="{escape(source)}" target="_blank" '
-                'rel="noopener">open on YouTube ↗</a>\n</div>'
+                f'data-slug="{escape(slug)}">\n{button}\n</div>'
             )
         else:
             parts.append(
@@ -1023,6 +1021,69 @@ def render_nav(
     return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>"
 
 
+_URL_IN_HTML = re.compile(r"https?://[^\s<]+")
+
+
+def _link_curriculum_urls(html: str, by_source: dict[str, str]) -> str:
+    """Turn bare curriculum URLs into calm links.
+
+    A URL whose talk is already in the library becomes an in-page
+    "on your shelf →" link; anything else keeps an external (noopener)
+    link plus the standing invitation to ask the guide.
+    """
+
+    def swap(match: re.Match) -> str:
+        raw = match.group(0)
+        trimmed = raw.rstrip(".,;:)")
+        trailing = raw[len(trimmed):]
+        url = trimmed.replace("&amp;", "&")
+        slug = by_source.get(youtube_embed_url(url) or url)
+        if slug:
+            return (
+                f'<a class="cur-onshelf" href="#talk/{escape(slug)}">on your shelf &rarr;</a>'
+                + trailing
+            )
+        return (
+            f'<a href="{trimmed}" target="_blank" rel="noopener">source ↗</a> '
+            '<span class="cur-hint">ask the guide to fetch it</span>' + trailing
+        )
+
+    return _URL_IN_HTML.sub(swap, html)
+
+
+def render_curriculum(curriculum: Path, talks: list[dict]) -> str:
+    """The curriculum room: committed clusters rendered first-party.
+
+    curriculum/*.md is trusted, committed content — md_to_html (escaped)
+    with the calm styling, no sandbox needed. Returns "" when there is
+    nothing to show, so the room simply doesn't exist yet.
+    """
+    files = [
+        path
+        for path in (sorted(curriculum.glob("*.md")) if curriculum.is_dir() else [])
+        if path.name.lower() != "readme.md"
+    ]
+    if not files:
+        return ""
+    by_source: dict[str, str] = {}
+    for talk in talks:
+        source = talk.get("source")
+        if source:
+            by_source[youtube_embed_url(source) or source] = talk["slug"]
+    clusters = "\n".join(
+        f'<section class="cluster">\n'
+        f"{_link_curriculum_urls(md_to_html(path.read_text()), by_source)}\n</section>"
+        for path in files
+    )
+    return (
+        '<section class="card view" id="view-curriculum">\n'
+        "<h2>Curriculum</h2>\n"
+        '<p class="meta">The road ahead, cluster by cluster. Anything not yet '
+        "on the shelf, the guide can fetch.</p>\n"
+        f"{clusters}\n</section>"
+    )
+
+
 def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     reach = reach or {}
     study_path = library.parent / "STUDY.md"
@@ -1031,6 +1092,12 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     path_strip = render_path_strip(path)  # the home view's small summary
     talks = parse_index((library / "INDEX.md").read_text())
     states, unfetched = talk_states(path, talks)
+    curriculum_view = render_curriculum(library.parent / "curriculum", talks)
+    curriculum_link = (
+        '\n<a class="begin-link" href="#curriculum">curriculum</a>'
+        if curriculum_view
+        else ""
+    )
     cards = []
     for talk in talks:
         talk_dir = library / talk["slug"]
@@ -1116,12 +1183,9 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <nav id="sidebar">
 <h1>Second Arrow</h1>
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
+<a class="begin-link" href="#home">begin here</a>{curriculum_link}
 <h2>Talks</h2>
 {render_nav(talks, states, unfetched)}
-<div id="sessions-section" hidden>
-<h2>Sessions</h2>
-<div id="session-list"></div>
-</div>
 <footer>
 Private — generated from your library.
 Rebuild: <code>uv run tools/build_shelf.py</code>
@@ -1130,12 +1194,19 @@ Rebuild: <code>uv run tools/build_shelf.py</code>
 <main>
 <div id="views">
 <section class="card view" id="view-home">
-<h2>Study shelf</h2>
+<h2>Begin here</h2>
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
-{path_strip}
-<p>When you're ready, pick a talk from the sidebar, or talk to the guide
-below.</p>{empty_note}
+<div class="how-lines">
+<p>Pick a talk from the sidebar — the guide comes with you.</p>
+<p>Press play. Leave whenever; your place is kept.</p>
+<p>The transcript follows the voice — click any line to be there.</p>
+<p>Learning tools live on each talk's card, made for you by the guide.</p>
+<p>And just tell the guide where you are — it remembers so you don't have to.</p>
+</div>
+{path_strip}{empty_note}
 </section>
+
+{curriculum_view}
 
 {talk_views}
 </div>

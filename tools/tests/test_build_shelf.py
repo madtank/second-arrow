@@ -491,15 +491,13 @@ def test_youtube_embed_url_non_youtube_is_none():
 def test_render_shelf_youtube_talk_gets_click_to_load_embed(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # The demon-story talk (YouTube source, no local audio) gets a calm
-    # click-to-load button instead of a navigate-away link ...
+    # click-to-load button instead of a navigate-away link.
     assert "Play here" in html
     assert 'data-embed="https://www.youtube-nocookie.com/embed/me7Wm5LOpx0"' in html
-    # ... and a small escape hatch that opens in a NEW tab.
-    assert "open on YouTube" in html
-    demon = html[html.index("Demon Story"):]
-    anchor = re.search(r'<a class="yt-link"[^>]*>', demon)
-    assert anchor and 'target="_blank"' in anchor.group(0)
-    assert 'rel="noopener"' in anchor.group(0)
+    # No separate "open on YouTube" anchor: the embedded player's own
+    # logo link covers that — ours was redundant chrome.
+    assert "open on YouTube" not in html
+    assert "yt-link" not in html
     # No iframe in the static page: nothing loads until the user asks.
     assert "<iframe" not in html
 
@@ -527,12 +525,13 @@ def test_render_shelf_sidebar_lists_each_talk(tmp_path):
     ]:
         assert title in sidebar.group(0)
         assert f'href="#talk/{slug}"' in sidebar.group(0)
-    # The sidebar also carries the epigraph and the sessions placeholder.
+    # The sidebar also carries the epigraph and the "begin here" link to
+    # the intro room, above the talks.
     assert "The second arrow is optional." in sidebar.group(0)
-    # The Sessions section is a real list now, filled from /api/sessions;
-    # like the chat panel it stays hidden on the static file:// shelf.
-    assert 'id="sessions-section"' in sidebar.group(0)
-    assert 'id="session-list"' in sidebar.group(0)
+    assert re.search(r'<a class="begin-link" href="#home">begin here</a>', sidebar.group(0))
+    # Sessions are invisible infrastructure now: no sidebar section.
+    assert "sessions-section" not in sidebar.group(0)
+    assert "session-list" not in sidebar.group(0)
 
 
 def test_render_shelf_hash_views_present(tmp_path):
@@ -544,7 +543,7 @@ def test_render_shelf_hash_views_present(tmp_path):
     assert 'id="talk-demon-story"' in html
     assert 'id="view-home"' in html
     assert "hashchange" in html
-    assert "pick a talk from the sidebar" in html
+    assert "Pick a talk from the sidebar" in html
 
 
 def test_render_shelf_degrades_gracefully_without_js(tmp_path):
@@ -560,22 +559,43 @@ def test_render_shelf_degrades_gracefully_without_js(tmp_path):
         assert ".js" in selector or ".view" not in selector, selector
 
 
-def test_chat_panel_speaks_sessions_and_ambient_view(tmp_path):
+def test_chat_panel_is_one_continuous_guide(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    # The sidebar's Sessions list is fed from the server.
-    assert "/api/sessions" in html
-    section = re.search(r'<div id="sessions-section"[^>]*>', html)
-    assert section and "hidden" in section.group(0)
-    # A conversation can be started fresh, and the session that recorded
-    # each turn comes back to the panel in the X-Session header.
-    assert 'id="chat-new"' in html
-    assert "new conversation" in html
+    # Sessions are invisible infrastructure: the panel neither lists them
+    # nor offers a "new conversation" — one guide, one stream.
+    assert "/api/sessions" not in html
+    assert "sessions-section" not in html
+    assert "chat-new" not in html
+    assert "new conversation" not in html
+    # The conversation continues across refreshes: the current episode's
+    # turns restore on load, and each turn's episode rides X-Session.
+    assert "/api/history" in html
     assert "X-Session" in html
-    # Every chat POST carries the ambient view (the open talk's slug).
+    # Every chat POST still carries the ambient view (the open talk).
     assert "currentView" in html
-    # After each completed turn the sessions list is refetched, so titles
-    # and summaries the guide just updated appear immediately.
-    assert "fresh summaries" in html
+
+
+def test_home_view_is_the_intro_room(tmp_path):
+    library = _make_library(tmp_path)
+    html = build_shelf.render_shelf(library, {})
+    home = re.search(r'<section class="card view" id="view-home">.*?</section>', html, re.S)
+    assert home, "home view missing"
+    assert "Begin here" in home.group(0)
+    assert "The second arrow is optional." in home.group(0)
+    # The short "how this room works" lines, in the project's calm voice.
+    for line in (
+        "the guide comes with you",
+        "your place is kept",
+        "transcript follows the voice",
+        "Learning tools",
+        "it remembers so you don't have to",
+    ):
+        assert line in home.group(0), line
+    # The path summary strip stays on the home view.
+    (tmp_path / "STUDY.md").write_text("## Studied\n- **Quiet Mind & <Friends>**: done.\n")
+    html = build_shelf.render_shelf(library, {})
+    home = re.search(r'<section class="card view" id="view-home">.*?</section>', html, re.S)
+    assert 'class="path-strip"' in home.group(0)
 
 
 def test_render_shelf_lists_artifacts_behind_the_sandbox_contract(tmp_path):
@@ -746,3 +766,99 @@ def test_listening_room_js_markers(tmp_path):
     assert "&start=" in html
     # Still no innerHTML anywhere (covered elsewhere too, cheap here).
     assert "innerHTML" not in html
+
+
+# --- iteration 10 addenda: curriculum room, richer md, anchored input --------
+
+
+def test_md_to_html_renders_blockquotes():
+    html = build_shelf.md_to_html(
+        "Before.\n\n> Don't just look at the two bad bricks.\n> Look at the wall.\n\nAfter.\n"
+    )
+    assert "<blockquote>" in html and "</blockquote>" in html
+    quote = re.search(r"<blockquote>.*?</blockquote>", html, re.S).group(0)
+    assert "two bad bricks" in quote and "Look at the wall." in quote
+    assert "&gt; Don" not in html  # the marker is consumed, not shown
+    # Escaping still applies inside quotes.
+    assert "<script>" not in build_shelf.md_to_html("> <script>x</script>\n")
+
+
+def test_md_to_html_renders_numbered_lists():
+    html = build_shelf.md_to_html("Steps:\n\n1. breathe in\n2. breathe out\n\nDone.\n")
+    assert "<ol>" in html and "</ol>" in html
+    assert "<li>breathe in</li>" in html
+    assert "<li>breathe out</li>" in html
+    # Dashed lists still work beside them.
+    both = build_shelf.md_to_html("- a\n- b\n\n1. one\n")
+    assert "<ul>" in both and "<ol>" in both
+
+
+CURRICULUM_CLUSTER = """# Cluster 1: Anger & the Second Arrow
+
+## Talks
+
+- **Quiet Mind & <Friends> — Ajahn Test** — https://example.org/quiet-mind.html
+  Already on the shelf. Reach for it when testing.
+
+- **Somewhere Else — Ajahn Away** — https://example.org/elsewhere.html
+  Not fetched yet; a fine next step.
+"""
+
+
+def test_curriculum_room_renders_with_shelf_crosslinks(tmp_path):
+    library = _make_library(tmp_path)
+    curriculum = tmp_path / "curriculum"
+    curriculum.mkdir()
+    (curriculum / "01-anger.md").write_text(CURRICULUM_CLUSTER)
+    (curriculum / "README.md").write_text("# not rendered\n")
+    html = build_shelf.render_shelf(library, {})
+    # The room exists: a view plus a sidebar link below "begin here".
+    assert 'id="view-curriculum"' in html
+    sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
+    assert re.search(r'href="#curriculum"', sidebar)
+    view = re.search(
+        r'<section class="card view" id="view-curriculum">.*?</section>', html, re.S
+    ).group(0)
+    # A cluster section, escaped like everything human-facing.
+    assert "Cluster 1: Anger &amp; the Second Arrow" in view
+    assert "Quiet Mind &amp; &lt;Friends&gt;" in view
+    # The in-library entry cross-links to its talk view...
+    assert re.search(r'<a class="cur-onshelf" href="#talk/quiet-mind">on your shelf', view)
+    # ...the unfetched one keeps its external link (noopener) + a hint.
+    ext = re.search(r'<a [^>]*href="https://example.org/elsewhere.html"[^>]*>', view)
+    assert ext and 'rel="noopener"' in ext.group(0) and 'target="_blank"' in ext.group(0)
+    assert "ask the guide to fetch it" in view
+    # README stays machine-layer.
+    assert "not rendered" not in view
+
+
+def test_curriculum_room_absent_without_files(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    assert 'id="view-curriculum"' not in html
+    assert 'href="#curriculum"' not in html
+
+
+def test_chat_input_is_anchored_to_the_viewport_bottom(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The guide panel sticks to the bottom of the main pane: the input
+    # row can never be pushed off-screen; the message list scrolls above.
+    assert "#guide-chat { position: sticky; bottom: 0;" in html
+    assert re.search(r"#chat-messages \{[^}]*max-height", html)
+
+
+def test_chat_focus_typing_is_intent_never_steal(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Idle typing lands in the guide's textarea; "/" focuses without
+    # inserting itself; Escape hands the keys back to the page.
+    assert "typing is intent" in html
+    assert 'document.addEventListener("keydown"' in html
+    assert "input.blur()" in html
+    # No autofocus without intent: exactly three focus calls — slash,
+    # type-to-focus (both explicit keystrokes), and the after-send
+    # refocus (that IS user intent). Nothing focuses on load, and no
+    # focus ever moves the viewport (the reply streams into the message
+    # list's own scroll container; the page stays where the user left it).
+    assert "autofocus" not in html
+    assert html.count("input.focus({ preventScroll: true })") == 3
+    assert "input.focus()" not in html
+
