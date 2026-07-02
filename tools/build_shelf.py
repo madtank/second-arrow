@@ -53,6 +53,21 @@ def youtube_embed_url(source_url: str) -> str | None:
     return f"https://www.youtube-nocookie.com/embed/{match.group(1)}"
 
 
+def duration_to_seconds(text) -> int | None:
+    """"56:04" -> 3364, "1:03:52" -> 3832; unknown/garbled -> None.
+
+    The INDEX Duration field becomes a per-talk cap for the guide's seek
+    cues — a cue past the end is silently invalid.
+    """
+    match = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})", (text or "").strip())
+    if not match:
+        return None
+    hours, minutes, seconds = (
+        int(match.group(1) or 0), int(match.group(2)), int(match.group(3))
+    )
+    return hours * 3600 + minutes * 60 + seconds
+
+
 def format_time(seconds) -> str:
     """65 -> "1:05", 3725 -> "1:02:05" — segment stamps and durations."""
     total = int(seconds)
@@ -567,6 +582,39 @@ STYLE = """
                 pointer-events: auto; padding-top: 2rem; }
   #guide-chat.chat-conversation #chat-messages { flex: 1; max-height: none;
                                                  font-size: 1.02rem; }
+  #chat-peek { display: flex; align-items: flex-start; gap: 0.55rem;
+               background: #f9f5ec; border: 1px solid #eee4d2;
+               border-radius: 14px; padding: 0.6rem 0.7rem;
+               margin-bottom: 0.5rem;
+               box-shadow: 0 6px 18px rgba(60, 56, 51, 0.10);
+               animation: peek-rise 0.25s ease; }
+  #chat-peek[hidden] { display: none; } /* flex must not defeat hidden */
+  @keyframes peek-rise {
+    from { opacity: 0; transform: translateY(7px); }
+    to { opacity: 1; transform: none; }
+  }
+  #peek-mark { width: 1.5rem; height: 1.5rem; flex-shrink: 0;
+               margin-top: 0.1rem; }
+  #peek-mark svg { width: 100%; height: 100%; display: block; }
+  #peek-body { flex: 1; min-width: 0; text-align: left; font: inherit;
+               color: inherit; background: none; border: none;
+               padding: 0; cursor: pointer; }
+  #peek-text { display: -webkit-box; -webkit-line-clamp: 3;
+               -webkit-box-orient: vertical; overflow: hidden;
+               white-space: pre-wrap; font-size: 0.93rem; }
+  #peek-more { display: none; color: #a9853f; font-size: 0.8rem; }
+  .peek-settled #peek-more { display: inline; }
+  #peek-action { flex-shrink: 0; }
+  #peek-action .chat-go { margin-top: 0; }
+  #peek-dismiss { font: inherit; font-size: 0.8rem; color: #a99e8e;
+                  background: none; border: none; cursor: pointer;
+                  padding: 0.1rem 0.35rem; flex-shrink: 0; }
+  .guide-lock { font: inherit; font-size: 0.8rem; background: none;
+                border: none; cursor: pointer; padding: 0.3rem 0.4rem;
+                border-radius: 999px; opacity: 0.7; }
+  .guide-lock:hover { opacity: 1; background: #efe7d9; }
+  .room-lock { position: absolute; top: 1.1rem; right: 1.2rem; }
+  .card.view { position: relative; } /* anchors the room lock */
   #reflection-chip { display: flex; align-items: center; gap: 0.3rem;
                      margin-top: 0.5rem; }
   #reflection-chip[hidden] { display: none; } /* flex must not defeat hidden */
@@ -632,6 +680,15 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 <select id="chat-model" hidden></select>
 </p>
 <div id="chat-messages"></div>
+<div id="chat-peek" hidden>
+<span id="peek-mark" aria-hidden="true"></span>
+<button type="button" id="peek-body" title="open the conversation">
+<span id="peek-text"></span>
+<span id="peek-more">…more</span>
+</button>
+<span id="peek-action"></span>
+<button type="button" id="peek-dismiss" aria-label="dismiss">✕</button>
+</div>
 <div id="reflection-chip" hidden>
 <button type="button" id="reflection-send"></button>
 <button type="button" id="reflection-dismiss" aria-label="dismiss">✕</button>
@@ -737,6 +794,39 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   document.getElementById("chat-open").addEventListener("click", function () {
     setChatState("conversation"); // open without sending
   });
+  // System lines from the layout side (lock toggles, cue results).
+  window.saAnnounce = function (line) { add("system", line); };
+
+  // --- the peek: replies land in the room, not over it -------------------
+  // Sending from docked no longer opens the overlay. The reply streams
+  // into this compact strip above the bar, then settles into a
+  // dismissible bubble (leaf mark, ~3 lines, "…more" opens the overlay).
+  // It stays until dismissed, expanded, or the next message replaces it.
+  var peek = document.getElementById("chat-peek");
+  var peekText = document.getElementById("peek-text");
+  var peekAction = document.getElementById("peek-action");
+  (function () {
+    var mark = document.getElementById("peek-mark");
+    var tpl = document.getElementById("avatar-guide");
+    if (tpl && tpl.content && tpl.content.firstElementChild) {
+      mark.appendChild(tpl.content.firstElementChild.cloneNode(true));
+    }
+  })();
+
+  function peekUpdate(text, done) {
+    if (chatState !== "docked") { peek.hidden = true; return; }
+    peek.hidden = false; // entrance: a gentle rise, CSS-side
+    peek.classList.toggle("peek-settled", !!done);
+    peekText.textContent = text;
+  }
+
+  document.getElementById("peek-body").addEventListener("click", function () {
+    peek.hidden = true;
+    setChatState("conversation"); // the full exchange, deliberately
+  });
+  document.getElementById("peek-dismiss").addEventListener("click", function () {
+    peek.hidden = true;
+  });
   // The now-playing capsule (its own closure) asks the chat to step
   // aside before it navigates to the playing talk's room.
   window.saDockChat = function () { setChatState("docked"); };
@@ -748,35 +838,72 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   // --- guide-offered navigation: a final-line [[go: ...]] cue -----------
   // The cue is ALWAYS stripped from display; only a final-line cue whose
   // target really exists on this page earns a "take me there" button.
-  function parseGoCue(text) {
-    var target = null;
-    var match = text.match(/\\[\\[go:\\s*([^\\]]+?)\\s*\\]\\]\\s*$/);
+  // --- action cues: the guide drives the same UI the user does ----------
+  // Final-line only, always stripped from display, strictly validated:
+  // [[go: talk/<slug>|curriculum|home]], [[seek: <slug> <seconds>]],
+  // [[pause]], [[play]]. Seconds are capped by the talk's INDEX duration
+  // when known. One action per reply; anything else is stripped silently.
+  function parseActionCue(text) {
+    var action = null;
+    var match = text.match(/\\[\\[(go|seek|pause|play)(?::\\s*([^\\]]*?))?\\s*\\]\\]\\s*$/);
     if (match) {
-      var dest = match[1];
-      if (dest === "home") target = "#home";
-      else if (dest === "curriculum" && document.getElementById("view-curriculum")) {
-        target = "#curriculum";
-      } else {
-        var talk = dest.match(/^talk\\/([a-z0-9][a-z0-9-]*)$/);
-        if (talk && document.getElementById("talk-" + talk[1])) {
-          target = "#talk/" + talk[1];
+      var kind = match[1];
+      var arg = (match[2] || "").trim();
+      if (kind === "pause" && !arg) action = { kind: "pause" };
+      else if (kind === "play" && !arg) action = { kind: "play" };
+      else if (kind === "go") {
+        if (arg === "home") {
+          action = { kind: "go", target: "#home", label: "the beginning" };
+        } else if (arg === "curriculum"
+            && document.getElementById("view-curriculum")) {
+          action = { kind: "go", target: "#curriculum", label: "the curriculum" };
+        } else {
+          var talk = arg.match(/^talk\\/([a-z0-9][a-z0-9-]*)$/);
+          if (talk && document.getElementById("talk-" + talk[1])) {
+            action = { kind: "go", target: "#talk/" + talk[1], slug: talk[1] };
+          }
+        }
+      } else if (kind === "seek") {
+        var seek = arg.match(/^([a-z0-9][a-z0-9-]*)\\s+(\\d+(?:\\.\\d+)?)$/);
+        if (seek) {
+          var room = document.getElementById("talk-" + seek[1]);
+          var seconds = parseFloat(seek[2]);
+          var cap = room ? parseFloat(room.getAttribute("data-duration")) : NaN;
+          if (room && (!cap || seconds <= cap)) {
+            action = { kind: "seek", slug: seek[1], seconds: seconds };
+          }
         }
       }
     }
     return {
-      text: text.replace(/\\s*\\[\\[go:[^\\]]*\\]\\]/g, "").trim(),
-      target: target,
+      text: text.replace(/\\s*\\[\\[(?:go|seek|pause|play)[^\\]]*\\]\\]/g, "").trim(),
+      action: action,
     };
   }
 
-  function offerNavigation(bubble, cue) {
+  function cueClock(seconds) {
+    var total = Math.max(0, Math.floor(seconds || 0));
+    var m = Math.floor(total / 60);
+    var sec = total % 60;
+    return m + ":" + (sec < 10 ? "0" : "") + sec;
+  }
+
+  // Locked mode: the same cue becomes an offer the user can take or leave.
+  function offerAction(bubble, action) {
     var go = document.createElement("button");
     go.type = "button";
     go.className = "chat-go";
-    go.textContent = "take me there →";
+    var label = "the guide suggests it — go?";
+    if (action.kind === "go") label = "the guide wants to take you somewhere — go?";
+    if (action.kind === "seek") {
+      label = "the guide wants to jump to " + cueClock(action.seconds) + " — go?";
+    }
+    if (action.kind === "pause") label = "the guide wants to pause — ok?";
+    if (action.kind === "play") label = "the guide wants to press play — ok?";
+    go.textContent = label;
     go.addEventListener("click", function () {
-      location.hash = cue.target; // hash navigation only
-      setChatState("docked"); // the room takes the screen
+      var line = window.saExecuteCue ? window.saExecuteCue(action) : null;
+      if (line) add("system", line);
     });
     bubble.appendChild(go);
   }
@@ -952,7 +1079,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
         if (turn.role !== "user" && turn.role !== "assistant") return;
         var div = add(turn.role === "user" ? "user" : "guide", turn.content);
         if (turn.role === "assistant") {
-          renderRich(div, parseGoCue(turn.content).text); // stale cues: strip only
+          renderRich(div, parseActionCue(turn.content).text); // stale cues: strip only
         }
         history.push({ role: turn.role, content: turn.content });
       });
@@ -988,11 +1115,12 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 
   function sendMessage(text) {
     if (!text || busy) return;
-    if (chatState === "docked") setChatState("conversation"); // replies land visibly
     add("user", text);
     history.push({ role: "user", content: text });
     var pending = add("guide", "thinking…");
     pending.classList.add("chat-thinking");
+    while (peekAction.firstChild) peekAction.removeChild(peekAction.firstChild);
+    if (chatState === "docked") peekUpdate("thinking…"); // stay in the room
     busy = true;
     updateSendState();
     fetch("/api/chat", {
@@ -1031,6 +1159,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
             }
             reply += chunk;
             pending.textContent += chunk;
+            if (chatState === "docked") peekUpdate(pending.textContent);
             list.scrollTop = list.scrollHeight;
           }
           return step.done ? reply : pump();
@@ -1041,15 +1170,28 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       pending.classList.remove("chat-thinking");
       if (!reply) {
         pending.textContent = "The guide said nothing — try again.";
+        peekUpdate(pending.textContent, true);
         return;
       }
-      var cue = parseGoCue(reply);
+      var cue = parseActionCue(reply);
       renderRich(pending, cue.text); // bubble completed: dress the markdown
-      if (cue.target) offerNavigation(pending, cue);
+      peekUpdate(cue.text, true); // the peek settles into its bubble
+      if (cue.action) {
+        if (window.saCueLocked && window.saCueLocked()) {
+          offerAction(pending, cue.action); // locked: offer, never act
+          if (chatState === "docked") {
+            offerAction(peekAction, cue.action); // visible where the user is
+          }
+        } else if (window.saExecuteCue) {
+          var line = window.saExecuteCue(cue.action);
+          if (line) add("system", line);
+        }
+      }
       history.push({ role: "assistant", content: reply });
     }).catch(function (error) {
       pending.classList.remove("chat-thinking");
       pending.textContent = "The guide is out of reach — " + error.message;
+      peekUpdate(pending.textContent, true);
     }).finally(function () {
       busy = false;
       updateSendState();
@@ -1222,20 +1364,26 @@ LAYOUT_SCRIPT = """<script>
     audio.play();
   }
 
+  // ONE seek path — the transcript click and the guide's seek cue both
+  // land here (no new machinery for the guide's hands).
+  function seekTalk(slug, start) {
+    var audio = document.querySelector(
+      'audio.talk-audio[data-slug="' + slug + '"]');
+    if (audio) { seekAudio(audio, start); return true; }
+    var holder = document.querySelector(
+      '.yt-embed[data-slug="' + slug + '"]');
+    // No API dependency: seeking a YouTube talk just reloads the
+    // embed at that second.
+    if (holder) { mountFrame(holder, Math.floor(start)); return true; }
+    return false;
+  }
+
   document.querySelectorAll(".seg-transcript").forEach(function (box) {
     box.addEventListener("click", function (event) {
       var seg = event.target.closest(".seg");
       if (!seg) return;
-      var slug = box.getAttribute("data-slug");
-      var start = parseFloat(seg.getAttribute("data-start")) || 0;
-      var audio = document.querySelector(
-        'audio.talk-audio[data-slug="' + slug + '"]');
-      if (audio) { seekAudio(audio, start); return; }
-      var holder = document.querySelector(
-        '.yt-embed[data-slug="' + slug + '"]');
-      // No API dependency: seeking a YouTube talk just reloads the
-      // embed at that second.
-      if (holder) mountFrame(holder, Math.floor(start));
+      seekTalk(box.getAttribute("data-slug"),
+        parseFloat(seg.getAttribute("data-start")) || 0);
     });
   });
 
@@ -1265,12 +1413,12 @@ LAYOUT_SCRIPT = """<script>
     return (h ? h + ":" : "") + mm + ":" + (sec < 10 ? "0" : "") + sec;
   }
 
-  function ytCommand(slug, func) {
+  function ytCommand(slug, func, args) {
     var frame = ytFrames[slug];
     if (!frame) return;
     try {
       frame.contentWindow.postMessage(JSON.stringify(
-        { event: "command", func: func, args: [] }),
+        { event: "command", func: func, args: args || [] }),
         "https://www.youtube-nocookie.com");
     } catch (e) { /* mute channel: the capsule still navigates */ }
   }
@@ -1327,6 +1475,7 @@ LAYOUT_SCRIPT = """<script>
     if (art) npThumb.setAttribute("src", art.getAttribute("src"));
     updateCapsule();
     keepPlayingViewAlive();
+    updateRoomLocks();
   }
 
   function capsuleVisible(playing, hash, conversationMode) {
@@ -1363,18 +1512,105 @@ LAYOUT_SCRIPT = """<script>
   npBody.addEventListener("click", goToNowPlaying);
   npExpand.addEventListener("click", goToNowPlaying);
 
-  npPlay.addEventListener("click", function () {
-    if (!nowPlaying) return;
+  // --- the lock: the guide's hands can be tied ---------------------------
+  // Locked, action cues become offer-buttons instead of executing. The
+  // padlock lives on the capsule and (for the playing talk only) in the
+  // room header; the choice persists.
+  var guideLock = false;
+  try { guideLock = localStorage.getItem("sa-guide-lock") === "1"; } catch (e) {}
+  window.saCueLocked = function () { return guideLock; };
+
+  function applyLockUI() {
+    document.querySelectorAll(".guide-lock").forEach(function (button) {
+      button.textContent = guideLock ? "🔒" : "🔓";
+      button.classList.toggle("locked", guideLock);
+      button.setAttribute("title", guideLock
+        ? "guide navigation locked — cues become offers"
+        : "guide navigation unlocked — the guide may drive");
+    });
+  }
+
+  function setGuideLock(locked) {
+    guideLock = locked;
+    try {
+      if (locked) localStorage.setItem("sa-guide-lock", "1");
+      else localStorage.removeItem("sa-guide-lock");
+    } catch (e) { /* storage blocked: the choice just doesn't persist */ }
+    applyLockUI();
+    if (window.saAnnounce) {
+      window.saAnnounce(locked
+        ? "— guide navigation locked —"
+        : "— guide navigation unlocked —");
+    }
+  }
+
+  document.querySelectorAll(".guide-lock").forEach(function (button) {
+    button.addEventListener("click", function () { setGuideLock(!guideLock); });
+  });
+  applyLockUI(); // reflect the persisted choice, silently
+
+  function updateRoomLocks() {
+    document.querySelectorAll(".room-lock").forEach(function (button) {
+      button.hidden = !nowPlaying
+        || button.getAttribute("data-slug") !== nowPlaying.slug;
+    });
+  }
+
+  // --- the guide's hands: execute a validated cue -------------------------
+  // Everything runs through the user's own click paths (seekTalk,
+  // mountFrame, setPlayback, hash navigation) — no new machinery.
+  window.saExecuteCue = function (action) {
+    if (!action) return null;
+    if (action.kind === "go") {
+      if (window.saDockChat) window.saDockChat();
+      location.hash = action.target;
+      var label = action.label;
+      if (!label) {
+        var heading = document.querySelector("#talk-" + action.slug + " h2");
+        label = heading ? heading.textContent : action.slug;
+      }
+      return "— the guide took you to " + label + " —";
+    }
+    if (action.kind === "seek") {
+      var playingHere = nowPlaying && nowPlaying.slug === action.slug;
+      if (!playingHere && location.hash !== "#talk/" + action.slug) {
+        if (window.saDockChat) window.saDockChat();
+        location.hash = "#talk/" + action.slug; // its room, then the moment
+      }
+      if (playingHere && nowPlaying.kind === "yt" && nowPlaying.ytInfo) {
+        ytCommand(action.slug, "seekTo", [action.seconds, true]);
+      } else {
+        seekTalk(action.slug, action.seconds);
+      }
+      return "— the guide jumped to " + npClock(action.seconds) + " —";
+    }
+    if (action.kind === "pause" || action.kind === "play") {
+      if (!setPlayback(action.kind === "play")) return "— nothing is playing —";
+      return action.kind === "play"
+        ? "— the guide pressed play —" : "— the guide paused —";
+    }
+    return null;
+  };
+
+  // ONE playback switch — the capsule button and the guide's pause/play
+  // cues both use it.
+  function setPlayback(playing) {
+    if (!nowPlaying) return false;
     if (nowPlaying.kind === "audio") {
       var audio = document.querySelector(
         'audio.talk-audio[data-slug="' + nowPlaying.slug + '"]');
-      if (!audio) return;
-      if (audio.paused) audio.play(); else audio.pause();
-    } else {
-      ytCommand(nowPlaying.slug, nowPlaying.playing ? "pauseVideo" : "playVideo");
-      nowPlaying.playing = !nowPlaying.playing; // infoDelivery corrects us
-      updateCapsule();
+      if (!audio) return false;
+      if (playing) audio.play(); else audio.pause();
+      return true;
     }
+    ytCommand(nowPlaying.slug, playing ? "playVideo" : "pauseVideo");
+    nowPlaying.playing = playing; // infoDelivery corrects us
+    updateCapsule();
+    return true;
+  }
+
+  npPlay.addEventListener("click", function () {
+    if (nowPlaying) setPlayback(!nowPlaying.playing);
   });
 
   npStop.addEventListener("click", function () {
@@ -1390,6 +1626,7 @@ LAYOUT_SCRIPT = """<script>
     nowPlaying = null;
     updateCapsule();
     keepPlayingViewAlive();
+    updateRoomLocks();
   });
 
   window.addEventListener("hashchange", updateCapsule);
@@ -1534,9 +1771,15 @@ LAYOUT_SCRIPT = """<script>
 
 def render_card(talk: dict, files: dict, reach: str | None, listened: dict | None = None) -> str:
     slug = talk["slug"]
+    cap = duration_to_seconds(talk.get("duration", ""))
+    cap_attr = f' data-duration="{cap}"' if cap else ""
     parts = [
-        f'<section class="card view" id="talk-{escape(slug)}">',
+        f'<section class="card view" id="talk-{escape(slug)}"{cap_attr}>',
         f"<h2>{escape(talk.get('title', slug))}</h2>",
+        # The room-side guide-navigation lock: shown only while THIS talk
+        # is the one playing (the capsule carries its twin).
+        f'<button type="button" class="guide-lock room-lock" '
+        f'data-slug="{escape(slug)}" hidden></button>',
         f'<p class="meta">{escape(talk.get("teacher", ""))}'
         f" &middot; {escape(talk.get('themes', ''))}</p>",
     ]
@@ -1822,6 +2065,7 @@ Rebuild: <code>uv run tools/build_shelf.py</code>
 <span id="np-title"></span>
 <span id="np-time"></span>
 </button>
+<button type="button" id="np-lock" class="guide-lock"></button>
 <button type="button" id="np-play" title="play / pause"></button>
 <button type="button" id="np-stop" title="stop — your place is kept">■</button>
 <button type="button" id="np-expand" title="go to this talk">⤢</button>

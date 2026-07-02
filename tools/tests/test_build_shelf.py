@@ -960,9 +960,11 @@ def test_chat_panel_is_binary_docked_or_conversation(tmp_path):
     assert "chat-expand" not in html  # no middle state, no second control
     assert "chat-full" not in html  # (chat-open is now the opener BUTTON id)
     assert 'panel.classList.remove("chat-docked", "chat-conversation");' in html
-    # One state function; sending from docked opens the conversation.
+    # One state function; opening is deliberate (bubble icon or peek) —
+    # sending from docked stays in the room (the peek carries the reply).
     assert "function setChatState(next)" in html
-    assert 'if (chatState === "docked") setChatState("conversation");' in html
+    assert 'setChatState("conversation"); // open without sending' in html
+    assert 'setChatState("conversation"); // the full exchange, deliberately' in html
     # Escape (and the toggle) drop straight back to the page.
     assert 'setChatState("docked");' in html
     # Docked hides the stream; conversation fills the pane generously,
@@ -980,31 +982,46 @@ def test_reflection_chip_is_gone_when_empty(tmp_path):
     assert "reflections[from.slug]" in html
 
 
-def test_go_cue_parser_matrix_under_node(tmp_path):
+def test_action_cue_parser_matrix_under_node(tmp_path):
     if shutil.which("node") is None:
         pytest.skip("node not installed")
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    fn = re.search(r"function parseGoCue\(text\) \{[\s\S]*?\n  \}", html)
-    assert fn, "parseGoCue missing"
+    fn = re.search(r"function parseActionCue\(text\) \{[\s\S]*?\n  \}", html)
+    assert fn, "parseActionCue missing"
     harness = """
-var document = { getElementById: function (id) {
-  return ["talk-patience", "view-curriculum"].indexOf(id) >= 0 ? {} : null;
-} };
+var elements = {
+  "talk-patience": { getAttribute: function () { return "232"; } },
+  "talk-demon-story": { getAttribute: function () { return null; } },
+  "view-curriculum": { getAttribute: function () { return null; } },
+};
+var document = { getElementById: function (id) { return elements[id] || null; } };
 """ + fn.group(0) + r"""
-function check(i, got, wantText, wantTarget) {
-  if (got.text !== wantText || got.target !== wantTarget) {
-    console.error("case " + i, JSON.stringify(got));
+function check(i, got, wantText, wantAction) {
+  var gotAction = JSON.stringify(got.action);
+  if (got.text !== wantText || gotAction !== JSON.stringify(wantAction)) {
+    console.error("case " + i, got.text, gotAction);
     process.exit(1);
   }
 }
-check(0, parseGoCue("Fetched it.\n[[go: talk/patience]]"), "Fetched it.", "#talk/patience");
-check(1, parseGoCue("See the road ahead.\n[[go: curriculum]]"), "See the road ahead.", "#curriculum");
-check(2, parseGoCue("Back to the start.\n[[go: home]]"), "Back to the start.", "#home");
-check(3, parseGoCue("Hm.\n[[go: talk/not-a-talk]]"), "Hm.", null);
-check(4, parseGoCue("Hm.\n[[go: javascript:alert(1)]]"), "Hm.", null);
-check(5, parseGoCue("A [[go: talk/patience]] mid-text cue.\nMore."), "A mid-text cue.\nMore.", null);
-check(6, parseGoCue("No cue at all."), "No cue at all.", null);
-check(7, parseGoCue("Trailing space cue.\n[[go: talk/patience]]  \n"), "Trailing space cue.", "#talk/patience");
+check(0, parseActionCue("Going.\n[[go: talk/patience]]"), "Going.",
+  { kind: "go", target: "#talk/patience", slug: "patience" });
+check(1, parseActionCue("Road ahead.\n[[go: curriculum]]"), "Road ahead.",
+  { kind: "go", target: "#curriculum", label: "the curriculum" });
+check(2, parseActionCue("Start.\n[[go: home]]"), "Start.",
+  { kind: "go", target: "#home", label: "the beginning" });
+check(3, parseActionCue("The eggs story.\n[[seek: patience 130]]"), "The eggs story.",
+  { kind: "seek", slug: "patience", seconds: 130 });
+check(4, parseActionCue("Past the end.\n[[seek: patience 500]]"), "Past the end.", null);
+check(5, parseActionCue("No duration known.\n[[seek: demon-story 3000]]"), "No duration known.",
+  { kind: "seek", slug: "demon-story", seconds: 3000 });
+check(6, parseActionCue("Unknown talk.\n[[seek: nope 10]]"), "Unknown talk.", null);
+check(7, parseActionCue("Rest.\n[[pause]]"), "Rest.", { kind: "pause" });
+check(8, parseActionCue("On.\n[[play]]"), "On.", { kind: "play" });
+check(9, parseActionCue("A [[seek: patience 10]] mid-text.\nMore."), "A mid-text.\nMore.", null);
+check(10, parseActionCue("Bad.\n[[go: javascript:alert(1)]]"), "Bad.", null);
+check(11, parseActionCue("Plain reply."), "Plain reply.", null);
+check(12, parseActionCue("Junk args.\n[[pause: now]]"), "Junk args.", null);
+check(13, parseActionCue("Neg.\n[[seek: patience -5]]"), "Neg.", null);
 console.log("cue matrix ok");
 """
     js = tmp_path / "cues.js"
@@ -1014,11 +1031,20 @@ console.log("cue matrix ok");
     assert "cue matrix ok" in result.stdout
 
 
-def test_go_button_is_textcontent_only(tmp_path):
+def test_locked_cues_become_offers_not_actions(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    assert '"take me there →"' in html
-    # Navigation is hash-only, and the chat docks so the room is visible.
-    assert "location.hash = cue.target" in html
+    # Unlocked: the cue executes through the shared executor and announces.
+    assert "window.saExecuteCue" in html
+    assert '"— the guide took you to "' in html
+    assert '"— the guide jumped to "' in html
+    # Locked: the same cue renders the old offer button instead — and
+    # when docked, the offer ALSO lands in the peek, where the user is
+    # (the message stream is hidden there).
+    assert "window.saCueLocked" in html
+    assert "offerAction(pending, cue.action)" in html
+    assert "offerAction(peekAction, cue.action)" in html
+    assert 'id="peek-action"' in html
+    assert '" — go?"' in html
     assert "innerHTML" not in html
 
 
@@ -1225,4 +1251,78 @@ def test_capsule_expand_docks_the_chat_first(tmp_path):
     go = re.search(r"function goToNowPlaying\(\) \{[\s\S]*?\n  \}", html).group(0)
     assert "saDockChat" in go
     assert go.index("saDockChat") < go.index("location.hash")
+
+
+# --- co-navigation: peek, action execution, the lock ---------------------------
+
+
+def test_duration_to_seconds():
+    d = build_shelf.duration_to_seconds
+    assert d("3:52") == 232
+    assert d("56:04") == 3364
+    assert d("1:03:52") == 3832
+    assert d("") is None
+    assert d(None) is None
+    assert d("not a time") is None
+
+
+def test_talk_sections_carry_duration_caps(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # demon-story has a Duration in the INDEX -> a data cap for seek cues.
+    assert re.search(r'id="talk-demon-story" data-duration="3364"', html)
+    # far-talk has none: no attribute, cues accept any offset there.
+    assert re.search(r'id="talk-far-talk">', html)
+
+
+def test_docked_send_streams_into_the_peek(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Sending from docked NO LONGER opens the overlay...
+    assert 'if (chatState === "docked") setChatState("conversation");' not in html
+    # ...the reply streams into a compact peek above the bar instead.
+    assert 'id="chat-peek"' in html
+    assert "function peekUpdate(text, done)" in html
+    assert 'id="peek-text"' in html
+    # The peek is a real element with the guide's mark, cloned at init.
+    assert 'id="peek-mark"' in html
+
+
+def test_peek_settles_into_a_dismissible_bubble(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    peek = re.search(r'<div id="chat-peek" hidden>.*?\n</div>', html, re.S)
+    assert peek, "peek missing"
+    # The settled bubble: clamped text, a "…more" that opens the overlay,
+    # and a small dismiss. No auto-fade — it stays until acted on.
+    assert 'id="peek-body"' in peek.group(0)
+    assert 'id="peek-more"' in peek.group(0)
+    assert 'id="peek-dismiss"' in peek.group(0)
+    assert "…more" in html
+    assert "peek-settled" in html
+    assert "-webkit-line-clamp" in html
+    assert "peek-rise" in html  # calm entrance: gentle rise + fade-in
+    assert re.search(r"#chat-peek\[hidden\] \{ display: none", html)  # the chip lesson
+
+
+def test_guide_lock_toggles_and_persists(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # A padlock on the capsule AND in each room header (shown only for
+    # the playing talk); one shared class, one handler, localStorage.
+    assert 'id="np-lock"' in html
+    assert re.search(r'class="guide-lock room-lock" data-slug="quiet-mind" hidden', html)
+    assert '"sa-guide-lock"' in html
+    assert '"— guide navigation locked —"' in html
+    assert '"— guide navigation unlocked —"' in html
+    # The executor asks the lock before acting.
+    assert "window.saCueLocked && window.saCueLocked()" in html
+
+
+def test_cue_execution_reuses_user_click_paths(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Seek goes through the same seekTalk the transcript click uses; the
+    # segment click handler itself is refactored onto it.
+    assert "function seekTalk(slug, start)" in html
+    assert html.count("seekTalk(") >= 3  # definition + seg click + cue path
+    # Alive YouTube channels seek in place; otherwise the reload path.
+    assert '"seekTo"' in html
+    # Pause/play cues drive the same playback switch the capsule uses.
+    assert "function setPlayback(playing)" in html
 

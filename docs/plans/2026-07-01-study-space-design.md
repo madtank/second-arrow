@@ -347,6 +347,26 @@ phone), revisit with real usage behind the decision.
   input row). A YouTube channel that never delivers info hides the
   play/pause toggle rather than showing a control that might not work
   — the capsule still navigates.
+- **Iter 12 — DONE: the guide gets hands — co-navigation with a
+  lock.** Sending from docked no longer opens the overlay: the reply
+  streams into a compact peek above the bar, then settles into a
+  dismissible bubble (leaf mark, ~3 clamped lines, "…more" opens the
+  overlay, ✕ dismisses; calm rise-in; replaced by the next message).
+  The cue protocol grew hands: [[go: …]] now executes (hash nav) with
+  a quiet "— the guide took you to … —" system line; [[seek: <slug>
+  <seconds>]] is exactly a transcript-line click (validated against
+  known slugs and the INDEX duration cap; navigates to the room first
+  when needed; seekTo in place when the YT channel is alive);
+  [[pause]]/[[play]] drive the current talk. All execution reuses the
+  user's own click paths (seekTalk, mountFrame, setPlayback, hash) —
+  one action per reply, everything else stripped silently. A padlock
+  on the capsule and in the playing talk's room header ties the
+  guide's hands: locked, cues render offer buttons instead (mirrored
+  into the peek when docked — the stream is hidden there), persisted
+  in localStorage, toggles announced. Contract: act only in service of
+  the ask, say it in words in the same reply, never act against "stay
+  here", ground seeks in transcript.json or don't seek (ollama chunks
+  carry no timestamps — its guide navigates to rooms instead).
 
 ## Boundaries
 
