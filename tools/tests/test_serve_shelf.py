@@ -253,6 +253,7 @@ def test_parse_stream_line_text_delta():
         "text": "hello there ",
         "session_id": "57d69c96",
         "done": False,
+        "tools": [],
     }
 
 
@@ -281,6 +282,7 @@ def test_parse_stream_line_init_event_carries_session_id():
         "text": None,
         "session_id": "s-9",
         "done": False,
+        "tools": [],
     }
 
 
@@ -298,6 +300,7 @@ def test_parse_stream_line_result_event_is_done():
         "text": None,
         "session_id": "s-9",
         "done": True,
+        "tools": [],
     }
 
 
@@ -312,6 +315,7 @@ def test_parse_stream_line_blank_line_is_inert():
         "text": None,
         "session_id": None,
         "done": False,
+        "tools": [],
     }
 
 
@@ -1689,4 +1693,81 @@ def test_ollama_pack_carries_curriculum_and_open_talk_notes():
     )["messages"][0]["content"]
     assert "## Curriculum" not in bare
     assert "## Notes for the open talk" not in bare
+
+
+# --- watch the guide work: tool events become a narrative ---------------------
+
+
+def test_parse_stream_line_surfaces_tool_use_blocks():
+    line = json.dumps({
+        "type": "assistant",
+        "session_id": "s-1",
+        "message": {"content": [
+            {"type": "text", "text": "on it"},
+            {"type": "tool_use", "id": "t1", "name": "Bash",
+             "input": {"command": "uv run tools/fetch_talk.py https://x"}},
+        ]},
+    })
+    parsed = serve_shelf.parse_stream_line(line)
+    assert parsed["tools"] == [
+        {"name": "Bash", "input": {"command": "uv run tools/fetch_talk.py https://x"}}
+    ]
+    assert parsed["done"] is False
+    # Ordinary events carry an empty list, junk-tolerantly.
+    text_line = json.dumps({
+        "type": "stream_event", "session_id": "s",
+        "event": {"type": "content_block_delta",
+                  "delta": {"type": "text_delta", "text": "hi"}},
+    })
+    assert serve_shelf.parse_stream_line(text_line)["tools"] == []
+    junk = json.dumps({"type": "assistant", "message": {"content": "not-a-list"}})
+    assert serve_shelf.parse_stream_line(junk)["tools"] == []
+
+
+def test_tool_progress_line_mapping_matrix():
+    line = serve_shelf.tool_progress_line
+    assert line("Bash", {"command": "uv run tools/fetch_talk.py https://youtu.be/x"}) == (
+        "— fetching the talk… —"
+    )
+    # Page/mp3 fetches transcribe locally: warn about the wait.
+    assert "few minutes" in line(
+        "Bash", {"command": "uv run tools/fetch_talk.py https://www.dhammatalks.org/x.html"}
+    )
+    assert "few minutes" in line(
+        "Bash", {"command": "uv run tools/transcribe_talk.py audio.mp3"}
+    )
+    assert line("Bash", {"command": "uv run tools/speak.py --text hi"}) == (
+        "— speaking the primer… —"
+    )
+    assert line("Bash", {"command": "uv run tools/build_shelf.py"}) == (
+        "— rebuilding the shelf… —"
+    )
+    assert line("Bash", {"command": "uv run tools/search_history.py x"}) == (
+        "— searching past conversations… —"
+    )
+    assert line("Bash", {"command": "ls -la"}) == "— working… —"
+    assert line("Write", {"file_path": "library/x/primer.md"}) == "— writing the primer… —"
+    assert line("Edit", {"file_path": "library/x/notes.md"}) == "— taking notes… —"
+    assert line("Write", {"file_path": "STUDY.md"}) == "— updating the path… —"
+    assert line("Write", {"file_path": "library/x/artifacts/t.html"}) == (
+        "— building an interactive… —"
+    )
+    assert line("Write", {"file_path": "journal/2026-07-02.md"}) == (
+        "— writing the journal… —"
+    )
+    assert line("WebSearch", {"query": "x"}) == "— searching the web… —"
+    assert line("WebFetch", {"url": "https://x"}) == "— reading a page… —"
+    # Reads are noise, not narrative.
+    assert line("Read", {"file_path": "x"}) == ""
+    assert line("Grep", {"pattern": "x"}) == ""
+    # Unknown action-looking tools degrade to the generic line.
+    assert line("SomethingNew", {}) == "— working… —"
+
+
+def test_api_version_reports_shelf_mtime(tmp_path):
+    # Pure helper level: the endpoint just wraps this stat.
+    shelf = tmp_path / "shelf.html"
+    assert serve_shelf.shelf_mtime(tmp_path) == 0
+    shelf.write_text("<html>")
+    assert serve_shelf.shelf_mtime(tmp_path) == shelf.stat().st_mtime
 

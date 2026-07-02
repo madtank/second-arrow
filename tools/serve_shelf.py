@@ -32,6 +32,8 @@ Routes:
                     recorded the turn.
     GET  /api/sessions  {"sessions": [{id,title,summary,updated}...]}, newest
                     first — kept for tooling; the panel no longer shows it.
+    GET  /api/version  {"shelf_mtime"} — the page polls it and refreshes
+                    itself (or offers to) when the shelf was rebuilt.
     POST /api/listened  {"slug"} — the page reports a completed listen;
                     appended to library/.listening.jsonl (deduped within
                     the hour) and to the talk's notes.md under
@@ -630,14 +632,16 @@ def parse_claude_output(stdout: str) -> tuple[str, str | None]:
 def parse_stream_line(line: str) -> dict:
     """Parse one line of `claude -p --output-format stream-json` output.
 
-    Returns {"text": str|None, "session_id": str|None, "done": bool}:
-    text is a visible reply fragment (only content_block_delta/text_delta —
-    thinking and signature deltas stay hidden), session_id rides on most
+    Returns {"text", "session_id", "done", "tools"}: text is a visible
+    reply fragment (only content_block_delta/text_delta — thinking and
+    signature deltas stay hidden); "tools" lists {name, input} for any
+    tool_use blocks on a complete assistant event (the progress
+    narrative's hook); session_id rides on most
     events (the system/init event carries it first), done marks the final
     "result" event. Raises json.JSONDecodeError on a garbled line and
     ValueError when the result event reports is_error.
     """
-    parsed: dict = {"text": None, "session_id": None, "done": False}
+    parsed: dict = {"text": None, "session_id": None, "done": False, "tools": []}
     line = line.strip()
     if not line:
         return parsed
@@ -647,6 +651,22 @@ def parse_stream_line(line: str) -> dict:
     session_id = data.get("session_id")
     if isinstance(session_id, str) and session_id:
         parsed["session_id"] = session_id
+    if data.get("type") == "assistant":
+        # Complete assistant segments carry whole tool_use blocks (name +
+        # full input) — the hook for the "watch it work" narrative.
+        message = data.get("message") or {}
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    parsed["tools"].append(
+                        {
+                            "name": str(block.get("name") or ""),
+                            "input": block.get("input")
+                            if isinstance(block.get("input"), dict)
+                            else {},
+                        }
+                    )
     if data.get("type") == "stream_event":
         event = data.get("event") or {}
         delta = event.get("delta") or {}
@@ -660,6 +680,62 @@ def parse_stream_line(line: str) -> dict:
             raise ValueError(str(data.get("result") or "claude reported an error"))
         parsed["done"] = True
     return parsed
+
+
+_QUIET_TOOLS = ("Read", "Grep", "Glob", "TodoWrite", "Task", "NotebookRead")
+
+
+def tool_progress_line(name: str, tool_input: dict) -> str:
+    """A human line for a tool the guide just reached for ("" = stay quiet).
+
+    Replaces dead "thinking…" time with a visible build narrative; wording
+    aligned with the ollama loop's TOOL_PROGRESS. Reads are noise, not
+    narrative.
+    """
+    if name in _QUIET_TOOLS:
+        return ""
+    if name == "Bash":
+        command = str(tool_input.get("command", ""))
+        if "transcribe" in command:
+            return "— transcribing (this can take a few minutes)… —"
+        if "fetch_talk" in command:
+            if "youtu" not in command:
+                # A page/mp3 source means local transcription inside.
+                return "— fetching the talk (transcription can take a few minutes)… —"
+            return "— fetching the talk… —"
+        if "speak.py" in command:
+            return "— speaking the primer… —"
+        if "build_shelf" in command:
+            return "— rebuilding the shelf… —"
+        if "search_history" in command:
+            return "— searching past conversations… —"
+        if "update_session_summary" in command:
+            return "— updating the session title… —"
+        return "— working… —"
+    if name in ("Write", "Edit"):
+        path = str(tool_input.get("file_path", ""))
+        if "primer" in path:
+            return "— writing the primer… —"
+        if path.endswith("notes.md"):
+            return "— taking notes… —"
+        if path.endswith("STUDY.md"):
+            return "— updating the path… —"
+        if "artifacts/" in path or path.endswith(".html"):
+            return "— building an interactive… —"
+        if "journal/" in path:
+            return "— writing the journal… —"
+        return "— writing… —"
+    if name == "WebSearch":
+        return "— searching the web… —"
+    if name == "WebFetch":
+        return "— reading a page… —"
+    return "— working… —"
+
+
+def shelf_mtime(library: Path) -> float:
+    """shelf.html's mtime (0 when absent) — the page's freshness beacon."""
+    shelf = library / "shelf.html"
+    return shelf.stat().st_mtime if shelf.exists() else 0
 
 
 def parse_ollama_stream_line(line: str) -> dict:
@@ -1806,6 +1882,7 @@ def _drain_claude(proc: subprocess.Popen, state: dict):
     the flag — the caller decides how to apologise.
     """
     emitted, finished = False, False
+    last_progress = None
     watchdog = threading.Timer(CLAUDE_TIMEOUT, proc.kill)
     watchdog.start()
     try:
@@ -1819,6 +1896,12 @@ def _drain_claude(proc: subprocess.Popen, state: dict):
                 break  # the CLI reported an error result
             if event["session_id"]:
                 state["session_id"] = event["session_id"]
+            for tool in event["tools"]:
+                progress = tool_progress_line(tool["name"], tool["input"])
+                if progress and progress != last_progress:
+                    last_progress = progress
+                    emitted = True  # narrative counts: never retry past tools
+                    yield "\n" + progress + "\n"
             if event["text"]:
                 emitted = True
                 yield event["text"]
@@ -2160,6 +2243,11 @@ def create_app(brain: str, ollama_model: str):
             return JSONResponse({"error": error.message}, status_code=error.status)
         turns = load_history(session_turns_path(SESSIONS_DIR, sid), HISTORY_LIMIT)
         return {"session": sid, "turns": turns}
+
+    @app.get("/api/version")
+    def api_version() -> dict:
+        # The page polls this to learn the shelf grew new content.
+        return {"shelf_mtime": shelf_mtime(LIBRARY)}
 
     @app.post("/api/listened")
     def api_listened(body: dict):

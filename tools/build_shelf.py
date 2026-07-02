@@ -615,6 +615,23 @@ STYLE = """
   .guide-lock:hover { opacity: 1; background: #efe7d9; }
   .room-lock { position: absolute; top: 1.1rem; right: 1.2rem; }
   .card.view { position: relative; } /* anchors the room lock */
+  #fresh-chip { display: block; width: 100%; text-align: center;
+                font: inherit; font-size: 0.85rem; color: #5a4d3a;
+                background: #f6f1e7; border: 1px dashed #d8cbb4;
+                border-radius: 999px; padding: 0.3rem 0.9rem;
+                margin-bottom: 0.5rem; cursor: pointer; }
+  #fresh-chip:hover { background: #efe7d9; }
+  #fresh-chip[hidden] { display: none; } /* the chip lesson, again */
+  .working { position: relative; }
+  .working::after { content: ""; position: absolute; right: 0.4rem;
+                    top: 50%; transform: translateY(-50%);
+                    width: 0.45rem; height: 0.45rem; border-radius: 999px;
+                    background: #a9853f;
+                    animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.25; }
+    50% { opacity: 1; }
+  }
   #reflection-chip { display: flex; align-items: center; gap: 0.3rem;
                      margin-top: 0.5rem; }
   #reflection-chip[hidden] { display: none; } /* flex must not defeat hidden */
@@ -693,6 +710,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 <button type="button" id="reflection-send"></button>
 <button type="button" id="reflection-dismiss" aria-label="dismiss">✕</button>
 </div>
+<button type="button" id="fresh-chip" hidden>the shelf has new content — refresh</button>
 <form id="chat-form">
 <button type="button" id="chat-open" title="open the conversation" aria-label="open the conversation">
 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5.5h15v10.5h-9l-4 3.5v-3.5h-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
@@ -1079,7 +1097,8 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
         if (turn.role !== "user" && turn.role !== "assistant") return;
         var div = add(turn.role === "user" ? "user" : "guide", turn.content);
         if (turn.role === "assistant") {
-          renderRich(div, parseActionCue(turn.content).text); // stale cues: strip only
+          // Stored turns keep the raw narrative; render them clean.
+          renderRich(div, parseActionCue(cleanReply(turn.content)).text);
         }
         history.push({ role: turn.role, content: turn.content });
       });
@@ -1113,12 +1132,98 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     mountArtifacts(); // artifact links become sandboxed live views
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
 
+  // --- the build narrative: progress lines out of the stream ------------
+  // Both brains stream "— doing a thing… —" lines inline with the reply;
+  // the page lifts complete ones out as centered system lines and keeps
+  // the bubble text clean.
+  function splitNarrative(raw) {
+    var progress = [];
+    var kept = [];
+    var parts = raw.split("\\n");
+    for (var i = 0; i < parts.length; i++) {
+      if (/^— .+ —$/.test(parts[i].trim())) progress.push(parts[i].trim());
+      else kept.push(parts[i]);
+    }
+    return {
+      text: kept.join("\\n").replace(/\\n{3,}/g, "\\n\\n").trim(),
+      progress: progress,
+    };
+  }
+
+  function cleanReply(text) {
+    return splitNarrative(text).text;
+  }
+
+  function addSystemBefore(refBubble, text) {
+    var div = document.createElement("div");
+    div.className = "chat-msg chat-system";
+    div.textContent = text;
+    var row = refBubble.closest(".chat-row") || refBubble;
+    list.insertBefore(div, row);
+    list.scrollTop = list.scrollHeight;
+  }
+
+  // A soft working dot on the sidebar entry the narrative mentions
+  // (else on the Talks heading) — the room feels alive while the guide
+  // builds. Page-side only.
+  function clearPulse() {
+    document.querySelectorAll(".working").forEach(function (el) {
+      el.classList.remove("working");
+    });
+  }
+
+  function pulseSidebar(narrative) {
+    clearPulse();
+    var hay = (narrative || "").toLowerCase();
+    var target = document.getElementById("talks-heading");
+    document.querySelectorAll("#talk-nav a").forEach(function (link) {
+      var title = link.querySelector(".nav-title");
+      var slug = (link.getAttribute("href") || "").slice(6);
+      if ((title && title.textContent
+            && hay.indexOf(title.textContent.toLowerCase()) !== -1)
+          || (slug && hay.indexOf(slug) !== -1)) {
+        target = link;
+      }
+    });
+    if (target) target.classList.add("working");
+  }
+
+  // --- the shelf refreshes itself when new content lands ----------------
+  var freshChip = document.getElementById("fresh-chip");
+  var shelfVersion = null;
+
+  function reloadIsSafe(playing, state, draft) {
+    return !playing && state === "docked" && !draft.trim();
+  }
+
+  function checkVersion() {
+    fetch("/api/version").then(function (r) { return r.json(); }).then(function (data) {
+      if (typeof data.shelf_mtime !== "number") return;
+      if (shelfVersion === null) { shelfVersion = data.shelf_mtime; return; }
+      if (data.shelf_mtime === shelfVersion) return;
+      shelfVersion = data.shelf_mtime;
+      var playing = window.saIsPlaying ? window.saIsPlaying() : false;
+      if (reloadIsSafe(playing, chatState, input.value)) {
+        location.reload(); // resume positions + history make this cheap
+      } else {
+        freshChip.hidden = false; // never mid-listen, never mid-draft
+      }
+    }).catch(function () { /* static shelf: nothing to poll */ });
+  }
+
+  freshChip.addEventListener("click", function () { location.reload(); });
+  setInterval(function () {
+    if (!document.hidden) checkVersion(); // poll only while visible
+  }, 8000);
+  checkVersion(); // baseline mtime
+
   function sendMessage(text) {
     if (!text || busy) return;
     add("user", text);
     history.push({ role: "user", content: text });
     var pending = add("guide", "thinking…");
     pending.classList.add("chat-thinking");
+    var shownProgress = 0;
     while (peekAction.firstChild) peekAction.removeChild(peekAction.firstChild);
     if (chatState === "docked") peekUpdate("thinking…"); // stay in the room
     busy = true;
@@ -1158,8 +1263,17 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
               pending.textContent = "";
             }
             reply += chunk;
-            pending.textContent += chunk;
-            if (chatState === "docked") peekUpdate(pending.textContent);
+            var flowing = splitNarrative(reply);
+            while (shownProgress < flowing.progress.length) {
+              addSystemBefore(pending, flowing.progress[shownProgress]);
+              shownProgress += 1;
+              pulseSidebar(reply);
+            }
+            pending.textContent = flowing.text;
+            if (chatState === "docked") {
+              peekUpdate(flowing.text
+                || flowing.progress[flowing.progress.length - 1] || "…");
+            }
             list.scrollTop = list.scrollHeight;
           }
           return step.done ? reply : pump();
@@ -1173,7 +1287,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
         peekUpdate(pending.textContent, true);
         return;
       }
-      var cue = parseActionCue(reply);
+      var cue = parseActionCue(cleanReply(reply));
       renderRich(pending, cue.text); // bubble completed: dress the markdown
       peekUpdate(cue.text, true); // the peek settles into its bubble
       if (cue.action) {
@@ -1194,7 +1308,9 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       peekUpdate(pending.textContent, true);
     }).finally(function () {
       busy = false;
+      clearPulse();
       updateSendState();
+      checkVersion(); // fresh content may have just landed
       input.focus({ preventScroll: true });
     });
   }
@@ -1633,6 +1749,7 @@ LAYOUT_SCRIPT = """<script>
   // The chat panel (its own closure) calls this when conversation mode
   // opens or closes, so the capsule appears the moment the room is covered.
   window.saUpdateCapsule = updateCapsule;
+  window.saIsPlaying = function () { return !!nowPlaying; };
 
   // Navigation must never interrupt playback. Hiding an iframe with
   // display:none lets YouTube stop the video, so the actively-playing
@@ -2050,7 +2167,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <h1>Second Arrow</h1>
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
 <a class="begin-link" href="#home">begin here</a>{curriculum_link}
-<h2>Talks</h2>
+<h2 id="talks-heading">Talks</h2>
 {render_nav(talks, states, unfetched)}
 <footer>
 Private — generated from your library.

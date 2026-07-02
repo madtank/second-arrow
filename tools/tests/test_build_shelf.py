@@ -1326,3 +1326,89 @@ def test_cue_execution_reuses_user_click_paths(tmp_path):
     # Pause/play cues drive the same playback switch the capsule uses.
     assert "function setPlayback(playing)" in html
 
+
+# --- watch it work: narrative rendering + self-refreshing shelf ---------------
+
+
+def test_stream_narrative_splitter_under_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    fn = re.search(r"function splitNarrative\(raw\) \{[\s\S]*?\n  \}", html)
+    assert fn, "splitNarrative missing"
+    harness = fn.group(0) + r"""
+function check(i, got, wantText, wantProgress) {
+  if (got.text !== wantText || JSON.stringify(got.progress) !== JSON.stringify(wantProgress)) {
+    console.error("case " + i, JSON.stringify(got));
+    process.exit(1);
+  }
+}
+check(0, splitNarrative("On it.\n— fetching the talk… —\nDone: it landed."),
+  "On it.\nDone: it landed.", ["— fetching the talk… —"]);
+check(1, splitNarrative("— rebuilding the shelf… —\n— rebuilding the shelf… —\nOk."),
+  "Ok.", ["— rebuilding the shelf… —", "— rebuilding the shelf… —"]);
+check(2, splitNarrative("plain reply, no narrative"),
+  "plain reply, no narrative", []);
+check(3, splitNarrative("mid — dash — text stays"), "mid — dash — text stays", []);
+console.log("narrative ok");
+"""
+    js = tmp_path / "narrative.js"
+    js.write_text(harness)
+    result = subprocess.run(["node", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "narrative ok" in result.stdout
+
+
+def test_progress_lines_render_as_system_lines_and_pulse(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # New complete progress lines become centered system lines mid-stream
+    # (peek and overlay alike), and the sidebar shows a soft working dot
+    # on the entry the narrative mentions (else on the Talks heading).
+    assert "shownProgress" in html
+    assert "function pulseSidebar(" in html
+    assert "function clearPulse()" in html
+    assert 'id="talks-heading"' in html
+    assert re.search(r"\.working::after \{[^}]*pulse", html, re.S)
+    # The history strip removes narrative from restored/settled bubbles.
+    assert "function cleanReply(" in html
+
+
+def test_reload_safety_predicate_under_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    fn = re.search(r"function reloadIsSafe\(playing, state, draft\) \{[\s\S]*?\n  \}", html)
+    assert fn, "reloadIsSafe missing"
+    harness = fn.group(0) + r"""
+function check(i, got, want) {
+  if (got !== want) { console.error("case " + i); process.exit(1); }
+}
+check(0, reloadIsSafe(false, "docked", ""), true);
+check(1, reloadIsSafe(true, "docked", ""), false);   // never mid-listen
+check(2, reloadIsSafe(false, "conversation", ""), false); // never over chat
+check(3, reloadIsSafe(false, "docked", "half a thought"), false); // never mid-draft
+check(4, reloadIsSafe(false, "docked", "   "), true); // whitespace is no draft
+console.log("safety ok");
+"""
+    js = tmp_path / "reload.js"
+    js.write_text(harness)
+    result = subprocess.run(["node", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "safety ok" in result.stdout
+
+
+def test_auto_fresh_polling_and_chip(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    assert '"/api/version"' in html
+    assert "shelf_mtime" in html
+    # ~8s poll while visible, plus a check after each completed turn.
+    assert "8000" in html and "document.hidden" in html
+    assert "checkVersion(); // fresh content may have just landed" in html
+    # Unsafe moments get the gentle chip instead of a reload.
+    chip = re.search(r'<button type="button" id="fresh-chip" hidden>', html)
+    assert chip, "fresh chip missing"
+    assert "the shelf has new content — refresh" in html
+    assert re.search(r"#fresh-chip\[hidden\] \{ display: none", html)
+    assert "location.reload()" in html
+    assert "window.saIsPlaying" in html
+
