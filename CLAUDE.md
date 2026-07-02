@@ -222,3 +222,8 @@ questions, candidate next steps.
 The web app (`backend/`, `frontend/`) is dormant — leave it alone unless
 asked. For tool changes: tests first (see `tools/tests/`), never let
 private paths (`library/`, `journal/`, `STUDY.md`) become tracked.
+UI behavior is TDD'd through the browser e2e suite (`tools/tests/e2e/`,
+see its README): write the failing e2e test first, then
+`uv run --with pytest --with fastapi --with uvicorn --with playwright
+--with mlx-whisper pytest tools/tests -m e2e -v` (excluded from the
+default run; scratch dirs and ephemeral ports only — never 8765/8642).
