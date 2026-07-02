@@ -343,6 +343,7 @@ STYLE = """
                transition: left 0.2s ease; box-shadow: none; }
     #sidebar.open { left: 0; box-shadow: 0 0 24px rgba(60, 56, 51, 0.25); }
     main { padding-top: 3.5rem; }
+    #guide-chat.chat-conversation { left: 0; }
   }
   h1, h2, h3, h4, h5 { font-family: Georgia, "Times New Roman", serif;
                        font-weight: normal; color: #4a4038; }
@@ -423,8 +424,11 @@ STYLE = """
                    padding: 0.25rem 0; border-top: 1px solid #f0e9dd; }
   .chat-msg { white-space: pre-wrap; margin: 0.6rem 0; padding: 0.5rem 0.8rem;
               border-radius: 8px; font-size: 0.95rem; }
-  .chat-user { background: #efe7d9; margin-left: 2.5rem; }
-  .chat-guide { background: #f6f1e7; margin-right: 2.5rem; }
+  .chat-user { background: #e7dcc8; margin-left: 2.5rem;
+               border-radius: 10px 4px 10px 10px; }
+  .chat-guide { background: #f9f5ec; margin-right: 2.5rem;
+                border: 1px solid #eee4d2;
+                border-radius: 4px 10px 10px 10px; }
   .chat-thinking { color: #a99e8e; font-style: italic; }
   .chat-system { background: none; text-align: center; color: #a99e8e;
                  font-size: 0.8rem; font-style: italic; padding: 0; }
@@ -438,8 +442,40 @@ STYLE = """
                 background: #fffdf9; border: 1px solid #e8e0d3;
                 border-radius: 8px; padding: 0.15rem 0.4rem;
                 max-width: 13rem; }
+  .chat-row { display: flex; gap: 0.5rem; align-items: flex-start;
+              margin: 0.6rem 0; }
+  .chat-row-user { flex-direction: row-reverse; }
+  .chat-avatar { width: 1.7rem; height: 1.7rem; flex-shrink: 0;
+                 margin-top: 0.15rem; }
+  .chat-avatar svg { width: 100%; height: 100%; display: block; }
+  .chat-row:not(.chat-run-start) .chat-avatar { visibility: hidden; }
+  .chat-body { flex: 1; min-width: 0; }
+  .chat-row-user .chat-body { display: flex; flex-direction: column;
+                              align-items: flex-end; }
+  .chat-label { color: #a99e8e; font-size: 0.75rem; margin: 0 0.2rem 0.15rem; }
+  .chat-row .chat-msg { margin: 0; max-width: 92%; }
+  .chat-go { display: block; margin-top: 0.6rem; font: inherit;
+             font-size: 0.85rem; color: #5a4d3a; background: #efe7d9;
+             border: none; border-radius: 999px; padding: 0.25rem 0.9rem;
+             cursor: pointer; }
+  .chat-go:hover { background: #e7dcc8; }
+  #chat-toggle { font: inherit; color: #8a7f70; background: none;
+                 border: 1px solid #e8e0d3; border-radius: 8px;
+                 padding: 0 0.6rem; cursor: pointer; }
+  #guide-chat.chat-docked h2, #guide-chat.chat-docked #chat-brain,
+  #guide-chat.chat-docked #chat-messages { display: none; }
+  #guide-chat.chat-docked { padding-top: 0.85rem; padding-bottom: 0.85rem; }
+  #guide-chat.chat-docked #chat-form { margin-top: 0; }
+  #guide-chat.chat-conversation { position: fixed; top: 0; right: 0;
+                          bottom: 0; left: 260px; z-index: 4; margin: 0;
+                          border-radius: 0; display: flex;
+                          flex-direction: column;
+                          padding: 2rem max(1.5rem, calc(50% - 330px)); }
+  #guide-chat.chat-conversation #chat-messages { flex: 1; max-height: none;
+                                                 font-size: 1.02rem; }
   #reflection-chip { display: flex; align-items: center; gap: 0.3rem;
                      margin-top: 0.5rem; }
+  #reflection-chip[hidden] { display: none; } /* flex must not defeat hidden */
   #reflection-send { flex: 1; text-align: left; font: inherit;
                      font-size: 0.85rem; color: #5a4d3a; background: #f6f1e7;
                      border: 1px dashed #d8cbb4; border-radius: 999px;
@@ -466,7 +502,13 @@ STYLE = """
 # sent to (per-request "brain" field), driven by /health's availability
 # map. Replies are rendered with textContent (never innerHTML): model
 # output stays inert text.
-CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
+CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
+<template id="avatar-guide">
+<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4a8.6 8.6 0 1 0 7 3.6" fill="none" stroke="#a9853f" stroke-width="1.7" stroke-linecap="round"/></svg>
+</template>
+<template id="avatar-user">
+<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.4" r="3.4" fill="#7a6a50"/><path d="M4.6 20c1.6-4 5-5.6 7.4-5.6s5.8 1.6 7.4 5.6" fill="none" stroke="#7a6a50" stroke-width="2.4" stroke-linecap="round"/></svg>
+</template>
 <h2>the guide</h2>
 <p class="meta" id="chat-brain">
 <button type="button" class="brain-pill" data-brain="claude">claude · deep</button>
@@ -481,6 +523,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 <form id="chat-form">
 <textarea id="chat-input" rows="2" placeholder="Where are you right now?"></textarea>
 <button type="submit" id="chat-send">Send</button>
+<button type="button" id="chat-toggle"></button>
 </form>
 </section>
 
@@ -502,9 +545,98 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     var div = document.createElement("div");
     div.className = "chat-msg chat-" + role;
     div.textContent = text; // textContent only — model output stays inert text
-    list.appendChild(div);
+    if (role !== "user" && role !== "guide") {
+      list.appendChild(div); // system lines stay centered, unbubbled
+      list.scrollTop = list.scrollHeight;
+      return div;
+    }
+    // Who is speaking, unmistakably: avatar + label on the first bubble
+    // of each same-speaker run; later bubbles in the run stay bare.
+    var row = document.createElement("div");
+    row.className = "chat-row chat-row-" + role;
+    var prev = list.lastElementChild;
+    var runStart = !prev || !prev.classList.contains("chat-row-" + role);
+    if (runStart) row.classList.add("chat-run-start");
+    var avatar = document.createElement("span");
+    avatar.className = "chat-avatar";
+    var tpl = document.getElementById(
+      role === "user" ? "avatar-user" : "avatar-guide");
+    if (tpl && tpl.content && tpl.content.firstElementChild) {
+      // Cloned from the static template — never built from message text.
+      avatar.appendChild(tpl.content.firstElementChild.cloneNode(true));
+    }
+    row.appendChild(avatar);
+    var body = document.createElement("div");
+    body.className = "chat-body";
+    if (runStart) {
+      var label = document.createElement("div");
+      label.className = "chat-label";
+      label.textContent = role === "user" ? "you" : "the guide";
+      body.appendChild(label);
+    }
+    body.appendChild(div);
+    row.appendChild(body);
+    list.appendChild(row);
     list.scrollTop = list.scrollHeight;
     return div;
+  }
+
+  // --- two states, nothing between: docked (looking at the page) and
+  // conversation (talking — generous, most of the pane). The page under
+  // a conversation is hidden, never unmounted: audio keeps playing and
+  // every scroll position is exactly where you left it.
+  var chatToggle = document.getElementById("chat-toggle");
+  var chatState = "docked"; // always start docked: the room owns the screen
+
+  function setChatState(next) {
+    chatState = next;
+    panel.classList.remove("chat-docked", "chat-conversation");
+    panel.classList.add("chat-" + next);
+    chatToggle.textContent = next === "docked" ? "▴" : "▾";
+    chatToggle.setAttribute("title",
+      next === "docked" ? "open the conversation" : "back to the page");
+    if (next === "conversation") list.scrollTop = list.scrollHeight;
+  }
+
+  chatToggle.addEventListener("click", function () {
+    setChatState(chatState === "docked" ? "conversation" : "docked");
+  });
+  setChatState("docked");
+
+  // --- guide-offered navigation: a final-line [[go: ...]] cue -----------
+  // The cue is ALWAYS stripped from display; only a final-line cue whose
+  // target really exists on this page earns a "take me there" button.
+  function parseGoCue(text) {
+    var target = null;
+    var match = text.match(/\\[\\[go:\\s*([^\\]]+?)\\s*\\]\\]\\s*$/);
+    if (match) {
+      var dest = match[1];
+      if (dest === "home") target = "#home";
+      else if (dest === "curriculum" && document.getElementById("view-curriculum")) {
+        target = "#curriculum";
+      } else {
+        var talk = dest.match(/^talk\\/([a-z0-9][a-z0-9-]*)$/);
+        if (talk && document.getElementById("talk-" + talk[1])) {
+          target = "#talk/" + talk[1];
+        }
+      }
+    }
+    return {
+      text: text.replace(/\\s*\\[\\[go:[^\\]]*\\]\\]/g, "").trim(),
+      target: target,
+    };
+  }
+
+  function offerNavigation(bubble, cue) {
+    var go = document.createElement("button");
+    go.type = "button";
+    go.className = "chat-go";
+    go.textContent = "take me there →";
+    go.addEventListener("click", function () {
+      location.hash = cue.target; // hash navigation only
+      setChatState("docked"); // the room takes the screen
+    });
+    bubble.appendChild(go);
   }
 
   function markActive() {
@@ -677,7 +809,9 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       (data.turns || []).forEach(function (turn) {
         if (turn.role !== "user" && turn.role !== "assistant") return;
         var div = add(turn.role === "user" ? "user" : "guide", turn.content);
-        if (turn.role === "assistant") renderRich(div, turn.content);
+        if (turn.role === "assistant") {
+          renderRich(div, parseGoCue(turn.content).text); // stale cues: strip only
+        }
         history.push({ role: turn.role, content: turn.content });
       });
     }).catch(function () { /* an older server has no /api/history */ });
@@ -712,6 +846,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 
   function sendMessage(text) {
     if (!text || send.disabled) return;
+    if (chatState === "docked") setChatState("conversation"); // replies land visibly
     add("user", text);
     history.push({ role: "user", content: text });
     var pending = add("guide", "thinking…");
@@ -765,7 +900,9 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
         pending.textContent = "The guide said nothing — try again.";
         return;
       }
-      renderRich(pending, reply); // bubble completed: dress the markdown
+      var cue = parseGoCue(reply);
+      renderRich(pending, cue.text); // bubble completed: dress the markdown
+      if (cue.target) offerNavigation(pending, cue);
       history.push({ role: "assistant", content: reply });
     }).catch(function (error) {
       pending.classList.remove("chat-thinking");
@@ -790,6 +927,10 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       form.requestSubmit();
     }
     if (event.key === "Escape") {
+      if (chatState !== "docked") {
+        setChatState("docked"); // back to the page, exactly as it was
+        return;
+      }
       input.blur(); // keys go back to the page: space scrolls, players work
     }
   });
@@ -803,6 +944,10 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     if (panel.hidden || event.metaKey || event.ctrlKey || event.altKey) return;
     var target = event.target;
     if (target !== document.body && target !== document.documentElement) return;
+    if (event.key === "Escape" && chatState !== "docked") {
+      setChatState("docked");
+      return;
+    }
     if (event.key === "/") {
       event.preventDefault(); // focus without the slash
       input.focus({ preventScroll: true });

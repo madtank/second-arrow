@@ -312,6 +312,26 @@ phone), revisit with real usage behind the decision.
   existing practice tools were wired with the documented fire-and-
   forget snippet (debounced input → postMessage; tools keep working
   with no parent listening).
+- **Iter 11b — DONE: binary chat states; guide-offered navigation;
+  unmistakable speakers.** The panel has exactly two states — docked
+  (just the input bar; the room owns the screen; the calm default on
+  every load) and conversation (generous, most of the pane, readable
+  typography; the page underneath is hidden, never unmounted — audio
+  keeps playing, scroll stays put). Send from docked opens the
+  conversation; Escape or the bar toggle drops straight back. The
+  guide can offer to walk the user somewhere: a final-line
+  [[go: talk/<slug>|curriculum|home]] cue is always stripped from
+  display and — only when the target exists on the page — becomes a
+  "take me there →" button (hash navigation; the chat docks so the
+  room shows). Bubbles became unmistakable: inline-SVG avatars from
+  static templates (an enso for the guide, a small person for you),
+  per-side fills/corners, and a muted name label on the first bubble
+  of each same-speaker run; system lines stay centered and unbubbled.
+  Also fixed live: the reflections chip could render as an empty
+  dashed pill (flex display defeating the hidden attribute) — now
+  #reflection-chip[hidden] wins; and WIP pages no longer leak onto the
+  user's shelf (test builds go to a temp -o output; library/shelf.html
+  is regenerated only from committed code).
 
 ## Boundaries
 

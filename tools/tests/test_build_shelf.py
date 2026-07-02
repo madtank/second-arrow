@@ -936,3 +936,92 @@ def test_reflection_send_reuses_the_chat_send_path(tmp_path):
     assert "function sendMessage(text)" in html
     assert html.count("sendMessage(") >= 3  # definition + form + chip
 
+
+# --- iteration 11b: docked/open/full guide; guide-offered navigation ---------
+
+
+def test_chat_panel_is_binary_docked_or_conversation(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Docked is the calm default, set in the static markup itself: either
+    # you are talking or you are looking at the page — nothing in between.
+    assert re.search(r'<section class="card chat-docked" id="guide-chat" hidden>', html)
+    assert 'id="chat-toggle"' in html
+    assert "chat-expand" not in html  # no middle state, no second control
+    assert "chat-open" not in html and "chat-full" not in html
+    # One state function; sending from docked opens the conversation.
+    assert "function setChatState(next)" in html
+    assert 'if (chatState === "docked") setChatState("conversation");' in html
+    # Escape (and the toggle) drop straight back to the page.
+    assert 'setChatState("docked");' in html
+    # Docked hides the stream; conversation fills the pane generously,
+    # overlaying (views hidden, never unmounted — audio keeps playing).
+    assert ".chat-docked #chat-messages" in html
+    assert "#guide-chat.chat-conversation" in html
+
+
+def test_reflection_chip_is_gone_when_empty(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The chip starts hidden AND its flex display must not defeat the
+    # hidden attribute (the empty-dashed-pill bug seen live).
+    assert re.search(r"#reflection-chip\[hidden\] \{ display: none", html)
+    # It only ever shows with non-empty reflection text in hand.
+    assert "reflections[from.slug]" in html
+
+
+def test_go_cue_parser_matrix_under_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    fn = re.search(r"function parseGoCue\(text\) \{[\s\S]*?\n  \}", html)
+    assert fn, "parseGoCue missing"
+    harness = """
+var document = { getElementById: function (id) {
+  return ["talk-patience", "view-curriculum"].indexOf(id) >= 0 ? {} : null;
+} };
+""" + fn.group(0) + r"""
+function check(i, got, wantText, wantTarget) {
+  if (got.text !== wantText || got.target !== wantTarget) {
+    console.error("case " + i, JSON.stringify(got));
+    process.exit(1);
+  }
+}
+check(0, parseGoCue("Fetched it.\n[[go: talk/patience]]"), "Fetched it.", "#talk/patience");
+check(1, parseGoCue("See the road ahead.\n[[go: curriculum]]"), "See the road ahead.", "#curriculum");
+check(2, parseGoCue("Back to the start.\n[[go: home]]"), "Back to the start.", "#home");
+check(3, parseGoCue("Hm.\n[[go: talk/not-a-talk]]"), "Hm.", null);
+check(4, parseGoCue("Hm.\n[[go: javascript:alert(1)]]"), "Hm.", null);
+check(5, parseGoCue("A [[go: talk/patience]] mid-text cue.\nMore."), "A mid-text cue.\nMore.", null);
+check(6, parseGoCue("No cue at all."), "No cue at all.", null);
+check(7, parseGoCue("Trailing space cue.\n[[go: talk/patience]]  \n"), "Trailing space cue.", "#talk/patience");
+console.log("cue matrix ok");
+"""
+    js = tmp_path / "cues.js"
+    js.write_text(harness)
+    result = subprocess.run(["node", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "cue matrix ok" in result.stdout
+
+
+def test_go_button_is_textcontent_only(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    assert '"take me there →"' in html
+    # Navigation is hash-only, and the chat docks so the room is visible.
+    assert "location.hash = cue.target" in html
+    assert "innerHTML" not in html
+
+
+def test_chat_bubbles_carry_avatars_and_run_labels(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Inline-SVG avatars live in static templates (cloned per message —
+    # never built from message content): an enso for the guide, a small
+    # person for the user.
+    assert re.search(r'<template id="avatar-guide">\s*<svg', html)
+    assert re.search(r'<template id="avatar-user">\s*<svg', html)
+    assert "cloneNode(true)" in html
+    # Speaker labels appear once per run of same-speaker messages.
+    assert '"the guide"' in html and '"you"' in html
+    assert "chat-run-start" in html
+    assert "chat-label" in html
+    # System lines stay centered and unbubbled (no row/avatar).
+    assert "chat-system" in html
+
