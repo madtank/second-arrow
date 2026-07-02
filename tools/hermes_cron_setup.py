@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -49,13 +50,30 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MARKER_PATH = REPO_ROOT / "library" / ".prep-cron.json"
 
 DEFAULT_URL = "http://127.0.0.1:8642"
-PROFILE_ENV = Path.home() / ".hermes" / "profiles" / "second-arrow" / ".env"
+PROFILE_DIR = Path(
+    os.environ.get(
+        "HERMES_PROFILE_DIR",
+        str(Path.home() / ".hermes" / "profiles" / "second-arrow"),
+    )
+)
+PROFILE_ENV = PROFILE_DIR / ".env"
+HERMES_AGENT_DIR = Path(
+    os.environ.get("HERMES_AGENT_DIR", str(Path.home() / ".hermes" / "hermes-agent"))
+)
 TIMEOUT = 10  # seconds per REST call
 
 JOB_NAME = "nightly-prep"
 SCHEDULE = "23 3 * * *"  # 03:23 daily, 5-field cron
 PROVIDER = "openai-codex"  # the `deep` route's underlying pair, pinned
 MODEL = "gpt-5.5"
+
+# POST/PATCH /api/jobs silently drop these three (gateway source,
+# _handle_create_job) — they are pinned through the engine instead.
+PIN_FIELDS = {
+    "model": MODEL,
+    "provider": PROVIDER,
+    "enabled_toolsets": ["mcp-second_arrow"],
+}
 
 PROMPT = """\
 Data-only nightly prep for the Second Arrow library. Using only your
@@ -124,6 +142,48 @@ def marker_content(now: str | None = None) -> dict:
         or datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "schedule": SCHEDULE,
     }
+
+
+def job_is_pinned(job) -> bool:
+    """Does the stored job carry every pin field verbatim?"""
+    return isinstance(job, dict) and all(
+        job.get(key) == value for key, value in PIN_FIELDS.items()
+    )
+
+
+PIN_CODE = (
+    "import json, sys\n"
+    "from cron.jobs import update_job\n"
+    "job = update_job(sys.argv[1], json.loads(sys.argv[2]))\n"
+    "print(json.dumps(job or {}))\n"
+)
+
+
+def pin_argv(job_id: str) -> list[str]:
+    """The hermes-venv python invocation that pins the job in the engine."""
+    python = HERMES_AGENT_DIR / "venv" / "bin" / "python3"
+    return [str(python), "-c", PIN_CODE, str(job_id), json.dumps(PIN_FIELDS)]
+
+
+def _run_pin(job_id: str) -> dict:
+    """Pin via cron.jobs.update_job in the profile's own store.
+
+    The REST layer drops the pin fields, so the user-run script calls the
+    engine directly (HERMES_HOME steers it to the profile). The builtin
+    scheduler re-reads jobs.json on its next 60s tick — no restart needed.
+    """
+    env = {**os.environ, "HERMES_HOME": str(PROFILE_DIR)}
+    result = subprocess.run(
+        pin_argv(job_id),
+        cwd=HERMES_AGENT_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "pin subprocess failed")
+    return json.loads(result.stdout.strip() or "{}")
 
 
 def read_api_key(env_path: Path | None = None) -> str:
@@ -223,6 +283,33 @@ def main(argv=None) -> int:
     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as error:
         print(f"writing the job failed: {error}", file=sys.stderr)
         return 1
+
+    # The REST layer silently drops provider/model/enabled_toolsets, so
+    # pin through the engine and verify the pin actually took.
+    try:
+        stored = find_job(_request("GET", base, "/api/jobs", api_key))
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as error:
+        print(f"re-reading the job failed: {error}", file=sys.stderr)
+        return 1
+    if not stored:
+        print("the job vanished after writing — gateway logs?", file=sys.stderr)
+        return 1
+    pinned_job = stored["job"]
+    if not job_is_pinned(pinned_job):
+        try:
+            pinned_job = _run_pin(stored["id"])
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+            print(f"pinning the job failed: {error}", file=sys.stderr)
+            return 1
+    if not job_is_pinned(pinned_job):
+        print(
+            "the pin did not take — the job would run unpinned and fail "
+            "closed on the next model switch. Check "
+            f"{PROFILE_DIR / 'cron' / 'jobs.json'} by hand.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"pinned: {PROVIDER}/{MODEL}, toolsets ['mcp-second_arrow']")
 
     marker = marker_content()
     MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)

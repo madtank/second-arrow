@@ -125,9 +125,13 @@ def _start_fake_jobs_gateway(state):
                 self.send_error(404)
                 return
             job = self._body()
+            state["posts"].append(dict(job))
+            # Faithful to the real gateway: POST /api/jobs silently drops
+            # provider/model/enabled_toolsets (verified in gateway source).
+            for dropped in ("provider", "model", "enabled_toolsets"):
+                job.pop(dropped, None)
             job["id"] = f"job-{len(state['jobs']) + 1}"
             state["jobs"].append(job)
-            state["posts"].append(job)
             self._json(job)
 
         def do_PATCH(self):  # noqa: N802
@@ -160,11 +164,20 @@ def test_main_creates_then_updates_one_job_and_marks_it(
     monkeypatch.setattr(cron_setup, "MARKER_PATH", marker)
     monkeypatch.setenv("HERMES_URL", base)
     monkeypatch.setenv("HERMES_API_KEY", "k")
-    # First run: no job stored — created.
+    pins = []
+
+    def fake_pin(job_id):
+        pins.append(job_id)
+        return {**cron_setup.build_job(), "id": job_id}
+
+    monkeypatch.setattr(cron_setup, "_run_pin", fake_pin)
+    # First run: no job stored — created, then pinned via the engine
+    # (the gateway's REST layer drops the pin fields).
     assert cron_setup.main([]) == 0
     assert len(state["posts"]) == 1
     assert state["posts"][0]["name"] == "nightly-prep"
     assert state["patches"] == []
+    assert pins == ["job-1"]
     saved = json.loads(marker.read_text())
     assert saved["schedule"] == "23 3 * * *"
     assert saved["installed_at"]
@@ -174,8 +187,48 @@ def test_main_creates_then_updates_one_job_and_marks_it(
     assert len(state["patches"]) == 1
     assert state["patches"][0]["id"] == "job-1"
     assert state["patches"][0]["body"]["provider"] == "openai-codex"
+    assert pins == ["job-1", "job-1"]
     out = capsys.readouterr().out
     assert "created job" in out and "updated job" in out
+    assert "pinned" in out
+
+
+def test_job_is_pinned_truth_table():
+    pinned = {
+        "model": "gpt-5.5",
+        "provider": "openai-codex",
+        "enabled_toolsets": ["mcp-second_arrow"],
+    }
+    assert cron_setup.job_is_pinned(pinned) is True
+    assert cron_setup.job_is_pinned({**pinned, "model": None}) is False
+    assert cron_setup.job_is_pinned({**pinned, "enabled_toolsets": []}) is False
+    assert cron_setup.job_is_pinned({}) is False
+
+
+def test_pin_argv_targets_the_hermes_engine():
+    argv = cron_setup.pin_argv("job-9")
+    assert argv[0].endswith("venv/bin/python3")
+    assert "update_job" in argv[2]
+    assert argv[3] == "job-9"
+    updates = json.loads(argv[4])
+    assert updates == {
+        "model": "gpt-5.5",
+        "provider": "openai-codex",
+        "enabled_toolsets": ["mcp-second_arrow"],
+    }
+
+
+def test_main_fails_loudly_when_the_pin_does_not_take(
+    tmp_path, monkeypatch, jobs_gateway, capsys
+):
+    base, _ = jobs_gateway
+    monkeypatch.setattr(cron_setup, "MARKER_PATH", tmp_path / ".prep-cron.json")
+    monkeypatch.setenv("HERMES_URL", base)
+    monkeypatch.setenv("HERMES_API_KEY", "k")
+    monkeypatch.setattr(cron_setup, "_run_pin", lambda job_id: {"id": job_id})
+    assert cron_setup.main([]) == 1
+    err = capsys.readouterr().err
+    assert "pin" in err.lower()
 
 
 def test_main_requires_a_key_and_a_gateway(tmp_path, monkeypatch, capsys):
