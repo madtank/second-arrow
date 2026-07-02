@@ -1064,14 +1064,51 @@ def test_one_voice_at_a_time(tmp_path):
     assert "nowPlaying = null" in html
 
 
-def test_capsule_hides_only_in_its_own_room(tmp_path):
+def test_capsule_visibility_predicate_under_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    # In the talk's own room the capsule is redundant; everywhere else —
-    # including over the chat conversation — it stays.
-    assert 'location.hash === "#talk/" + nowPlaying.slug' in html
+    fn = re.search(r"function capsuleVisible\([\s\S]*?\n  \}", html)
+    assert fn, "capsuleVisible missing"
+    harness = fn.group(0) + r"""
+var playing = { slug: "patience" };
+function check(i, got, want) {
+  if (got !== want) { console.error("case " + i); process.exit(1); }
+}
+check(0, capsuleVisible(null, "#home", false), false);        // nothing playing
+check(1, capsuleVisible(playing, "#home", false), true);      // other room
+check(2, capsuleVisible(playing, "#talk/patience", false), false); // own room
+check(3, capsuleVisible(playing, "#talk/patience", true), true);   // own room COVERED by chat
+check(4, capsuleVisible(playing, "#talk/other", true), true);  // chat + other room
+check(5, capsuleVisible(playing, "#curriculum", false), true);
+console.log("predicate ok");
+"""
+    js = tmp_path / "capsule.js"
+    js.write_text(harness)
+    result = subprocess.run(["node", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "predicate ok" in result.stdout
+    # Opening/closing the conversation re-evaluates the capsule at once.
+    assert "window.saUpdateCapsule = updateCapsule" in html
+    assert "if (window.saUpdateCapsule) window.saUpdateCapsule();" in html
     # YouTube with a mute command channel: hide play/pause, keep the
     # capsule navigating (degrade, never a broken-looking control).
     assert "ytInfo" in html
+
+
+def test_playing_embed_survives_room_changes(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Navigation must never interrupt playback: the actively-playing
+    # talk's view is parked offscreen (still rendered) instead of
+    # display:none — only that one, with no layout side effects.
+    assert "function keepPlayingViewAlive()" in html
+    assert re.search(r"\.js \.view\.audible \{ display: block; position: fixed;\s*left: -10000px", html)
+    assert "pointer-events: none" in html
+    # The one-voice rule fires only when a NEW talk starts (mount/play) —
+    # never from the hash router.
+    show = re.search(r"function show\(\) \{[\s\S]*?\n  \}", html).group(0)
+    assert "pauseOthers" not in show
+    assert "keepPlayingViewAlive();" in show
 
 
 def test_conversation_overlay_has_a_visible_way_down(tmp_path):

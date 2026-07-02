@@ -337,6 +337,9 @@ STYLE = """
          padding: 2rem 1.5rem 11rem; } /* room for the fixed tray */
   .js .view { display: none; }
   .js .view.active { display: block; }
+  .js .view.audible { display: block; position: fixed;
+                      left: -10000px; top: 0; width: 640px;
+                      pointer-events: none; } /* playing, parked offscreen */
   #sidebar-collapse { position: absolute; top: 0.9rem; right: 0.5rem;
                       font: inherit; color: #a99e8e; background: none;
                       border: none; border-radius: 8px;
@@ -693,6 +696,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     // The capsule steps down under the minimize pill while talking.
     document.body.classList.toggle(
       "chat-conversation-mode", next === "conversation");
+    if (window.saUpdateCapsule) window.saUpdateCapsule();
     if (next === "conversation") list.scrollTop = list.scrollHeight;
   }
 
@@ -1095,6 +1099,7 @@ LAYOUT_SCRIPT = """<script>
     links.forEach(function (link) {
       link.classList.toggle("active", link.getAttribute("href") === hash);
     });
+    keepPlayingViewAlive(); // the playing talk's embed survives the switch
   }
   window.addEventListener("hashchange", show);
   show();
@@ -1257,13 +1262,23 @@ LAYOUT_SCRIPT = """<script>
     npGlyph.hidden = !!art;
     if (art) npThumb.setAttribute("src", art.getAttribute("src"));
     updateCapsule();
+    keepPlayingViewAlive();
+  }
+
+  function capsuleVisible(playing, hash, conversationMode) {
+    if (!playing) return false;
+    // With the conversation covering the page, even the talk's own room
+    // is out of sight — the handle must be there.
+    if (conversationMode) return true;
+    // Otherwise only its own visible room makes the handle redundant.
+    return hash !== "#talk/" + playing.slug;
   }
 
   function updateCapsule() {
-    if (!nowPlaying) { capsule.hidden = true; return; }
-    // Only its own room makes the handle redundant; everywhere else —
-    // other rooms, home, over the chat conversation — it stays.
-    capsule.hidden = location.hash === "#talk/" + nowPlaying.slug;
+    capsule.hidden = !capsuleVisible(
+      nowPlaying,
+      location.hash,
+      document.body.classList.contains("chat-conversation-mode"));
     if (capsule.hidden) return;
     npTitle.textContent = nowPlaying.title;
     npTime.textContent = npClock(nowPlaying.time);
@@ -1305,9 +1320,28 @@ LAYOUT_SCRIPT = """<script>
     }
     nowPlaying = null;
     updateCapsule();
+    keepPlayingViewAlive();
   });
 
   window.addEventListener("hashchange", updateCapsule);
+  // The chat panel (its own closure) calls this when conversation mode
+  // opens or closes, so the capsule appears the moment the room is covered.
+  window.saUpdateCapsule = updateCapsule;
+
+  // Navigation must never interrupt playback. Hiding an iframe with
+  // display:none lets YouTube stop the video, so the actively-playing
+  // talk's view is parked offscreen instead — still rendered, no layout
+  // footprint, pointer-inert. Only that one view, only while it plays.
+  function keepPlayingViewAlive() {
+    document.querySelectorAll(".view.audible").forEach(function (view) {
+      view.classList.remove("audible");
+    });
+    if (!nowPlaying || nowPlaying.kind !== "yt") return;
+    var view = document.getElementById("talk-" + nowPlaying.slug);
+    if (view && !view.classList.contains("active")) {
+      view.classList.add("audible");
+    }
+  }
 
   // --- local audio: restore, track, highlight ---------------------------
   document.querySelectorAll("audio.talk-audio").forEach(function (audio) {
@@ -1347,6 +1381,7 @@ LAYOUT_SCRIPT = """<script>
       if (nowPlaying && nowPlaying.slug === slug) {
         nowPlaying = null;
         updateCapsule();
+        keepPlayingViewAlive();
       }
     });
   });
