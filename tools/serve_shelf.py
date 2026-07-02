@@ -2756,8 +2756,15 @@ def create_app(brain: str, ollama_model: str):
             sid = resolve_session(session, current["sid"], SESSIONS_DIR)
         except BrainError as error:
             return JSONResponse({"error": error.message}, status_code=error.status)
-        turns = load_history(session_turns_path(SESSIONS_DIR, sid), HISTORY_LIMIT)
-        return {"session": sid, "turns": turns}
+        turns_path = session_turns_path(SESSIONS_DIR, sid)
+        if not turns_path.exists():
+            # A fresh install (or a not-yet-written current session): the
+            # default resolution above may MINT an id that has no file yet.
+            # Handing that id to the page would make its next /api/chat a
+            # 404 ("no session") — the very first message would fail. No
+            # session means: let the server pick when the first turn lands.
+            return {"session": None, "turns": []}
+        return {"session": sid, "turns": load_history(turns_path, HISTORY_LIMIT)}
 
     @app.get("/api/version")
     def api_version() -> dict:
