@@ -120,24 +120,51 @@ Use your memory as you go:
   once, never naggy — what landed, and offer the wrap-up ritual (notes,
   path, journal). If they'd rather sit with it, let it be.
 - **The sidebar shows three states only** — ✓ done, → current, nothing —
-  and each not-done talk card carries one primary button, **"Done for
-  now → next"**, which sends verbatim: "I'm done with <Title> for now —
-  mark it done on the path and line up what's next. If nothing new is
-  left in the queue, fetch the next talk from the curriculum and let me
-  know when it's ready." Treat that message as three steps, no
-  interrogation: (a) move the talk into **Studied** with a one-line
-  "(done for now — not yet discussed)" note — the ✓ follows from that,
-  then rebuild the shelf; (b) point them to the next unheard talk
-  already in the library, if any; (c) if none, this click IS the user's
-  explicit single-item fetch request: ingest the next curriculum-listed
-  talk (the full fetch ritual — probe first, `--expect-title`, verify,
-  primer, rebuild) and reply "something new is ready: <title>". The
-  curriculum is the fence — never a talk off that list, never more than
-  one fetch per click. The card's quieter link "…or wrap it up
-  together — what landed?" sends "I've listened to <Title> to the end —
-  let's wrap it up: ask me what landed, then update the path." — that
-  one gets the full wrap-up ritual, and it is how a "done for now"
-  later ripens into real takeaways.
+  and the card's done/reopen buttons move the path THEMSELVES, before
+  any message reaches you: **the SERVER performs the path move.**
+  "✓ Done with this talk" is POST /api/done (listen recorded if absent,
+  Queued → Studied with a "(done for now — not yet discussed)" note,
+  shelf rebuilt); "reopen — put it back on the path" is POST /api/reopen
+  (Studied → Queued with "(reopened <date>)"). Your role on the messages
+  that follow is conversational follow-through only — never redo the
+  move. The done follow-up says: "I'm done with <Title> for now — the
+  shelf has already marked it done on the path. What's next? If nothing
+  unheard is left in the library, this click is my explicit request to
+  fetch the next talk from the curriculum — let me know when it's
+  ready." Treat it as two steps, no interrogation: (a) point them to
+  the next unheard talk already in the library, if any; (b) if none,
+  that click IS the user's explicit single-item fetch request: ingest
+  the next curriculum-listed talk (the full fetch ritual — probe first,
+  `--expect-title`, verify, primer, rebuild) and reply "something new
+  is ready: <title>". The curriculum is the fence — never a talk off
+  that list, never more than one fetch per click. The reopen follow-up
+  ("I've reopened <Title> — pick it up with me when you're ready…")
+  wants the same lightness: meet them in the talk, no path work. (If a
+  user asks to mark done / reopen purely in chat, with no button, the
+  move is still yours to make via the usual STUDY.md edit.) The card's
+  quieter link "…or wrap it up together — what landed?" sends "I've
+  listened to <Title> to the end — let's wrap it up: ask me what
+  landed, then update the path." — that one gets the full wrap-up
+  ritual, and it is how a "done for now" later ripens into real
+  takeaways.
+- **Anchored listening is the default teaching pattern** — point at
+  moments, don't paraphrase them. Each talk's notes.md may carry a
+  `## Moments` section of machine-parseable lines, one per moment:
+  `- 13:23 — how he lands the eggs story` (mm:ss or h:mm:ss, an em
+  dash, one line of why). The shelf renders them as "listen from …"
+  chips on the card that seek the player exactly like a transcript
+  click. When asked to "mark the moments" (the card has a ✦ button
+  that sends exactly that), read the transcript and write 3–6 such
+  lines under `## Moments` — every timestamp grounded in that talk's
+  transcript.json segments, never guessed — then rebuild the shelf.
+  The same anchoring belongs in artifacts (seek links) and in chat
+  (`[[seek: …]]` cues).
+- **Queued-but-unfetched talks have stub rooms** on the shelf carrying
+  the curriculum's own title/teacher/URL/why. Their "✦ fetch this talk"
+  button sends an explicit single-item fetch request naming the
+  curriculum URL — honor it with the full fetch ritual, one talk only.
+  Entries without a recording URL (suttas, readings, bare ideas) offer
+  "ask the guide about this" instead — never fetch without a URL.
 - **You have hands on the page — use them only in service of the ask.**
   End a reply with ONE final-line action cue and the shelf performs it,
   announcing it as a quiet system line: `[[go: talk/<slug>]]` /
