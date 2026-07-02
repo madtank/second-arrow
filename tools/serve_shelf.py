@@ -40,8 +40,11 @@ Routes:
                     recorded the turn.
     GET  /api/sessions  {"sessions": [{id,title,summary,updated}...]}, newest
                     first — kept for tooling; the panel no longer shows it.
-    GET  /api/version  {"shelf_mtime"} — the page polls it and refreshes
-                    itself (or offers to) when the shelf was rebuilt.
+    GET  /api/version  {"shelf_mtime", "media_mtime"} — the page polls it
+                    and refreshes itself (or offers to) when the shelf
+                    was rebuilt; media_mtime fingerprints the embedded
+                    files, and media newer than the page triggers a
+                    server-side rebuild right in the handler.
     POST /api/listened  {"slug"} — the page reports a completed listen;
                     appended to library/.listening.jsonl (deduped within
                     the hour) and to the talk's notes.md under
@@ -1164,6 +1167,32 @@ def shelf_mtime(library: Path) -> float:
     """shelf.html's mtime (0 when absent) — the page's freshness beacon."""
     shelf = library / "shelf.html"
     return shelf.stat().st_mtime if shelf.exists() else 0
+
+
+def media_mtime(library: Path) -> float:
+    """The newest mtime across the content the page embeds — artifacts,
+    spoken audio (primer/audio/reading), timing maps.
+
+    /api/version's content fingerprint: it catches a file rewritten
+    WITHOUT a shelf rebuild (a direct artifact write, a re-spoken
+    primer), where shelf.html's own mtime stays silent. One cheap
+    directory walk; 0 when there is nothing (or no library)."""
+    newest = 0.0
+    if not library.is_dir():
+        return newest
+    for talk_dir in library.iterdir():
+        if not talk_dir.is_dir():
+            continue
+        candidates = [talk_dir / "primer.mp3", talk_dir / "reading.mp3"]
+        candidates.extend(talk_dir.glob("audio.*"))
+        candidates.extend(talk_dir.glob("*.segments.json"))
+        candidates.extend((talk_dir / "artifacts").glob("*.html"))
+        for path in candidates:
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue  # vanished mid-walk: the next poll settles it
+    return newest
 
 
 def parse_ollama_stream_line(line: str) -> dict:
@@ -2299,6 +2328,26 @@ def rebuild_shelf(library: Path) -> Path:
     output = library / "shelf.html"
     output.write_text(build_shelf.render_shelf(library, reach))
     return output
+
+
+_FRESHEN_LOCK = threading.Lock()
+
+
+def freshen_shelf(library: Path) -> float:
+    """Rebuild shelf.html when library media outran it.
+
+    A re-spoken primer or a directly rewritten artifact changes files
+    without bumping shelf.html; the guide usually calls rebuild_shelf
+    right after, but /api/version must not depend on that. At most one
+    rebuild per change (the fresh page's mtime catches up to the media),
+    and concurrent polls collapse behind the lock. Returns the media
+    fingerprint for /api/version."""
+    media = media_mtime(library)
+    if media > shelf_mtime(library):
+        with _FRESHEN_LOCK:
+            if media > shelf_mtime(library):  # re-check: another poll won
+                rebuild_shelf(library)
+    return media
 
 
 def load_transcripts(library: Path) -> dict[str, str]:
@@ -3444,7 +3493,12 @@ def create_app(brain: str, ollama_model: str):
     @app.get("/api/version")
     def api_version() -> dict:
         # The page polls this to learn the shelf grew new content.
-        return {"shelf_mtime": shelf_mtime(LIBRARY)}
+        # media_mtime fingerprints the embedded files themselves; when
+        # one outran shelf.html (rewritten artifact, re-spoken primer,
+        # no rebuild yet) the server freshens the page right here, so
+        # the regenerated stamps do the precise remounting work.
+        media = freshen_shelf(LIBRARY)
+        return {"shelf_mtime": shelf_mtime(LIBRARY), "media_mtime": media}
 
     @app.get("/api/prep")
     def api_prep() -> dict:

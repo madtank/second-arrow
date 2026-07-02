@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1910,6 +1911,57 @@ def test_api_version_reports_shelf_mtime(tmp_path):
     assert serve_shelf.shelf_mtime(tmp_path) == 0
     shelf.write_text("<html>")
     assert serve_shelf.shelf_mtime(tmp_path) == shelf.stat().st_mtime
+
+
+def test_media_mtime_is_the_newest_content_stamp(tmp_path):
+    # The /api/version fingerprint: artifacts, spoken audio, timing maps.
+    library = _markable_library(tmp_path)
+    talk = library / "patience"
+    assert serve_shelf.media_mtime(library) == 0
+    (talk / "primer.mp3").write_bytes(b"\x00")
+    (talk / "artifacts").mkdir()
+    (talk / "artifacts" / "timer.html").write_text("<h1>t</h1>")
+    (talk / "reading.segments.json").write_text("{}")
+    newest = 1_800_000_000
+    os.utime(talk / "primer.mp3", (newest - 10,) * 2)
+    os.utime(talk / "reading.segments.json", (newest - 5,) * 2)
+    os.utime(talk / "artifacts" / "timer.html", (newest,) * 2)
+    assert serve_shelf.media_mtime(library) == newest
+    # shelf.html itself is NOT media — the beacon and the fingerprint
+    # must stay independent, or the freshen guard would chase itself.
+    (library / "shelf.html").write_text("<html>")
+    os.utime(library / "shelf.html", (newest + 100,) * 2)
+    assert serve_shelf.media_mtime(library) == newest
+    # A missing library answers 0, never raises.
+    assert serve_shelf.media_mtime(tmp_path / "nowhere") == 0
+
+
+def test_freshen_shelf_rebuilds_when_media_outran_the_page(tmp_path):
+    # A re-spoken primer (or a directly rewritten artifact) lands AFTER
+    # the page was built: /api/version's freshen rebuilds server-side, so
+    # the page's stamps are honest even if the guide forgot rebuild_shelf.
+    library = _markable_library(tmp_path)
+    serve_shelf.rebuild_shelf(library)
+    shelf = library / "shelf.html"
+    assert 'src="patience/primer.mp3' not in shelf.read_text()
+    stale = shelf.stat().st_mtime - 100
+    os.utime(shelf, (stale,) * 2)
+    (library / "patience" / "primer.mp3").write_bytes(b"\x00")
+    os.utime(library / "patience" / "primer.mp3", (stale + 50,) * 2)
+    media = serve_shelf.freshen_shelf(library)
+    assert media == stale + 50
+    assert serve_shelf.shelf_mtime(library) > stale  # rebuilt
+    assert 'src="patience/primer.mp3' in shelf.read_text()  # the new content
+
+
+def test_freshen_shelf_leaves_a_current_page_alone(tmp_path):
+    library = _markable_library(tmp_path)
+    (library / "patience" / "primer.mp3").write_bytes(b"\x00")
+    serve_shelf.rebuild_shelf(library)
+    mtime = serve_shelf.shelf_mtime(library)
+    # Media no newer than the page: no rebuild churn on every poll.
+    assert serve_shelf.freshen_shelf(library) <= mtime
+    assert serve_shelf.shelf_mtime(library) == mtime
 
 
 

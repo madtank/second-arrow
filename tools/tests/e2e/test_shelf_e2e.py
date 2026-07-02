@@ -368,6 +368,80 @@ def test_soft_refresh_swaps_new_room_content_under_playing_audio(page, shelf_ser
     assert page.evaluate(f"!{AUDIO_JS}.paused")
 
 
+def _newer_than_the_shelf(shelf_server) -> float:
+    """A stamp strictly newer than shelf.html, however fresh it is."""
+    shelf = shelf_server.library / "shelf.html"
+    return max(time.time(), shelf.stat().st_mtime) + 1
+
+
+def test_rewritten_artifact_remounts_in_place(page, shelf_server):
+    # The guide REWRITES an existing artifact (same filename) and does
+    # NOT rebuild: /api/version notices the media outran the page,
+    # freshens it server-side, and the soft refresh remounts the iframe
+    # with a new ?v= stamp — new content, no navigation.
+    _wait_for_version_baseline(page, shelf_server.base, "#talk/quiet-mind")
+    frame_sel = '.artifact-item[data-name="breath-timer.html"] iframe.artifact-frame'
+    page.wait_for_selector(frame_sel, state="attached")
+    old_src = page.get_attribute(frame_sel, "src")
+    page.fill("#chat-input", "half a thought")  # reload is now unsafe
+    page.evaluate("window.__e2e_marker = 1")
+    artifact = shelf_server.library / "quiet-mind" / "artifacts" / "breath-timer.html"
+    artifact.write_text(
+        "<!DOCTYPE html><html><body><h1>Fresh breath</h1></body></html>"
+    )
+    stamp = _newer_than_the_shelf(shelf_server)
+    os.utime(artifact, (stamp, stamp))
+    page.wait_for_function(
+        "(old) => {"
+        f" const f = document.querySelector('{frame_sel}');"
+        " return f && f.getAttribute('src') !== old"
+        "   && f.getAttribute('src').includes('?v='); }",
+        arg=old_src,
+        timeout=25_000,
+    )
+    # The remounted document really shows the NEW draft...
+    page.locator(frame_sel).scroll_into_view_if_needed()  # lazy iframes load in view
+    frame = page.frame_locator(frame_sel)
+    from playwright.sync_api import expect
+
+    expect(frame.locator("h1")).to_have_text("Fresh breath")
+    # ...and nothing else moved: no reload, the draft untouched.
+    assert page.evaluate("window.__e2e_marker") == 1
+    assert page.input_value("#chat-input") == "half a thought"
+
+
+def test_respoken_primer_restamps_the_player_in_place(page, shelf_server):
+    # Re-spoken audio (primer.mp3 rewritten, no rebuild): the freshened
+    # page carries a new ?v= stamp, the swap replaces the player node,
+    # and the room comes back fully wired.
+    _wait_for_version_baseline(page, shelf_server.base, "#talk/quiet-mind")
+    primer_sel = '#talk-quiet-mind audio[src*="primer.mp3"]'
+    old_src = page.get_attribute(primer_sel, "src")
+    page.fill("#chat-input", "still drafting")  # reload is now unsafe
+    page.evaluate("window.__e2e_marker = 1")
+    primer = shelf_server.library / "quiet-mind" / "primer.mp3"
+    primer.write_bytes(b"\x00\x00")  # the re-spoken take
+    stamp = _newer_than_the_shelf(shelf_server)
+    os.utime(primer, (stamp, stamp))
+    page.wait_for_function(
+        "(old) => {"
+        f" const a = document.querySelector('{primer_sel}');"
+        " return a && a.getAttribute('src') !== old"
+        "   && a.getAttribute('src').includes('?v='); }",
+        arg=old_src,
+        timeout=25_000,
+    )
+    assert page.evaluate("window.__e2e_marker") == 1  # no reload
+    # The swapped-in room is still wired: a transcript click seeks the
+    # (also restamped) talk player through the ONE seek path.
+    page.click("#talk-quiet-mind details.full-transcript summary")
+    page.click('#talk-quiet-mind .seg[data-start="4.5"]')
+    page.wait_for_function(
+        f"() => {{ const a = {AUDIO_JS};"
+        " return a && !a.paused && Math.abs(a.currentTime - 4.5) < 0.5; }"
+    )
+
+
 # --- listening: transcript and artifact seeks -------------------------------
 
 

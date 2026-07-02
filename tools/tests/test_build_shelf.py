@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -116,8 +117,9 @@ def test_render_shelf_end_to_end(tmp_path):
     # Card title is HTML-escaped.
     assert "Quiet Mind &amp; &lt;Friends&gt;" in html
     assert "Quiet Mind & <Friends>" not in html
-    # Primer audio with a relative src, labeled for the guide's voice.
-    assert 'src="quiet-mind/primer.mp3"' in html
+    # Primer audio with a relative src (identity-stamped), labeled for
+    # the guide's voice.
+    assert 'src="quiet-mind/primer.mp3?v=' in html
     assert "Primer — 1 min, spoken by the guide" in html
     # Notes made it in, rendered and escaped.
     assert "<strong>kindness</strong> wins." in html
@@ -690,13 +692,84 @@ def test_transcript_player_renders_segments_with_data_start(tmp_path):
 
 def test_talk_audio_is_tagged_for_resume(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    audio = re.search(r"<audio[^>]*src=\"quiet-mind/audio.mp3\"[^>]*>", html)
+    audio = re.search(r"<audio[^>]*src=\"quiet-mind/audio\.mp3\?v=\d+\"[^>]*>", html)
     assert audio
     assert 'class="talk-audio"' in audio.group(0)
     assert 'data-slug="quiet-mind"' in audio.group(0)
     # The primer player is NOT position-tracked.
-    primer = re.search(r"<audio[^>]*src=\"quiet-mind/primer.mp3\"[^>]*>", html)
+    primer = re.search(r"<audio[^>]*src=\"quiet-mind/primer\.mp3\?v=\d+\"[^>]*>", html)
     assert primer and "talk-audio" not in primer.group(0)
+
+
+# --- identity stamps: a rewritten file changes the markup --------------------
+
+
+def test_probe_stamps_media_files_with_mtimes(tmp_path):
+    library = _make_library(tmp_path)
+    quiet = library / "quiet-mind"
+    os.utime(quiet / "primer.mp3", (1_700_000_001,) * 2)
+    os.utime(quiet / "audio.mp3", (1_700_000_002,) * 2)
+    os.utime(quiet / "artifacts" / "breath-timer.html", (1_700_000_003,) * 2)
+    files = build_shelf.probe(quiet)
+    assert files["stamps"]["primer.mp3"] == 1_700_000_001
+    assert files["stamps"]["audio.mp3"] == 1_700_000_002
+    assert files["stamps"]["artifacts/breath-timer.html"] == 1_700_000_003
+    # far-talk (text only): nothing to stamp; a missing dir stamps nothing.
+    assert build_shelf.probe(library / "far-talk")["stamps"] == {}
+    assert build_shelf.probe(library / "_missing_")["stamps"] == {}
+
+
+def test_players_carry_identity_stamps(tmp_path):
+    # A re-spoken file (same name, new mtime) must CHANGE the markup, so
+    # the soft refresh's swap replaces exactly that node — the stale-
+    # player fix rides on the stamp, not on cache headers.
+    library = _make_library(tmp_path)
+    quiet = library / "quiet-mind"
+    os.utime(quiet / "primer.mp3", (1_700_000_001,) * 2)
+    os.utime(quiet / "audio.mp3", (1_700_000_002,) * 2)
+    html = build_shelf.render_shelf(library, {})
+    assert 'src="quiet-mind/primer.mp3?v=1700000001"' in html
+    assert 'src="quiet-mind/audio.mp3?v=1700000002"' in html
+    # Re-speak the primer: the markup moves with it.
+    os.utime(quiet / "primer.mp3", (1_700_000_009,) * 2)
+    assert 'src="quiet-mind/primer.mp3?v=1700000009"' in build_shelf.render_shelf(
+        library, {}
+    )
+
+
+def test_spoken_reading_player_carries_a_stamp(tmp_path):
+    library = _make_library(tmp_path)
+    (library / "far-talk" / "reading.mp3").write_bytes(b"\x00")
+    os.utime(library / "far-talk" / "reading.mp3", (1_700_000_004,) * 2)
+    html = build_shelf.render_shelf(library, {})
+    assert 'src="far-talk/reading.mp3?v=1700000004"' in html
+
+
+def test_artifact_items_carry_stamps_the_iframes_mount_with(tmp_path):
+    library = _make_library(tmp_path)
+    artifact = library / "quiet-mind" / "artifacts" / "breath-timer.html"
+    os.utime(artifact, (1_700_000_005,) * 2)
+    html = build_shelf.render_shelf(library, {})
+    item = re.search(r'<li class="artifact-item"[^>]*>', html)
+    assert item and 'data-v="1700000005"' in item.group(0)
+    # mountArtifacts carries the stamp onto the iframe src, so a
+    # rewritten artifact remounts as a NEW document, never the old draft.
+    assert 'item.getAttribute("data-v")' in html
+    # A rewrite (same filename, new mtime) really changes the markup.
+    os.utime(artifact, (1_700_000_006,) * 2)
+    assert 'data-v="1700000006"' in build_shelf.render_shelf(library, {})
+
+
+def test_version_check_honors_the_media_fingerprint(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # /api/version now carries media_mtime; a change there triggers the
+    # same refresh flow as a rebuilt shelf.
+    check = re.search(r"function checkVersion\(\) \{[\s\S]*?\n  \}", html)
+    assert check, "checkVersion missing"
+    assert "media_mtime" in check.group(0)
+    # Debounced, never dropped: at most one fetch+swap per few seconds,
+    # with a trailing run so the last change always lands.
+    assert "softRefreshTimer" in html
 
 
 def test_listening_room_js_markers(tmp_path):
@@ -2529,7 +2602,7 @@ def test_reading_room_with_spoken_version_renders_the_player(tmp_path):
     assert "mark as read" in far_card
     # ...with the spoken version playable — and tracked — like a talk.
     assert "The reading, spoken — recorded by the guide" in far_card
-    audio = re.search(r'<audio[^>]*src="far-talk/reading.mp3"[^>]*>', far_card)
+    audio = re.search(r'<audio[^>]*src="far-talk/reading\.mp3\?v=\d+"[^>]*>', far_card)
     assert audio, "spoken reading player missing"
     assert 'class="talk-audio"' in audio.group(0)
     assert 'data-slug="far-talk"' in audio.group(0)
@@ -2585,7 +2658,7 @@ def test_reading_with_audio_mp3_and_reading_origin_stays_a_reading(tmp_path):
     assert "<details open><summary>The reading</summary>" in far_card
     assert "mark as read" in far_card
     assert "The reading, spoken — recorded by the guide" in far_card
-    audio = re.search(r'<audio[^>]*src="far-talk/audio.mp3"[^>]*>', far_card)
+    audio = re.search(r'<audio[^>]*src="far-talk/audio\.mp3\?v=\d+"[^>]*>', far_card)
     assert audio and 'class="talk-audio"' in audio.group(0)
     assert "record-reading" not in far_card
     # A heard spoken reading gets its replay back — there is audio now.

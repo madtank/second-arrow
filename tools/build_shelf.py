@@ -487,27 +487,59 @@ def render_path_strip(path: dict) -> str:
     )
 
 
+def media_stamp(path: Path) -> int | None:
+    """The file's mtime as an int — its ?v= identity stamp.
+
+    A rewritten file (same name, new mtime) then CHANGES the rendered
+    markup, so the soft refresh's swap replaces exactly that node: the
+    iframe or player remounts instead of keeping the old draft. None
+    when the file is missing.
+    """
+    try:
+        return int(path.stat().st_mtime)
+    except OSError:
+        return None
+
+
 def probe(talk_dir: Path) -> dict:
     """See which study artifacts a talk folder actually has.
 
     "reading_mp3" is a reading's spoken version (the guide records it
     with the speak tool) — see is_reading for the room-shape verdict.
+    "stamps" maps each mountable media file (players, artifacts) to its
+    media_stamp, talk-relative.
     """
     audio = next(
         (p for p in sorted(talk_dir.glob("audio.*")) if p.suffix.lower() in AUDIO_EXTENSIONS),
         None,
     )
+    artifacts = sorted(p.name for p in (talk_dir / "artifacts").glob("*.html"))
+    stamped = ["primer.mp3", "reading.mp3"]
+    stamped += [audio.name] if audio else []
+    stamped += [f"artifacts/{name}" for name in artifacts]
+    stamps = {}
+    for rel in stamped:
+        stamp = media_stamp(talk_dir / rel)
+        if stamp is not None:
+            stamps[rel] = stamp
     return {
         "primer_mp3": (talk_dir / "primer.mp3").exists(),
         "primer_md": (talk_dir / "primer.md").exists(),
         "notes_md": (talk_dir / "notes.md").exists(),
         "transcript_md": (talk_dir / "transcript.md").exists(),
         "audio": audio.name if audio else None,
-        "artifacts": sorted(p.name for p in (talk_dir / "artifacts").glob("*.html")),
+        "artifacts": artifacts,
         "thumbnail": (talk_dir / "thumbnail.jpg").exists(),
         "transcript_json": (talk_dir / "transcript.json").exists(),
         "reading_mp3": (talk_dir / "reading.mp3").exists(),
+        "stamps": stamps,
     }
+
+
+def stamp_query(files: dict, rel: str) -> str:
+    """The ?v=<stamp> suffix for a media src, "" when unstamped."""
+    stamp = files.get("stamps", {}).get(rel)
+    return f"?v={stamp}" if stamp is not None else ""
 
 
 def is_reading(files: dict, talk: dict | None = None) -> bool:
@@ -2025,13 +2057,15 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     scope.querySelectorAll(".artifact-item").forEach(function (item) {
       if (item.querySelector(".artifact-frame")) return; // already live
       var name = item.getAttribute("data-name");
+      var stamp = item.getAttribute("data-v"); // identity: mtime at build
       var frame = document.createElement("iframe");
       frame.setAttribute("sandbox", "allow-scripts");
       frame.setAttribute("loading", "lazy");
       frame.setAttribute("title", name);
       frame.setAttribute("src", "/artifacts/"
         + encodeURIComponent(item.getAttribute("data-slug"))
-        + "/" + encodeURIComponent(name));
+        + "/" + encodeURIComponent(name)
+        + (stamp ? "?v=" + encodeURIComponent(stamp) : ""));
       frame.className = "artifact-frame";
       item.appendChild(frame);
       toolFrames.push({ // identity for reflections: this exact window
@@ -2190,6 +2224,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   // next calm moment.
   var freshChip = document.getElementById("fresh-chip");
   var shelfVersion = null;
+  var mediaVersion = null; // /api/version's media fingerprint
   var pendingReload = false; // new content waiting for a calm moment
 
   function reloadIsSafe(playing, state, draft) {
@@ -2261,7 +2296,24 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     return true;
   }
 
+  // Debounced, never dropped: at most one fetch+swap per few seconds; a
+  // call inside the window schedules ONE trailing run, so the last
+  // change always lands (skipping outright could strand a stale page).
+  var lastSoftRefresh = 0;
+  var softRefreshTimer = null;
+
   function softRefresh() {
+    var wait = 3000 - (Date.now() - lastSoftRefresh);
+    if (wait > 0) {
+      if (!softRefreshTimer) {
+        softRefreshTimer = setTimeout(function () {
+          softRefreshTimer = null;
+          softRefresh().catch(function () { /* the poll catches up */ });
+        }, wait);
+      }
+      return Promise.resolve(); // the trailing run applies it
+    }
+    lastSoftRefresh = Date.now();
     return fetch(location.pathname, { cache: "no-store" })
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
@@ -2279,8 +2331,20 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   function checkVersion() {
     fetch("/api/version").then(function (r) { return r.json(); }).then(function (data) {
       if (typeof data.shelf_mtime !== "number") return;
-      if (shelfVersion === null) { shelfVersion = data.shelf_mtime; return; }
-      if (data.shelf_mtime === shelfVersion) {
+      // media_mtime is the content fingerprint (artifacts, spoken audio,
+      // timing maps): a change there counts exactly like a rebuilt shelf.
+      // Usually the server has already freshened shelf.html by the time
+      // it reports a new fingerprint, so this is the belt to that brace.
+      var media = typeof data.media_mtime === "number" ? data.media_mtime : null;
+      if (shelfVersion === null) {
+        shelfVersion = data.shelf_mtime;
+        mediaVersion = media;
+        return;
+      }
+      var mediaChanged = media !== null && mediaVersion !== null
+        && media !== mediaVersion;
+      mediaVersion = media;
+      if (data.shelf_mtime === shelfVersion && !mediaChanged) {
         maybeApplyPendingReload(); // an earlier change may apply now
         return;
       }
@@ -3267,7 +3331,9 @@ def render_card(
     if files["primer_mp3"]:
         parts.append('<p class="player-label">Primer — 1 min, spoken by the guide</p>')
         parts.append(
-            f'<audio controls preload="none" src="{escape(slug)}/primer.mp3"></audio>'
+            f'<audio controls preload="none" '
+            f'src="{escape(slug)}/primer.mp3{stamp_query(files, "primer.mp3")}">'
+            "</audio>"
         )
     if spoken:
         # Listening-first extends to texts: the spoken reading is a real
@@ -3280,7 +3346,7 @@ def render_card(
         parts.append(
             f'<audio controls preload="none" class="talk-audio" '
             f'data-slug="{escape(slug)}" '
-            f'src="{escape(slug)}/{escape(spoken)}"></audio>'
+            f'src="{escape(slug)}/{escape(spoken)}{stamp_query(files, spoken)}"></audio>'
         )
         if reading_segments:
             # The timing map made the text a seek surface — say so here,
@@ -3295,7 +3361,8 @@ def render_card(
         parts.append(
             f'<audio controls preload="none" class="talk-audio" '
             f'data-slug="{escape(slug)}" '
-            f'src="{escape(slug)}/{escape(files["audio"])}"></audio>'
+            f'src="{escape(slug)}/{escape(files["audio"])}'
+            f'{stamp_query(files, files["audio"])}"></audio>'
         )
     elif talk.get("source"):
         source = talk["source"]
@@ -3729,8 +3796,12 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
             # never allow-same-origin, behind the /artifacts/ CSP wall) are
             # mounted by JS on the served shelf — a file:// iframe would
             # have no CSP wall, so it is never emitted here.
+            # data-v: the identity stamp mountArtifacts carries onto the
+            # iframe src — a rewritten artifact (same filename) changes
+            # the markup, so the swap remounts it as a NEW document.
             items = "\n".join(
-                f'<li class="artifact-item" data-slug="{slug}" data-name="{escape(name)}">\n'
+                f'<li class="artifact-item" data-slug="{slug}" data-name="{escape(name)}"'
+                f' data-v="{files["stamps"].get(f"artifacts/{name}", "")}">\n'
                 f'<span class="artifact-name">{escape(name)}</span>\n'
                 f'<a class="artifact-open" href="{slug}/artifacts/{escape(name)}"'
                 ' target="_blank" rel="noopener">open full page ↗</a>\n</li>'
