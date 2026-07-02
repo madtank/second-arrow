@@ -246,3 +246,6 @@ see its README): write the failing e2e test first, then
 `uv run --with pytest --with fastapi --with uvicorn --with playwright
 --with mlx-whisper pytest tools/tests -m e2e -v` (excluded from the
 default run; scratch dirs and ephemeral ports only — never 8765/8642).
+Never regenerate `library/shelf.html` from uncommitted code — the user
+may be on that page right now; test against temp outputs (`-o`) and
+regenerate the real shelf exactly once, from committed code, at the end.
