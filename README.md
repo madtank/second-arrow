@@ -47,6 +47,29 @@ center of gravity has moved to the study sessions.
 
 ---
 
+## Fork it: the shelf is empty until you fill it
+
+Second Arrow is one *path* running on machinery that doesn't care what
+you're learning. Everything topic-specific lives in four swappable
+places — the rest (ingest + transcription, click-to-seek transcripts,
+"listen for" moments, spoken primers, interactive tools, the path with
+done/skip/reopen, the nightly prep) works for any subject taught in
+talks, videos, and texts:
+
+- `curriculum/` — what to learn, as curated clusters with real URLs
+- the persona sections of `CLAUDE.md` and `hermes/SOUL.md` — who the
+  guide is and how it teaches
+- your private `library/`, `STUDY.md`, and `journal/` — all gitignored,
+  so a fork arrives as **clean scaffolding** with nobody's practice in it
+- the name on the door
+
+Guitar, a language, a history deep-dive — swap the curriculum and the
+persona, wire your own Hermes profile, and the same shelf fills with
+your subject. One topic per repo/profile keeps each guide's memory and
+voice its own.
+
+---
+
 ## The guide's harness: Hermes
 
 The chat guide's home is **hermes-agent** (Nous Research) — one harness,
