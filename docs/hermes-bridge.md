@@ -9,9 +9,10 @@ OpenAI-compatible gateway (127.0.0.1:8642) is what the bridge brain in
 is its startup gate.
 
 Distilled standing reference (endpoints, sessions, model selection,
-security): [docs/hermes-reference.md](hermes-reference.md) — fetched
-2026-07-02. Config keys below were verified against the live docs on
-2026-07-01:
+security): [docs/hermes-reference.md](hermes-reference.md) — refreshed
+2026-07-02 against a **full local mirror of the docs site** at
+[docs/hermes/](hermes/INDEX.md) (Hermes v0.18.0). Config keys below were
+verified against the live docs on 2026-07-01:
 
 - MCP: <https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp>
 - API server: <https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server>
@@ -150,13 +151,17 @@ platform_toolsets:
     - clarify
 ```
 
-**Docs ambiguity, flagged rather than guessed:** the configuration page
-shows short platform keys (`cli`, `api_server`, `telegram`, ...) while the
-toolsets-reference page shows `hermes-`-prefixed identifiers
-(`hermes-cli`, `hermes-api-server`). This snippet follows the
-configuration page (`api_server`); if the toolsets don't show up on the
-gateway, try `hermes-api-server` — and either way, `hermes_probe.py` will
-tell you what actually got exposed.
+**Ambiguity resolved (2026-07-02, source-verified in
+`hermes_cli/toolset_validation.py`):** `platform_toolsets` **keys** are the
+short platform names (`cli`, `api_server`, `cron`, ...); the **values** are
+toolset names (`hermes-cli`-style bundles, core sets like `clarify`, or
+derived `mcp-<server>` names). The snippet above is the right shape. Since
+v0.18.0, invalid toolset names here produce loud startup warnings —
+including a "resolves to zero valid toolsets" alert — instead of silent
+tool loss; `hermes_probe.py` still confirms what actually got exposed.
+Also pin the **`cron`** platform row the same way if we ever schedule jobs
+in this profile (see hermes-reference §7): the cron default is the full
+`hermes-cli` bundle.
 
 ## 3. Belt and braces: disable the built-in toolsets globally
 
@@ -243,10 +248,12 @@ truth for the gateway. In the app, set it in **Settings → Model** for this
 profile ("the only place that writes it") — NOT the composer dropdown next
 to the mic, which is "sticky UI state and never touches your default"
 (per-device, app-only). Per-request `model` on the API is accepted but
-ignored for routing, and `GET /v1/models` advertises the profile name
-(`second-arrow`), not the LLM — so anything that wants to *display* the
-model reads this file's `model.default`. Changes apply to the next new
-session; restart the gateway to pick them up.
+ignored for routing — **unless** it names a configured `model_routes`
+alias (v0.18.0, source-verified; see hermes-reference §3), which we don't
+use. `GET /v1/models` advertises the profile name (`second-arrow`), not
+the LLM — so anything that wants to *display* the model reads this file's
+`model.default`. Changes apply to the next new session; restart the
+gateway (`hermes -p second-arrow gateway restart`) to pick them up.
 
 - **Phase 1 (now):** the profile runs on your existing codex/gpt-5.5
   provider — a hosted brain doing the reasoning, our MCP server doing the
