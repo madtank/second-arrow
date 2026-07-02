@@ -809,6 +809,29 @@ def test_artifact_storage_lint_warns_on_stderr_and_marks_the_entry(tmp_path, cap
     assert timer and "may not run inline" not in timer.group(0)
 
 
+def test_artifact_expands_in_place_by_class_alone(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The SAME iframe node lifts to a near-fullscreen fixed overlay via a
+    # CSS class — never reparented (reparenting reloads an iframe and
+    # wipes the tool's state). A calm scrim sits behind it.
+    assert ".artifact-item.expanded .artifact-frame" in html
+    assert ".artifact-item.expanded::before" in html
+    # The controls are mount-time creations (served mode only — the
+    # static shelf has no inline frames to expand): expand next to the
+    # open-full-page link, a quiet way back when immersed.
+    assert 'className = "artifact-expand"' in html
+    assert 'className = "artifact-collapse"' in html
+    assert "✕ back to the room" in html
+    assert 'class="artifact-expand"' not in html  # not static markup
+    # One immersion at a time; Escape (after docking chat) closes it.
+    assert "function collapseArtifacts()" in html
+    # swapShelf treats an expanded artifact's room like the playing room:
+    # in use, untouchable until the next safe swap.
+    swap = re.search(r"function swapShelf\(doc\) \{[\s\S]*?\n  \}", html)
+    assert swap and ".artifact-item.expanded" in swap.group(0)
+    assert "innerHTML" not in html
+
+
 def test_version_check_honors_the_media_fingerprint(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # /api/version now carries media_mtime; a change there triggers the

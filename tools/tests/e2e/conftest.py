@@ -108,11 +108,17 @@ CURRICULUM_MD = """# Cluster 1: Anger & the Second Arrow
 GUARDED_STORAGE_ARTIFACT = """<!DOCTYPE html>
 <html><body>
 <h1 id="state">waiting</h1>
+<button id="count" type="button">0</button>
 <script>
 var store = null;
 try { store = window.localStorage; } catch (e) { store = null; }
 document.getElementById("state").textContent =
   store ? "storage ready" : "guarded: memory only";
+// In-memory state (the fallback the contract requires): the expand
+// tests assert this survives expand/collapse — the node never remounts.
+document.getElementById("count").addEventListener("click", function () {
+  this.textContent = String(parseInt(this.textContent, 10) + 1);
+});
 </script>
 </body></html>
 """

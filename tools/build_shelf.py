@@ -843,6 +843,31 @@ STYLE = """
                     margin-top: 0.5rem; border: 1px solid #e8e0d3;
                     border-radius: 8px; background: #fffdf9;
                     resize: vertical; overflow: auto; }
+  /* Expand in place: the SAME iframe node lifts to a near-fullscreen
+     fixed overlay by class alone — reparenting would reload the frame
+     and wipe the tool's state (and its window.parent seek channel).
+     z-index 3 keeps the immersion UNDER the chat tray (4) and the
+     now-playing capsule (5); the 7.5rem bottom clearance leaves the
+     docked tray visible and usable — chat continues while immersed. */
+  .artifact-expand { font: inherit; font-size: 0.85rem; color: #5a4d3a;
+                     background: #f6f1e7; border: 1px solid #e0d5c0;
+                     border-radius: 999px; padding: 0.15rem 0.8rem;
+                     margin-left: 0.75rem; cursor: pointer; }
+  .artifact-expand:hover { background: #efe7d9; }
+  .artifact-item.expanded .artifact-expand { display: none; }
+  .artifact-item.expanded::before { content: ""; position: fixed; inset: 0;
+                                    background: rgba(60, 56, 51, 0.45);
+                                    z-index: 3; }
+  .artifact-item.expanded .artifact-frame { position: fixed; top: 2vh;
+      left: 2vw; width: 96vw; height: calc(98vh - 7.5rem); z-index: 3;
+      margin: 0; resize: none; border-radius: 10px;
+      box-shadow: 0 12px 40px rgba(60, 56, 51, 0.35); }
+  .artifact-collapse { display: none; }
+  .artifact-item.expanded .artifact-collapse { display: block;
+      position: fixed; top: calc(2vh + 10px); right: calc(2vw + 10px);
+      z-index: 3; font: inherit; font-size: 0.85rem; color: #5a4d3a;
+      background: #faf7f2; border: 1px solid #e0d5c0;
+      border-radius: 999px; padding: 0.25rem 0.9rem; cursor: pointer; }
   details { margin-top: 1rem; border-top: 1px solid #f0e9dd; padding-top: 0.75rem; }
   summary { cursor: pointer; color: #8a7f70; font-size: 0.95rem; }
   .raw-link { font-size: 0.85rem; margin: 0.5rem 0 0.3rem; }
@@ -2093,6 +2118,22 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
         + "/" + encodeURIComponent(name)
         + (stamp ? "?v=" + encodeURIComponent(stamp) : ""));
       frame.className = "artifact-frame";
+      // Expand in place (created at mount time, like the frame itself):
+      // the raw open-full-page link stays as the escape hatch, but a
+      // top-level tab has no parent — seeks go static, the chat is gone.
+      // Expanding keeps every power.
+      var expand = document.createElement("button");
+      expand.type = "button";
+      expand.className = "artifact-expand";
+      expand.textContent = "expand ⤢";
+      expand.setAttribute("title",
+        "expand in place — seeks and the conversation keep working");
+      var collapse = document.createElement("button");
+      collapse.type = "button";
+      collapse.className = "artifact-collapse";
+      collapse.textContent = "✕ back to the room";
+      item.appendChild(expand);
+      item.appendChild(collapse);
       item.appendChild(frame);
       toolFrames.push({ // identity for reflections: this exact window
         win: frame.contentWindow,
@@ -2101,6 +2142,25 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       });
     });
   }
+
+  // One immersion at a time; the class comes off, the node never moves.
+  function collapseArtifacts() {
+    var expanded = document.querySelectorAll(".artifact-item.expanded");
+    expanded.forEach(function (item) { item.classList.remove("expanded"); });
+    return expanded.length > 0;
+  }
+
+  // Delegated, so expand controls survive every swap and remount.
+  document.addEventListener("click", function (event) {
+    var expand = event.target.closest(".artifact-expand");
+    if (expand) {
+      var item = expand.closest(".artifact-item");
+      collapseArtifacts(); // expanding another collapses the first
+      if (item) item.classList.add("expanded");
+      return;
+    }
+    if (event.target.closest(".artifact-collapse")) collapseArtifacts();
+  });
 
   // Safe mini-markdown for COMPLETED guide bubbles: **bold**, *italic*,
   // `code` become real elements, built with createElement + textContent
@@ -2287,13 +2347,20 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       oldNav.replaceWith(document.importNode(newNav, true));
     }
     var playingSlug = window.saPlayingSlug ? window.saPlayingSlug() : null;
-    var keep = playingSlug ? "talk-" + playingSlug : null;
+    var keepIds = {};
+    if (playingSlug) keepIds["talk-" + playingSlug] = true;
+    // An expanded artifact is in use exactly like a playing player —
+    // its room waits for the next safe swap.
+    document.querySelectorAll(".artifact-item.expanded").forEach(function (item) {
+      var view = item.closest(".view");
+      if (view && view.id) keepIds[view.id] = true;
+    });
     var freshIds = {};
     var swapped = [];
     Array.prototype.slice.call(newViews.children).forEach(function (view) {
       if (!view.classList.contains("view") || !view.id) return;
       freshIds[view.id] = true;
-      if (view.id === keep) return; // the playing room is untouchable
+      if (keepIds[view.id]) return; // playing/expanded rooms are untouchable
       var node = document.importNode(view, true);
       var old = document.getElementById(view.id);
       if (old) {
@@ -2306,7 +2373,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     });
     Array.prototype.slice.call(container.children).forEach(function (view) {
       if (!view.classList.contains("view")) return;
-      if (view.id === keep || freshIds[view.id]) return;
+      if (keepIds[view.id] || freshIds[view.id]) return;
       container.removeChild(view); // gone from the shelf
     });
     swapped.forEach(function (node) {
@@ -2550,6 +2617,9 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       setChatState("docked");
       return;
     }
+    // Next rung of the Escape ladder: an expanded artifact folds back
+    // into its room (the conversation overlay always steps aside first).
+    if (event.key === "Escape" && collapseArtifacts()) return;
     if (event.key === "/") {
       event.preventDefault(); // focus without the slash
       input.focus({ preventScroll: true });

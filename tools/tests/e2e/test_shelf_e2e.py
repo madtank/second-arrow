@@ -520,6 +520,54 @@ def test_guarded_storage_artifact_renders_inline_under_the_sandbox(page, shelf_s
 # --- done for now: the manual heard door and the path's primary action -------
 
 
+def test_expanded_artifact_keeps_the_seek_channel_and_the_chat(page, shelf_server):
+    # Expanding in place keeps every power a top-level tab would lose:
+    # same iframe, same window.parent — the seek buttons still drive the
+    # player, and the chat tray stays usable above the immersion.
+    _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+    item = '.artifact-item[data-name="anchored-listen.html"]'
+    page.click(item + " .artifact-expand")
+    page.wait_for_selector(item + ".expanded")
+    # The tray sits ABOVE the overlay: typing still works while immersed.
+    page.fill("#chat-input", "still here")
+    assert page.input_value("#chat-input") == "still here"
+    # The anchored-listen button inside the EXPANDED frame seeks the talk.
+    page.frame_locator(item + " iframe.artifact-frame").locator("#listen").click()
+    page.wait_for_function(
+        f"() => {{ const a = {AUDIO_JS};"
+        " return a && !a.paused && Math.abs(a.currentTime - 4.5) < 0.5; }"
+    )
+    # One immersion at a time: expanding another collapses this one.
+    other = '.artifact-item[data-name="guarded-notes.html"]'
+    page.evaluate(
+        f"document.querySelector('{other} .artifact-expand').click()"
+    )
+    page.wait_for_selector(other + ".expanded")
+    assert page.locator(item + ".expanded").count() == 0
+
+
+def test_expand_and_collapse_preserve_the_artifact_state(page, shelf_server):
+    # The SAME iframe node lifts and settles by class alone — never
+    # reparented, so in-tool state survives the round trip; Escape is
+    # the way back (after the chat overlay's own rung).
+    _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+    item = '.artifact-item[data-name="guarded-notes.html"]'
+    frame = page.frame_locator(item + " iframe.artifact-frame")
+    from playwright.sync_api import expect
+
+    frame.locator("#count").click()
+    expect(frame.locator("#count")).to_have_text("1")
+    page.click(item + " .artifact-expand")
+    page.wait_for_selector(item + ".expanded")
+    frame.locator("#count").click()
+    expect(frame.locator("#count")).to_have_text("2")  # state carried up
+    # Escape (keys back with the page) folds the artifact into its room.
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    page.keyboard.press("Escape")
+    page.wait_for_selector(item + ":not(.expanded)")
+    expect(frame.locator("#count")).to_have_text("2")  # and back down
+
+
 def test_mark_as_heard_flips_the_card_in_place(page, shelf_server):
     _wait_for_version_baseline(page, shelf_server.base, "#talk/far-talk")
     page.wait_for_selector("#talk-far-talk.active")
