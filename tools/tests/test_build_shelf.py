@@ -1139,6 +1139,16 @@ def test_sidebar_collapser_persists_and_spares_mobile(tmp_path):
     assert re.search(r"@media \(max-width: 720px\) \{[^@]*#sidebar-collapse \{ display: none;", html, re.S)
 
 
+def test_sidebar_arrow_stays_reachable_in_conversation_mode(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The reopen arrow floats ABOVE the conversation overlay (z-index 4),
+    # like the now-playing capsule — never out of reach while talking.
+    reopen_rule = re.search(r"#sidebar-reopen \{[^}]*\}", html, re.S)
+    assert reopen_rule and "z-index: 5" in reopen_rule.group(0)
+    # And picking a talk while conversing navigates AND docks the chat.
+    assert "saDockChat(); // browsing wins: back to the room" in html
+
+
 # --- listened: the shelf remembers what finished ------------------------------
 
 

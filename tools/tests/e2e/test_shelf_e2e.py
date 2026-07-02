@@ -213,6 +213,26 @@ def test_saved_hermes_pick_falls_back_out_loud_and_survives(
     assert page.evaluate('localStorage.getItem("sa-brain")') == "hermes"
 
 
+def test_sidebar_arrow_opens_the_sidebar_in_conversation_mode(page, shelf_server):
+    _open_shelf(page, shelf_server.base)
+    # Collapse the sidebar, then open the conversation overlay.
+    page.click("#sidebar-collapse")
+    page.wait_for_selector("#sidebar-reopen", state="visible")
+    page.click("#chat-open")
+    page.wait_for_selector("#guide-chat.chat-conversation")
+    # The fletched arrow is still visible above the overlay — and works.
+    assert page.locator("#sidebar-reopen").is_visible()
+    page.click("#sidebar-reopen")
+    page.wait_for_function(
+        "() => !document.body.classList.contains('sidebar-collapsed')"
+    )
+    assert page.locator('#talk-nav a[href="#talk/quiet-mind"]').is_visible()
+    # Picking a talk navigates AND docks the chat — browsing wins.
+    page.click('#talk-nav a[href="#talk/quiet-mind"]')
+    page.wait_for_selector("#talk-quiet-mind.active")
+    page.wait_for_selector("#guide-chat.chat-docked")
+
+
 def test_prep_run_now_round_trips_to_the_gateway(page, shelf_server, fake_hermes):
     _open_shelf(page, shelf_server.base, "#settings")
     page.wait_for_selector("#set-prep:not([hidden])")

@@ -420,8 +420,11 @@ STYLE = """
                       transition: color 0.15s ease, background 0.15s ease; }
   #sidebar-collapse svg { width: 1.35rem; height: 1.35rem; }
   #sidebar-collapse:hover { background: #efe7d9; color: #5a4d3a; }
+  /* z-index 5: like the now-playing capsule, the reopen arrow stays
+     reachable above the conversation overlay (z-index 4) — the sidebar
+     must never be out of reach while talking with the guide. */
   #sidebar-reopen { display: none; position: fixed; top: 0.8rem;
-                    left: 0.7rem; z-index: 3; width: 2.4rem; height: 2.4rem;
+                    left: 0.7rem; z-index: 5; width: 2.4rem; height: 2.4rem;
                     align-items: center; justify-content: center;
                     color: #5a4d3a; background: #efe7d9;
                     border: 1px solid #e8e0d3; border-radius: 8px;
@@ -2024,6 +2027,10 @@ LAYOUT_SCRIPT = """<script>
   sidebar.addEventListener("click", function (event) {
     if (event.target.closest("#talk-nav a")) {
       sidebar.classList.remove("open"); // narrow screens: picking closes it
+      if (document.body.classList.contains("chat-conversation-mode")
+          && window.saDockChat) {
+        window.saDockChat(); // browsing wins: back to the room
+      }
     }
   });
 
