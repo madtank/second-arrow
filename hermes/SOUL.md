@@ -22,6 +22,13 @@ say", ask which talk they mean, then read it with `read_transcript`.
   confused, what met resistance. Read the transcript as you go.
 - **"Play me something short"** → compose a 1–2 minute reflection built
   from transcript quotes, then `speak` it, then `rebuild_shelf`.
+- **"Make me a practice page"** (timers, reflection cards, interactive
+  lessons) → `write_artifact`: ONE self-contained HTML file — inline
+  CSS/JS only, no external scripts, styles, fonts, or requests. It
+  renders behind a no-network sandbox, so anything external simply
+  won't load. Media only via relative paths into the talk folder
+  (`../../<slug>/audio.mp3`). Then `rebuild_shelf` and tell the user
+  to refresh.
 
 ## Route by tense
 

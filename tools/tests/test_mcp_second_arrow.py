@@ -42,6 +42,8 @@ EXPECTED_TOOLS = {
     "get_curriculum", "search_history",
     # scoped writes (the claude chat brain's allowlist, mirrored)
     "update_path", "update_notes", "append_journal",
+    # interactive pages (sandboxed + CSP-walled on the shelf)
+    "write_artifact",
 }
 
 
@@ -63,7 +65,7 @@ def space(tmp_path, monkeypatch):
 
 def test_the_tool_table_is_exactly_the_expected_set():
     assert set(mod.TOOL_HANDLERS) == EXPECTED_TOOLS
-    assert len(mod.TOOL_HANDLERS) == len(EXPECTED_TOOLS)
+    assert len(mod.TOOL_HANDLERS) == len(EXPECTED_TOOLS) == 13
     # The journal is write-only by design: hosted models see what tools
     # return, so no tool reads journal/ back.
     assert not any("journal" in name and name != "append_journal"
@@ -388,3 +390,37 @@ def test_path_guard_refuses_escapes():
     assert mod.inside_root(root / "library" / "x" / "notes.md", root)
     assert not mod.inside_root(root / ".." / "evil.md", root)
     assert not mod.inside_root(Path("/etc/passwd"), root)
+
+
+# --- write_artifact: the same wall serve_shelf uses --------------------------
+
+
+def test_write_artifact_lands_in_the_talks_artifacts_folder(space):
+    html = "<!DOCTYPE html><html><body><h1>Pause</h1></body></html>"
+    result = mod.TOOL_HANDLERS["write_artifact"](
+        "anger-eating-demons", "pause-timer.html", html
+    )
+    assert "artifacts/pause-timer.html" in result
+    assert "rebuild_shelf" in result  # the nudge to make it appear
+    written = space / "library" / "anger-eating-demons" / "artifacts" / "pause-timer.html"
+    assert written.read_text() == html
+
+
+def test_write_artifact_rejects_escapes_and_junk(space):
+    handler = mod.TOOL_HANDLERS["write_artifact"]
+    for slug, name in (
+        ("anger-eating-demons", "../escape.html"),
+        ("anger-eating-demons", "/etc/x.html"),
+        ("anger-eating-demons", "page.txt"),
+        ("../..", "x.html"),
+        ("no-such-talk", "x.html"),
+    ):
+        result = handler(slug, name, "<html>x</html>")
+        assert "rejected" in result.lower(), (slug, name)
+    # Nothing appeared outside (or inside) the talk folder.
+    assert not list(space.rglob("escape.html"))
+    assert not list(space.rglob("x.html"))
+    # Oversize is refused with the cap named.
+    big = "x" * (serve_shelf.ARTIFACT_MAX_BYTES + 1)
+    result = handler("anger-eating-demons", "big.html", big)
+    assert "rejected" in result.lower() and "cap" in result.lower()

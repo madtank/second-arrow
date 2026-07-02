@@ -212,6 +212,24 @@ phone), revisit with real usage behind the decision.
   calm select next to the pills while the ollama pill is active
   (`gemma4:12b · tools · 7.6GB`), announcing a pick with a quiet
   system line; hidden in claude mode and on the static shelf.
+- **Iter 7 — DONE: interactive artifacts behind sandbox + CSP.** The
+  guide can now write interactive HTML lesson pages (practice pages,
+  reflection cards, timers) to `library/<slug>/artifacts/<name>.html`
+  from all three brains: the claude chat allowlist (Edit/Write on
+  `library/**/artifacts/*.html`), the ollama tool loop's
+  `write_artifact`, and the MCP server's `write_artifact` (13 tools) —
+  every path pinned by `artifact_path` (lowercase slug chars + `.html`,
+  existing talks only, ~256KB cap). Rendering goes through two walls:
+  a sandboxed iframe (`allow-scripts` only, never the same-origin
+  grant, mounted by JS in served mode) and a no-network CSP on the
+  `/artifacts/{slug}/{name}` route and its file-layout twin
+  (default-src 'none'; inline style/script only; img/media 'self';
+  no connect, no forms out, no <base>; GET and HEAD both walled —
+  artifact bytes are never served CSP-less). The static file:// shelf
+  lists artifacts as plain new-tab links with a note that the sandboxed
+  view needs the served shelf. Guide contract (CLAUDE.md + SOUL.md):
+  artifacts are self-contained single-file HTML, media only via
+  relative paths into the talk folder, rebuild_shelf after writing.
 
 ## Boundaries
 

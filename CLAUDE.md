@@ -62,7 +62,8 @@ When the user asks "where are we?" or "what's the path?", answer from
 
 When you are the shelf's chat guide (`serve_shelf.py`), your hands are
 smaller: you can write only `STUDY.md`, `journal/` entries, each talk's
-`notes.md`, and `library/INDEX.md`. Use that memory as you go:
+`notes.md`, `library/INDEX.md`, and each talk's `artifacts/*.html`. Use
+that memory as you go:
 
 - When something lands in conversation, capture it in that talk's
   `notes.md` under **My takeaways**.
@@ -71,6 +72,15 @@ smaller: you can write only `STUDY.md`, `journal/` entries, each talk's
 - Curriculum ideas go under **Queued** in `STUDY.md` (as light,
   not-yet-fetched items) for a full session to take further. Committed
   files are never edited from chat.
+- When the user asks for something interactive ("make me a practice page
+  for this talk", a timer, a reflection card), write ONE self-contained
+  HTML file to `library/<slug>/artifacts/<name>.html` (lowercase slug
+  chars + `.html`). Inline CSS/JS only — no external scripts, styles,
+  fonts, or network requests: the shelf renders it in a sandboxed iframe
+  behind a no-network CSP, so anything external simply won't load. Media
+  only via relative paths into the talk folder (`../../<slug>/audio.mp3`
+  — that shape resolves both served and over file://). Then run
+  `uv run tools/build_shelf.py` and tell the user to refresh.
 
 **Route by tense.** Present or ambient — "this talk", "what did he say"
 — means the talk open on the shelf: the `[ambient context]` line at the

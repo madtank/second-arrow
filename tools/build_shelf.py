@@ -173,6 +173,7 @@ def probe(talk_dir: Path) -> dict:
         "notes_md": (talk_dir / "notes.md").exists(),
         "transcript_md": (talk_dir / "transcript.md").exists(),
         "audio": audio.name if audio else None,
+        "artifacts": sorted(p.name for p in (talk_dir / "artifacts").glob("*.html")),
     }
 
 
@@ -249,6 +250,15 @@ STYLE = """
   .yt-frame { aspect-ratio: 16 / 9; }
   .yt-frame iframe { width: 100%; height: 100%; border: 0;
                      border-radius: 8px; }
+  .artifact-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+  .artifact-item { margin: 0.75rem 0; }
+  .artifact-name { color: #6d5f4b; font-size: 0.95rem; }
+  .artifact-open { margin-left: 0.75rem; font-size: 0.85rem; color: #a99e8e; }
+  .artifact-note { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
+  .artifact-frame { display: block; width: 100%; height: 480px;
+                    margin-top: 0.5rem; border: 1px solid #e8e0d3;
+                    border-radius: 8px; background: #fffdf9;
+                    resize: vertical; overflow: auto; }
   details { margin-top: 1rem; border-top: 1px solid #f0e9dd; padding-top: 0.75rem; }
   summary { cursor: pointer; color: #8a7f70; font-size: 0.95rem; }
   .raw-link { font-size: 0.85rem; margin: 0.5rem 0 0.3rem; }
@@ -423,6 +433,29 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     add("system", "— ollama model: " + model + " —");
   });
 
+  // Served mode only: swap each artifact link for a sandboxed live view.
+  // Wall 1 is the sandbox — "allow-scripts" ALONE (never the same-origin
+  // grant), so the artifact runs as a null origin. Wall 2 is the
+  // /artifacts/ route's no-network CSP. The static file:// shelf keeps
+  // the plain links instead: a file:// iframe would have neither wall.
+  function mountArtifacts() {
+    document.querySelectorAll(".artifact-note").forEach(function (note) {
+      note.hidden = true; // the live view replaces the explanation
+    });
+    document.querySelectorAll(".artifact-item").forEach(function (item) {
+      var name = item.getAttribute("data-name");
+      var frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.setAttribute("loading", "lazy");
+      frame.setAttribute("title", name);
+      frame.setAttribute("src", "/artifacts/"
+        + encodeURIComponent(item.getAttribute("data-slug"))
+        + "/" + encodeURIComponent(name));
+      frame.className = "artifact-frame";
+      item.appendChild(frame);
+    });
+  }
+
   // Safe mini-markdown for COMPLETED guide bubbles: **bold**, *italic*,
   // `code` become real elements, built with createElement + textContent
   // only — the text is never parsed as HTML. Streaming stays plain text.
@@ -486,6 +519,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     sessionsSection.hidden = false; // served mode: the sidebar list wakes up
     restoreHistory(); // the current session comes back after a reload
     loadModels(); // fill the local-model picker (served mode only)
+    mountArtifacts(); // artifact links become sandboxed live views
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
 
   newButton.addEventListener("click", function () {
@@ -715,6 +749,26 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 "<details><summary>Transcript</summary>\n"
                 f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
                 f'<div class="scroll-box">\n{transcript}\n</div>\n</details>'
+            )
+        if files["artifacts"]:
+            # Guide-written interactive pages. The static HTML carries only
+            # plain new-tab links; the sandboxed iframes (allow-scripts,
+            # never allow-same-origin, behind the /artifacts/ CSP wall) are
+            # mounted by JS on the served shelf — a file:// iframe would
+            # have no CSP wall, so it is never emitted here.
+            items = "\n".join(
+                f'<li class="artifact-item" data-slug="{slug}" data-name="{escape(name)}">\n'
+                f'<span class="artifact-name">{escape(name)}</span>\n'
+                f'<a class="artifact-open" href="{slug}/artifacts/{escape(name)}"'
+                ' target="_blank" rel="noopener">open full page ↗</a>\n</li>'
+                for name in files["artifacts"]
+            )
+            card.append(
+                "<details><summary>Artifacts</summary>\n"
+                '<p class="artifact-note">Interactive pages the guide made for'
+                " this talk. The sandboxed view appears on the served shelf;"
+                " these links open the raw page.</p>\n"
+                f'<ul class="artifact-list">\n{items}\n</ul>\n</details>'
             )
         card.append("</section>")
         cards.append("\n".join(card))

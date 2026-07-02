@@ -31,6 +31,19 @@ Routes:
                     {"models": [{name, tools, size_gb}...], "current": name}
                     (tools per /api/show capabilities; 503 when Ollama is
                     down).
+    GET  /artifacts/{slug}/{name}  a guide-written interactive page
+                    (library/<slug>/artifacts/<name>.html) behind the
+                    no-network CSP wall (ARTIFACT_CSP + nosniff); the
+                    shelf embeds it in a sandboxed iframe (allow-scripts
+                    only — never allow-same-origin). /{slug}/artifacts/
+                    {name} is its file-layout twin with the same headers,
+                    registered before the static mount so artifact bytes
+                    are never served CSP-less. Writes come from the three
+                    brains: the claude allowlist (Edit/Write on
+                    library/**/artifacts/*.html), the ollama
+                    write_artifact tool, and the MCP write_artifact tool —
+                    all pinned by artifact_path (slug chars + .html,
+                    existing talks only, ~256KB cap).
     GET  /api/history?session=<id>  that session's last 50 completed turns
                     (default: the current/most-recent session) plus its id.
     /<talk>/...     library/ served statically (Range supported, audio seeks)
@@ -118,6 +131,25 @@ STATE_PATH = CHAT_DIR / "state.json"
 SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # no dot-files, no slashes
 SUMMARY_TIMEOUT = 120  # seconds for the one-shot leave-summary call
 SEARCH_LIMIT = 8  # sessions returned by search_sessions
+
+# Interactive artifacts: guide-written single-file HTML pages, rendered
+# behind two walls — a sandboxed iframe (allow-scripts only, so a null
+# origin) and this no-network CSP. Inline style/script are the artifact's
+# only powers; images/media come only from our own origin (the talk's own
+# files, via relative paths); connect-src inherits default-src 'none', so
+# fetch/XHR/WebSocket are all blocked; no forms out, no <base> games.
+ARTIFACT_MAX_BYTES = 256 * 1024  # one self-contained page, kept light
+TALK_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # lowercase talk slugs
+ARTIFACT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*\.html")  # slug chars + .html
+ARTIFACT_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+    "img-src 'self' data:; media-src 'self'; frame-ancestors 'self'; "
+    "form-action 'none'; base-uri 'none'"
+)
+ARTIFACT_HEADERS = {
+    "Content-Security-Policy": ARTIFACT_CSP,
+    "X-Content-Type-Options": "nosniff",
+}
 HISTORY_LIMIT = 50  # turns served back to the panel on page load
 OLLAMA_URL = "http://localhost:11434"
 CLAUDE_TIMEOUT = 600  # seconds — tool turns (ingest, TTS) take a while
@@ -250,6 +282,49 @@ def ambient_prefix(view: str | None, titles: dict[str, str]) -> str:
     )
 
 
+def artifact_path(library: Path, slug: str, name: str) -> Path:
+    """The pinned path of one artifact, or ValueError — the single wall
+    for both the write path and the render routes.
+
+    slug must be lowercase slug chars naming an existing talk folder;
+    name must be lowercase slug chars + ".html". The regexes admit no
+    dots (beyond the extension), slashes, or leading dashes, so no
+    traversal, absolute path, or dot-file can survive them.
+    """
+    if not isinstance(slug, str) or not TALK_SLUG_RE.fullmatch(slug):
+        raise ValueError(f"invalid talk slug {slug!r}")
+    if not isinstance(name, str) or not ARTIFACT_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"invalid artifact name {name!r} — lowercase slug chars + .html"
+        )
+    if not (library / slug).is_dir():
+        raise ValueError(f"no talk {slug!r} in the library")
+    return library / slug / "artifacts" / name
+
+
+def write_artifact(library: Path, slug: str, name: str, html) -> Path:
+    """Validate and write one artifact; the single write path for the
+    ollama tool loop and the MCP server (the claude chat brain writes
+    through its allowlist instead — same folder, same shape).
+
+    The page must be self-contained: the CSP wall on the render side
+    means anything external simply won't load, so the cap keeps a
+    single inline-everything page honest.
+    """
+    path = artifact_path(library, slug, name)
+    if not isinstance(html, str) or not html.strip():
+        raise ValueError("html must be non-empty text")
+    size = len(html.encode("utf-8"))
+    if size > ARTIFACT_MAX_BYTES:
+        raise ValueError(
+            f"html is {size} bytes — the cap is {ARTIFACT_MAX_BYTES} bytes; "
+            "keep it one light self-contained page"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
 def build_system_prompt(
     study: str, index: str, chunks: list[tuple[str, str]], agency: str = ""
 ) -> str:
@@ -291,11 +366,14 @@ def build_ollama_payload(
 
 # The chat guide's durable memory: the ONLY paths it may write from chat.
 # Everything else (code, curriculum, committed docs) needs a full session.
+# artifacts/*.html are the guide's interactive pages — self-contained
+# single-file HTML, rendered behind the sandbox + CSP walls (see ARTIFACT_CSP).
 CHAT_WRITE_SCOPES = (
     "STUDY.md",
     "journal/**",
     "library/**/notes.md",
     "library/INDEX.md",
+    "library/**/artifacts/*.html",
 )
 
 # The chat guide's hands: OUR reviewed tools, as exact command prefixes.
@@ -685,6 +763,29 @@ OLLAMA_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_artifact",
+            "description": (
+                "Write a SELF-CONTAINED interactive HTML page (practice "
+                "page, reflection card, timer) into a talk's artifacts/ "
+                "folder. Inline CSS/JS only — no external scripts, styles, "
+                "fonts, or requests (it renders behind a no-network "
+                "sandbox, so anything external simply won't load). After "
+                "writing, call rebuild_shelf."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "an existing talk slug from the library"},
+                    "name": {"type": "string", "description": "file name: lowercase slug chars + .html"},
+                    "html": {"type": "string", "description": "the complete single-file HTML document"},
+                },
+                "required": ["slug", "name", "html"],
+            },
+        },
+    },
 ]
 
 TOOL_PROGRESS = {
@@ -692,10 +793,11 @@ TOOL_PROGRESS = {
     "rebuild_shelf": "— rebuilding the shelf… —",
     "speak": "— recording the audio… —",
     "search_history": "— searching past conversations… —",
+    "write_artifact": "— writing the page… —",
 }
 
 AGENCY_TOOLS_NOTE = """\
-You can act, sparingly, through four tools:
+You can act, sparingly, through five tools:
 - fetch_talk: ingest ONE talk from a URL the user explicitly gave
   (captioned YouTube preferred). Never invent or guess URLs.
 - rebuild_shelf: regenerate the shelf page after any library change,
@@ -703,6 +805,9 @@ You can act, sparingly, through four tools:
 - speak: record a short reflection as audio on the shelf.
 - search_history: when the user refers to something you discussed in a
   past conversation, look it up instead of guessing.
+- write_artifact: when the user asks for something interactive (a
+  practice page, a timer, a reflection card), write ONE self-contained
+  HTML page — inline CSS/JS only, nothing external — then rebuild_shelf.
 Only use a tool when the user asks for the thing it does."""
 
 AGENCY_NO_TOOLS_NOTE = """\
@@ -723,6 +828,11 @@ def validate_tool_call(name: str, args) -> list[str]:
     don't open with a dash (no flag smuggling); speak output collapses
     to a bare slug pinned under library/ (no path traversal). The argv
     is executed directly — never shell=True, never string interpolation.
+
+    One exception to "argv = subprocess": write_artifact returns the
+    marker argv ["write_artifact", slug, name, html] — a plain file
+    write, dispatched in-process by stream_ollama's runner, which passes
+    it through artifact_path/write_artifact (the same wall again).
     """
     if not isinstance(args, dict):
         raise ValueError("arguments must be an object")
@@ -760,6 +870,22 @@ def validate_tool_call(name: str, args) -> list[str]:
         if not isinstance(q, str) or not q.strip() or q.lstrip().startswith("-"):
             raise ValueError("q must be plain, non-empty text")
         return ["uv", "run", "tools/search_history.py", q]
+    if name == "write_artifact":
+        slug, art_name, html = args.get("slug"), args.get("name"), args.get("html")
+        if not isinstance(slug, str) or not TALK_SLUG_RE.fullmatch(slug):
+            raise ValueError(f"invalid talk slug {slug!r}")
+        if not isinstance(art_name, str) or not ARTIFACT_NAME_RE.fullmatch(art_name):
+            raise ValueError(
+                f"invalid artifact name {art_name!r} — lowercase slug chars + .html"
+            )
+        if not isinstance(html, str) or not html.strip():
+            raise ValueError("html must be non-empty text")
+        if len(html.encode("utf-8")) > ARTIFACT_MAX_BYTES:
+            raise ValueError(
+                f"html exceeds the {ARTIFACT_MAX_BYTES}-byte cap — keep it "
+                "one light self-contained page"
+            )
+        return ["write_artifact", slug, art_name, html]
     raise ValueError(f"unknown tool {name!r}")
 
 
@@ -1582,6 +1708,25 @@ def stream_ollama(
             "check `ollama serve` and try again.",
         )
 
+    def dispatch_tool(argv: list[str]) -> tuple[bool, str]:
+        """run_tool, plus the one in-process tool: write_artifact.
+
+        Its marker argv never reaches a subprocess — the write goes
+        through artifact_path/write_artifact (the same wall as the
+        validation that produced the argv).
+        """
+        if argv and argv[0] == "write_artifact":
+            try:
+                path = write_artifact(library, argv[1], argv[2], argv[3])
+            except ValueError as error:
+                return False, f"write_artifact rejected: {error}"
+            rel = path.relative_to(library.parent)
+            return True, (
+                f"Wrote {rel}. Now call rebuild_shelf, then tell the user "
+                "to refresh the page."
+            )
+        return run_tool(argv)
+
     def generate():
         emitted = False
         try:
@@ -1590,7 +1735,7 @@ def stream_ollama(
                 payload["messages"],
                 model,
                 _open_ollama_chat,
-                run_tool,
+                dispatch_tool,
                 tools=OLLAMA_TOOLS if has_tools else None,
             ):
                 emitted = True
@@ -1688,6 +1833,33 @@ def create_app(brain: str, ollama_model: str):
             return JSONResponse({"error": error.message}, status_code=error.status)
         turns = load_history(session_turns_path(SESSIONS_DIR, sid), HISTORY_LIMIT)
         return {"session": sid, "turns": turns}
+
+    def artifact_response(slug: str, name: str):
+        """One artifact behind the CSP wall; a clean 404 on any miss."""
+        try:
+            path = artifact_path(LIBRARY, slug, name)
+        except ValueError:
+            return JSONResponse({"error": "no such artifact"}, status_code=404)
+        if not path.is_file():
+            return JSONResponse({"error": "no such artifact"}, status_code=404)
+        return FileResponse(
+            path, media_type="text/html", headers=dict(ARTIFACT_HEADERS)
+        )
+
+    # HEAD is registered explicitly: FastAPI's @app.get answers GET only,
+    # and an unmatched HEAD would fall through to the CSP-less static
+    # mount (verified live) — the walls must hold for every method.
+    @app.api_route("/artifacts/{slug}/{name}", methods=["GET", "HEAD"])
+    def artifact(slug: str, name: str):
+        # The route the sandboxed iframes point at (wall 2: ARTIFACT_CSP).
+        return artifact_response(slug, name)
+
+    @app.api_route("/{slug}/artifacts/{name}", methods=["GET", "HEAD"])
+    def artifact_in_place(slug: str, name: str):
+        # The file-layout twin ("open full page" links, file://-shaped
+        # paths). Registered before the static mount, so these bytes are
+        # NEVER served without the CSP wall.
+        return artifact_response(slug, name)
 
     @app.post("/api/chat")
     def chat(body: dict):

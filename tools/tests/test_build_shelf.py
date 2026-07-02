@@ -129,6 +129,10 @@ def _make_library(tmp_path):
     quiet.mkdir()
     (quiet / "primer.mp3").write_bytes(b"\x00")
     (quiet / "notes.md").write_text("# Notes\n\nWhat landed: **kindness** wins.\n")
+    (quiet / "artifacts").mkdir()
+    (quiet / "artifacts" / "breath-timer.html").write_text(
+        "<!DOCTYPE html><html><body><h1>Breathe</h1></body></html>"
+    )
     far = library / "far-talk"
     far.mkdir()
     (far / "transcript.md").write_text("# Far Talk\n\nWords.\n")
@@ -422,6 +426,36 @@ def test_chat_panel_speaks_sessions_and_ambient_view(tmp_path):
     assert "X-Session" in html
     # Every chat POST carries the ambient view (the open talk's slug).
     assert "currentView" in html
+
+
+def test_render_shelf_lists_artifacts_behind_the_sandbox_contract(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The talk card grows an Artifacts section listing artifacts/*.html.
+    assert "<summary>Artifacts</summary>" in html
+    item = re.search(r'<li class="artifact-item"[^>]*>', html)
+    assert item and 'data-slug="quiet-mind"' in item.group(0)
+    assert 'data-name="breath-timer.html"' in item.group(0)
+    # The static shelf shows a plain link (new tab, never navigates away)
+    # plus a note that the sandboxed view needs the served shelf.
+    link = re.search(
+        r'<a class="artifact-open"[^>]*href="quiet-mind/artifacts/breath-timer.html"[^>]*>',
+        html,
+    )
+    assert link and 'target="_blank"' in link.group(0)
+    assert 'rel="noopener"' in link.group(0)
+    assert "served shelf" in html  # the note
+    # No iframe in the static HTML: the sandboxed view is mounted by JS
+    # in served mode only, with allow-scripts and NEVER allow-same-origin.
+    assert "<iframe" not in html
+    assert '"sandbox", "allow-scripts"' in html
+    assert "allow-same-origin" not in html
+    assert "/artifacts/" in html  # the CSP-walled route the frames point at
+
+
+def test_render_shelf_talk_without_artifacts_has_no_section(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Only quiet-mind has artifacts; the section appears exactly once.
+    assert html.count("<summary>Artifacts</summary>") == 1
 
 
 def test_chat_panel_has_the_ollama_model_picker(tmp_path):

@@ -133,7 +133,13 @@ def test_build_claude_cmd_resume_turn():
 
 def test_chat_allowed_tools_covers_memory_scopes_and_reviewed_tools_only():
     rules = serve_shelf.chat_allowed_tools().split(",")
-    write_scopes = ("STUDY.md", "journal/**", "library/**/notes.md", "library/INDEX.md")
+    write_scopes = (
+        "STUDY.md",
+        "journal/**",
+        "library/**/notes.md",
+        "library/INDEX.md",
+        "library/**/artifacts/*.html",  # self-contained interactive pages
+    )
     expected = {f"{tool}({scope})" for scope in write_scopes for tool in ("Edit", "Write")}
     expected |= {
         "Bash(uv run tools/fetch_talk.py:*)",
@@ -1183,11 +1189,14 @@ def test_validate_tool_call_search_history():
             serve_shelf.validate_tool_call("search_history", {"q": bad})
 
 
-def test_ollama_tools_cover_the_four_reviewed_hands():
+def test_ollama_tools_cover_the_five_reviewed_hands():
     names = {tool["function"]["name"] for tool in serve_shelf.OLLAMA_TOOLS}
-    assert names == {"fetch_talk", "rebuild_shelf", "speak", "search_history"}
-    assert "search_history" in serve_shelf.TOOL_PROGRESS
-    assert "search_history" in serve_shelf.AGENCY_TOOLS_NOTE
+    assert names == {
+        "fetch_talk", "rebuild_shelf", "speak", "search_history", "write_artifact",
+    }
+    for name in ("search_history", "write_artifact"):
+        assert name in serve_shelf.TOOL_PROGRESS
+        assert name in serve_shelf.AGENCY_TOOLS_NOTE
 
 
 # --- the model picker (/api/models + per-request "model") --------------------
@@ -1229,6 +1238,111 @@ def test_resolve_request_model_unknown_or_bad_is_a_400():
     with pytest.raises(serve_shelf.BrainError) as excinfo:
         serve_shelf.resolve_request_model(42, installed)
     assert excinfo.value.status == 400
+
+
+# --- artifacts: the write wall + the CSP wall ---------------------------------
+
+
+def _artifact_library(tmp_path):
+    library = tmp_path / "library"
+    (library / "patience").mkdir(parents=True)
+    return library
+
+
+def test_artifact_path_accepts_a_clean_slug_and_name(tmp_path):
+    library = _artifact_library(tmp_path)
+    path = serve_shelf.artifact_path(library, "patience", "breath-timer.html")
+    assert path == library / "patience" / "artifacts" / "breath-timer.html"
+    # Underscores and digits are fine too.
+    assert serve_shelf.artifact_path(library, "patience", "day_2.html")
+
+
+def test_artifact_path_rejects_traversal_and_junk(tmp_path):
+    library = _artifact_library(tmp_path)
+    bad_names = (
+        "../escape.html",  # traversal
+        "..%2Fescape.html",  # encoded traversal junk
+        "/etc/x.html",  # absolute
+        "a/b.html",  # nested
+        "escape.htm",  # wrong extension
+        "escape.html.txt",  # double extension
+        "Escape.HTML",  # not lowercase slug chars
+        ".hidden.html",  # dot-file
+        "",  # empty
+        42,  # not a string
+    )
+    for name in bad_names:
+        with pytest.raises(ValueError):
+            serve_shelf.artifact_path(library, "patience", name)
+    bad_slugs = ("../library", "..", "a/b", "Patience", ".chat", "", None)
+    for slug in bad_slugs:
+        with pytest.raises(ValueError):
+            serve_shelf.artifact_path(library, slug, "ok.html")
+    # A well-formed slug that is not an existing talk dir is refused too.
+    with pytest.raises(ValueError, match="no talk"):
+        serve_shelf.artifact_path(library, "not-a-talk", "ok.html")
+
+
+def test_write_artifact_writes_under_the_talk_folder(tmp_path):
+    library = _artifact_library(tmp_path)
+    html = "<!DOCTYPE html><html><body><h1>Pause</h1></body></html>"
+    path = serve_shelf.write_artifact(library, "patience", "pause.html", html)
+    assert path == library / "patience" / "artifacts" / "pause.html"
+    assert path.read_text() == html
+
+
+def test_write_artifact_enforces_the_size_cap(tmp_path):
+    library = _artifact_library(tmp_path)
+    cap = serve_shelf.ARTIFACT_MAX_BYTES
+    assert cap == 256 * 1024
+    # Exactly at the cap is fine; one byte over is refused.
+    serve_shelf.write_artifact(library, "patience", "big.html", "x" * cap)
+    with pytest.raises(ValueError, match="cap"):
+        serve_shelf.write_artifact(library, "patience", "big.html", "x" * (cap + 1))
+    for empty in ("", "   ", None, 42):
+        with pytest.raises(ValueError):
+            serve_shelf.write_artifact(library, "patience", "big.html", empty)
+
+
+def test_validate_tool_call_write_artifact_marker_argv():
+    argv = serve_shelf.validate_tool_call(
+        "write_artifact",
+        {"slug": "patience", "name": "pause.html", "html": "<html>hi</html>"},
+    )
+    # Not a subprocess: the marker argv is dispatched to an in-process
+    # write (still behind artifact_path/write_artifact validation).
+    assert argv == ["write_artifact", "patience", "pause.html", "<html>hi</html>"]
+    base = {"slug": "patience", "name": "pause.html", "html": "<html>hi</html>"}
+    for field, bad in (
+        ("slug", "../library"),
+        ("slug", ""),
+        ("name", "../escape.html"),
+        ("name", "x.txt"),
+        ("html", ""),
+        ("html", 7),
+        ("html", "x" * (serve_shelf.ARTIFACT_MAX_BYTES + 1)),
+    ):
+        with pytest.raises(ValueError):
+            serve_shelf.validate_tool_call("write_artifact", {**base, field: bad})
+
+
+def test_artifact_csp_walls_off_the_network():
+    csp = serve_shelf.ARTIFACT_CSP
+    # Nothing loads by default; inline style/script are the only powers.
+    assert "default-src 'none'" in csp
+    assert "style-src 'unsafe-inline'" in csp
+    assert "script-src 'unsafe-inline'" in csp
+    # Media and images only from our own origin (plus data: images).
+    assert "img-src 'self' data:" in csp
+    assert "media-src 'self'" in csp
+    assert "frame-ancestors 'self'" in csp
+    # No form exfiltration, no <base> games; connect-src falls back to
+    # default-src 'none', so fetch/XHR/WebSocket are all blocked.
+    assert "form-action 'none'" in csp
+    assert "base-uri 'none'" in csp
+    assert "connect-src" not in csp  # inherited 'none' — do not loosen it
+    assert serve_shelf.ARTIFACT_HEADERS["X-Content-Type-Options"] == "nosniff"
+    assert serve_shelf.ARTIFACT_HEADERS["Content-Security-Policy"] == csp
 
 
 def test_pick_ollama_model_remembers_the_choice():

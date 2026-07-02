@@ -19,6 +19,10 @@ Scoped writes (the claude chat brain's allowlist, mirrored; ~64KB cap;
 every result says what changed):
     update_path (STUDY.md, wholesale), update_notes (library/<slug>/notes.md),
     append_journal (journal/YYYY-MM-DD.md, today's date, append-only)
+Interactive pages (rendered on the shelf behind a sandboxed iframe + a
+no-network CSP; ~256KB cap, path pinned by serve_shelf.artifact_path):
+    write_artifact (library/<slug>/artifacts/<name>.html — one
+    self-contained single-file HTML page, inline CSS/JS only)
 
 There is deliberately NO journal read tool: hosted models see whatever
 tools return, and the journal never leaves the machine. No terminal, no
@@ -351,6 +355,27 @@ def update_notes(slug: str, content: str) -> str:
     return f"library/{slug}/notes.md {verb} ({len(content)} chars)."
 
 
+def write_artifact(slug: str, name: str, html: str) -> str:
+    """Write a SELF-CONTAINED interactive HTML page (practice page,
+    reflection card, timer) into a talk's artifacts/ folder. Inline
+    CSS/JS only — no external scripts, styles, fonts, or requests: it
+    renders behind a no-network sandbox, so anything external simply
+    won't load. Media only via relative paths into the talk folder
+    (e.g. ../../<slug>/audio.mp3). name is lowercase slug chars +
+    ".html". After writing, call rebuild_shelf so it appears."""
+    root = repo_root()
+    try:
+        path = load_serve_shelf().write_artifact(root / "library", slug, name, html)
+    except ValueError as error:
+        return f"Write rejected: {error}"
+    assert inside_root(path, root)
+    return (
+        f"Wrote {path.relative_to(root)} ({len(html)} chars). "
+        "Call rebuild_shelf so it appears on the shelf, then tell the "
+        "user to refresh."
+    )
+
+
 def append_journal(content: str) -> str:
     """Append a reflection to today's journal entry (journal/YYYY-MM-DD.md,
     created with a date heading if new). Append-only: the journal is
@@ -372,8 +397,9 @@ def append_journal(content: str) -> str:
     return f"Created journal/{today}.md with the entry ({len(content)} chars)."
 
 
-# The whole world: three actions, six reads, three scoped writes. No journal
-# read, no terminal, no general file access — by design.
+# The whole world: three actions, six reads, three scoped writes, one
+# artifact write — thirteen tools. No journal read, no terminal, no
+# general file access — by design.
 TOOL_HANDLERS = {
     "fetch_talk": fetch_talk,
     "rebuild_shelf": rebuild_shelf,
@@ -387,6 +413,7 @@ TOOL_HANDLERS = {
     "update_path": update_path,
     "update_notes": update_notes,
     "append_journal": append_journal,
+    "write_artifact": write_artifact,
 }
 
 
