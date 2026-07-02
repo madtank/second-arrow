@@ -862,3 +862,77 @@ def test_chat_focus_typing_is_intent_never_steal(tmp_path):
     assert html.count("input.focus({ preventScroll: true })") == 3
     assert "input.focus()" not in html
 
+
+# --- iteration 11a: reflections flow from practice to guide ------------------
+
+
+def test_reflection_chip_markup_is_quiet_and_consent_first(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # A hidden chip near the input; nothing persists, nothing auto-sends.
+    chip = re.search(r'<div id="reflection-chip" hidden>.*?</div>', html, re.S)
+    assert chip, "reflection chip missing"
+    assert 'id="reflection-send"' in chip.group(0)
+    assert 'id="reflection-dismiss"' in chip.group(0)
+    # The chip label and composed message are set via textContent only.
+    assert "hand it to the guide" in html
+    assert '"From my practice in "' in html
+    assert "innerHTML" not in html
+
+
+def test_reflection_listener_trusts_only_our_frames_and_slug(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Identity is the mounted iframe's contentWindow (sandbox = null
+    # origin), and the slug comes from OUR data-slug — the message's own
+    # claims are never used for routing.
+    assert "toolFrames" in html
+    assert "event.source" in html
+    assert "event.data.slug" not in html
+    assert "second-arrow:reflection" in html
+
+
+def test_reflection_validator_matrix_runs_under_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    fn = re.search(r"function validReflection\(data\) \{[\s\S]*?\n  \}", html)
+    assert fn, "validReflection missing"
+    harness = fn.group(0) + """
+var cases = [
+  [{type:"second-arrow:reflection", name:"t.html", prompt:"p", text:"hello"}, true],
+  [{type:"reflection", name:"t.html", prompt:"p", text:"hello"}, false],
+  [{name:"t.html", prompt:"p", text:"hello"}, false],
+  [{type:"second-arrow:reflection", prompt:"p", text:"hello"}, false],
+  [{type:"second-arrow:reflection", name:7, prompt:"p", text:"hello"}, false],
+  [{type:"second-arrow:reflection", name:"t.html", text:"hello"}, false],
+  [{type:"second-arrow:reflection", name:"t.html", prompt:"p"}, false],
+  [{type:"second-arrow:reflection", name:"t.html", prompt:"p", text:"   "}, false],
+  [{type:"second-arrow:reflection", name:"t.html", prompt:"p", text:"x".repeat(4001)}, false],
+  [{type:"second-arrow:reflection", name:"t.html", prompt:"p".repeat(301), text:"hi"}, false],
+  [{type:"second-arrow:reflection", name:"t.html", prompt:"p", text:"x".repeat(4000)}, true],
+  [{type:"second-arrow:reflection", name:"t.html", prompt:"", text:"hi"}, true],
+  [null, false],
+  ["string", false],
+  [42, false],
+];
+for (var i = 0; i < cases.length; i++) {
+  if (!!validReflection(cases[i][0]) !== cases[i][1]) {
+    console.error("case " + i + " wrong");
+    process.exit(1);
+  }
+}
+console.log("matrix ok");
+"""
+    js = tmp_path / "validator.js"
+    js.write_text(harness)
+    result = subprocess.run(["node", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "matrix ok" in result.stdout
+
+
+def test_reflection_send_reuses_the_chat_send_path(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # One send path: the chip composes a message and calls the same
+    # sendMessage the form uses — a draft in the input is never clobbered.
+    assert "function sendMessage(text)" in html
+    assert html.count("sendMessage(") >= 3  # definition + form + chip
+

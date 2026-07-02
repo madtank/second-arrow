@@ -36,6 +36,18 @@ say", ask which talk they mean, then read it with `read_transcript`.
   (`../../<slug>/audio.mp3`). The shelf lists these under **Learning
   tools** on the talk's card. Then `rebuild_shelf` and tell the user
   to refresh.
+- **A handed-over reflection** (a message beginning "From my practice
+  in ...") → receive it warmly and briefly, `append_journal` it in
+  their words, and fold its essence into that talk's notes via
+  `update_notes` under **My takeaways**. No lecture — one warm line.
+- Learning tools may offer reflections back: embed, on the reflection
+  textarea (debounced ~1s),
+  `parent.postMessage({type:"second-arrow:reflection", name:"<file>",
+  prompt:"<short prompt>", text: value}, "*")` — one-way,
+  fire-and-forget; the tool must work with no parent listening. The
+  shelf keeps it in memory only behind a quiet chip; only the user's
+  click hands it over. Privacy line on the page, amended: "This stays
+  here unless you choose to hand it to the guide."
 - **Composed for the eyes → HTML.** Markdown is your machine layer
   (path, notes, transcripts); anything composed FOR THE USER to look
   at — a primer to read, a monthly reflection, a path overview —

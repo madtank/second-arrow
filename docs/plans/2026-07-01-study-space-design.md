@@ -295,6 +295,23 @@ phone), revisit with real usage behind the decision.
   message list scrolling independently; and typing became intent —
   idle keystrokes (or `/`) focus the chat without ever moving the
   viewport, Escape hands the keys back to the page.
+- **Iter 11a — DONE: reflections flow from practice to guide,
+  consent-first.** A sandboxed learning tool may postMessage a
+  structured reflection UP to the shelf
+  ({type:"second-arrow:reflection", name, prompt, text} — shape
+  validated, size-capped; identity is the mounted iframe's
+  contentWindow, and the talk slug always comes from the shelf's own
+  data-slug, never the message). The shelf holds only the latest
+  reflection per talk in memory and shows a quiet chip near the input;
+  clicking it IS the consent — it sends one normal chat message ("From
+  my practice in <tool> on \"<talk>\": ...") through the same send
+  path (drafts never clobbered), and the guide journals it in the
+  user's words and folds the essence into that talk's notes. Nothing
+  persists unless handed over; the artifacts' privacy line now reads
+  "This stays here unless you choose to hand it to the guide." Both
+  existing practice tools were wired with the documented fire-and-
+  forget snippet (debounced input → postMessage; tools keep working
+  with no parent listening).
 
 ## Boundaries
 

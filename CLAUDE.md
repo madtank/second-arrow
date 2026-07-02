@@ -90,6 +90,20 @@ Use your memory as you go:
   — that shape resolves both served and over file://). The shelf lists
   these under **Learning tools** on the talk's card. Then run
   `uv run tools/build_shelf.py` and tell the user to refresh.
+- When the user hands over a practice reflection (a message beginning
+  "From my practice in ..."), receive it warmly and briefly — no lecture.
+  Journal it in their words (`journal/YYYY-MM-DD.md`), and add its
+  essence to that talk's `notes.md` under **My takeaways**. One warm
+  line back is enough.
+- Learning tools MAY offer reflections back to the shelf. The template
+  for tool authors — on the reflection textarea, debounced ~1s:
+  `parent.postMessage({type:"second-arrow:reflection", name:"<file>",
+  prompt:"<short prompt>", text: value}, "*")` — one-way,
+  fire-and-forget, no reply expected; the tool must keep working with
+  no parent listening (static mode). The shelf holds the latest
+  reflection in memory only and shows a quiet chip; only the user's
+  click hands it to you. Keep the on-page privacy line, amended to:
+  "This stays here unless you choose to hand it to the guide."
 - **HTML for everything human-facing; markdown is the machine layer.**
   `STUDY.md`, notes, transcripts, and the index are your data — keep
   them markdown. But anything you COMPOSE for the user to look at (a

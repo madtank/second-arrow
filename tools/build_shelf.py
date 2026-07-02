@@ -438,6 +438,16 @@ STYLE = """
                 background: #fffdf9; border: 1px solid #e8e0d3;
                 border-radius: 8px; padding: 0.15rem 0.4rem;
                 max-width: 13rem; }
+  #reflection-chip { display: flex; align-items: center; gap: 0.3rem;
+                     margin-top: 0.5rem; }
+  #reflection-send { flex: 1; text-align: left; font: inherit;
+                     font-size: 0.85rem; color: #5a4d3a; background: #f6f1e7;
+                     border: 1px dashed #d8cbb4; border-radius: 999px;
+                     padding: 0.3rem 0.9rem; cursor: pointer; }
+  #reflection-send:hover { background: #efe7d9; }
+  #reflection-dismiss { font: inherit; font-size: 0.8rem; color: #a99e8e;
+                        background: none; border: none; cursor: pointer;
+                        padding: 0.2rem 0.4rem; }
   #chat-form { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
   #chat-form textarea { flex: 1; font: inherit; color: inherit; resize: vertical;
                         background: #fffdf9; border: 1px solid #e8e0d3;
@@ -464,6 +474,10 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 <select id="chat-model" hidden></select>
 </p>
 <div id="chat-messages"></div>
+<div id="reflection-chip" hidden>
+<button type="button" id="reflection-send"></button>
+<button type="button" id="reflection-dismiss" aria-label="dismiss">✕</button>
+</div>
 <form id="chat-form">
 <textarea id="chat-input" rows="2" placeholder="Where are you right now?"></textarea>
 <button type="submit" id="chat-send">Send</button>
@@ -543,6 +557,64 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     add("system", "— ollama model: " + model + " —");
   });
 
+  // --- reflections from practice: consent-first hand-off ----------------
+  // A learning tool may post {type:"second-arrow:reflection", name, prompt,
+  // text} UP to the shelf. Identity is the mounted iframe's contentWindow
+  // (the sandbox is a null origin, so origin can't identify it); the talk
+  // slug comes from OUR data-slug, never from the message. The latest
+  // reflection per talk waits in memory only, behind a quiet chip — the
+  // click on that chip IS the consent that hands the words to the guide.
+  var toolFrames = []; // {win, slug, name} — pushed as each frame mounts
+  var reflections = {}; // slug -> {tool, text}, memory only
+  var chip = document.getElementById("reflection-chip");
+  var chipSend = document.getElementById("reflection-send");
+  var chipDismiss = document.getElementById("reflection-dismiss");
+  var chipSlug = null;
+
+  function validReflection(data) {
+    return !!data
+      && typeof data === "object"
+      && data.type === "second-arrow:reflection"
+      && typeof data.name === "string" && data.name.length > 0
+      && typeof data.prompt === "string" && data.prompt.length <= 300
+      && typeof data.text === "string" && data.text.trim().length > 0
+      && data.text.length <= 4000;
+  }
+
+  window.addEventListener("message", function (event) {
+    var from = null;
+    toolFrames.forEach(function (tool) {
+      if (tool.win === event.source) from = tool;
+    });
+    if (!from || !validReflection(event.data)) return;
+    // OUR mounted file name, not the message's claim, names the tool.
+    reflections[from.slug] = { tool: from.name, text: event.data.text };
+    chipSlug = from.slug;
+    chipSend.textContent =
+      "reflection from your practice — hand it to the guide?";
+    chip.hidden = false; // quiet: no focus theft, never auto-sent
+  });
+
+  function dismissChip(forget) {
+    if (forget && chipSlug) delete reflections[chipSlug];
+    chipSlug = null;
+    chip.hidden = true;
+  }
+
+  chipDismiss.addEventListener("click", function () { dismissChip(true); });
+
+  chipSend.addEventListener("click", function () {
+    var reflection = chipSlug && reflections[chipSlug];
+    if (!reflection || send.disabled) return;
+    var card = document.getElementById("talk-" + chipSlug);
+    var heading = card && card.querySelector("h2");
+    var title = heading ? heading.textContent : chipSlug;
+    // Its own message — a draft in the input is never clobbered.
+    sendMessage("From my practice in " + reflection.tool
+      + ' on "' + title + '": ' + reflection.text);
+    dismissChip(true);
+  });
+
   // Served mode only: swap each artifact link for a sandboxed live view.
   // Wall 1 is the sandbox — "allow-scripts" ALONE (never the same-origin
   // grant), so the artifact runs as a null origin. Wall 2 is the
@@ -563,6 +635,11 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
         + "/" + encodeURIComponent(name));
       frame.className = "artifact-frame";
       item.appendChild(frame);
+      toolFrames.push({ // identity for reflections: this exact window
+        win: frame.contentWindow,
+        slug: item.getAttribute("data-slug"),
+        name: name,
+      });
     });
   }
 
@@ -633,11 +710,8 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     mountArtifacts(); // artifact links become sandboxed live views
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
 
-  form.addEventListener("submit", function (event) {
-    event.preventDefault();
-    var text = input.value.trim();
+  function sendMessage(text) {
     if (!text || send.disabled) return;
-    input.value = "";
     add("user", text);
     history.push({ role: "user", content: text });
     var pending = add("guide", "thinking…");
@@ -700,6 +774,14 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       send.disabled = false;
       input.focus({ preventScroll: true });
     });
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    var text = input.value.trim();
+    if (!text || send.disabled) return;
+    input.value = "";
+    sendMessage(text);
   });
 
   input.addEventListener("keydown", function (event) {
