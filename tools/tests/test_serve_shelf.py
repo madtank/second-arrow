@@ -1991,20 +1991,36 @@ def test_hermes_tool_progress_line_maps_our_mcp_tools():
     assert line("mcp_second_arrow_mystery") == "— working… —"
 
 
-def test_check_hermes_wired_gate_open_with_routes(fake_gateway):
+WIRED_PROFILE_CONFIG = (
+    "mcp_servers:\n  second_arrow:\n    command: uv\n"
+    "platform_toolsets:\n  api_server:\n    - mcp-second_arrow\n    - clarify\n"
+)
+
+
+@pytest.fixture
+def wired_config(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(WIRED_PROFILE_CONFIG)
+    return config
+
+
+def test_check_hermes_wired_gate_open_with_routes(fake_gateway, wired_config):
     base, _ = fake_gateway(
-        toolsets=[{"name": "mcp-second_arrow"}, {"name": "clarify"}],
+        toolsets=[{"name": "clarify"}],
         models={"data": [{"id": "second-arrow"}, {"id": "deep", "root": "gpt-5.5"}]},
     )
-    wired, reason, routes = serve_shelf.check_hermes_wired(base=base, api_key="k")
+    wired, reason, routes = serve_shelf.check_hermes_wired(
+        base=base, api_key="k", config_path=wired_config
+    )
     assert wired is True and reason is None
     assert routes == [{"alias": "deep", "model": "gpt-5.5"}]
 
 
-def test_check_hermes_wired_ignores_disabled_toolsets(fake_gateway):
-    # v0.17 gateways list every built-in toolset with enabled flags; a
+def test_check_hermes_wired_ignores_disabled_toolsets(fake_gateway, wired_config):
+    # The gateway lists every built-in toolset with enabled flags; a
     # locked-down profile shows them all disabled. Only enabled ones
-    # count against the gate.
+    # count against the gate — and mcp-second_arrow NEVER appears in
+    # /v1/toolsets (built-ins/plugins only), so its absence is fine.
     base, _ = fake_gateway(
         toolsets={
             "object": "list",
@@ -2013,31 +2029,46 @@ def test_check_hermes_wired_ignores_disabled_toolsets(fake_gateway):
                 {"name": "terminal", "enabled": False},
                 {"name": "browser", "enabled": False},
                 {"name": "clarify", "enabled": True},
-                {"name": "mcp-second_arrow", "enabled": True},
             ],
         },
     )
-    wired, reason, _ = serve_shelf.check_hermes_wired(base=base, api_key="k")
+    wired, reason, _ = serve_shelf.check_hermes_wired(
+        base=base, api_key="k", config_path=wired_config
+    )
     assert wired is True and reason is None
 
 
-def test_check_hermes_wired_requires_our_mcp_toolset(fake_gateway):
-    # clarify-only (or empty) passes the subset check but the guide would
-    # have no hands — the gate must refuse and say what's missing.
-    base, _ = fake_gateway(
-        toolsets={"data": [{"name": "clarify", "enabled": True}]},
+def test_check_hermes_wired_requires_mcp_wiring_in_the_profile_config(
+    fake_gateway, tmp_path
+):
+    # /v1/toolsets can't attest MCP presence, so the gate reads the
+    # profile config: server registered + toolset pinned. Anything less
+    # means the guide would have no hands — refuse and name the fix.
+    base, _ = fake_gateway(toolsets={"data": [{"name": "clarify", "enabled": True}]})
+    unwired = tmp_path / "config.yaml"
+    unwired.write_text("model:\n  default: gpt-5.5\n")
+    wired, reason, routes = serve_shelf.check_hermes_wired(
+        base=base, api_key="k", config_path=unwired
     )
-    wired, reason, routes = serve_shelf.check_hermes_wired(base=base, api_key="k")
     assert wired is False
-    assert "mcp-second_arrow" in reason and "MCP" in reason
+    assert "mcp" in reason.lower() and "wire_hermes_profile" in reason
     assert routes == []
-
-
-def test_check_hermes_wired_refuses_an_over_provisioned_gateway(fake_gateway):
-    base, _ = fake_gateway(
-        toolsets=[{"name": "mcp-second_arrow"}, {"name": "terminal"}, {"name": "web"}]
+    # A missing config file reads the same way.
+    wired, reason, _ = serve_shelf.check_hermes_wired(
+        base=base, api_key="k", config_path=tmp_path / "absent.yaml"
     )
-    wired, reason, routes = serve_shelf.check_hermes_wired(base=base, api_key="k")
+    assert wired is False and "wire_hermes_profile" in reason
+
+
+def test_check_hermes_wired_refuses_an_over_provisioned_gateway(
+    fake_gateway, wired_config
+):
+    base, _ = fake_gateway(
+        toolsets=[{"name": "terminal"}, {"name": "web"}, {"name": "clarify"}],
+    )
+    wired, reason, routes = serve_shelf.check_hermes_wired(
+        base=base, api_key="k", config_path=wired_config
+    )
     assert wired is False
     assert "over-provisioned" in reason
     assert "terminal" in reason and "web" in reason

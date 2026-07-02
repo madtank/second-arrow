@@ -1984,16 +1984,21 @@ def _hermes_get(path: str, api_key: str, base: str | None = None):
 
 
 def check_hermes_wired(
-    base: str | None = None, api_key: str | None = None
+    base: str | None = None,
+    api_key: str | None = None,
+    config_path: Path | None = None,
 ) -> tuple[bool, str | None, list[dict]]:
     """The wired-gate, live: (wired, reason, routes).
 
     Same wall as tools/hermes_probe.py (whose parse_toolsets /
-    excess_toolsets this reuses): the gateway must answer /health AND
-    expose toolsets ⊆ {mcp-second_arrow, clarify}. An over-provisioned
-    gateway is NOT wired — that refusal is a safety wall, keep it in
-    code. Routes ride along from /v1/models once the gate is open
-    (display-only; absent routes are a fine answer).
+    excess_toolsets / config_mcp_wired this reuses): the gateway must
+    answer /health, expose enabled toolsets ⊆ {mcp-second_arrow,
+    clarify}, and the profile config must register our MCP server
+    (/v1/toolsets only enumerates built-ins — mcp-<server> toolsets
+    never appear there). An over-provisioned gateway is NOT wired —
+    that refusal is a safety wall, keep it in code. Routes ride along
+    from /v1/models once the gate is open (display-only; absent routes
+    are a fine answer).
     """
     probe = load_hermes_probe()
     base = base or HERMES_URL
@@ -2022,13 +2027,17 @@ def check_hermes_wired(
             f"{sorted(probe.ALLOWED_TOOLSETS)}: {excess}",
             [],
         )
-    if probe.REQUIRED_TOOLSET not in exposed:
+    config = config_path or (HERMES_PROFILE_DIR / "config.yaml")
+    try:
+        config_text = config.read_text()
+    except OSError:
+        config_text = ""
+    if not probe.config_mcp_wired(config_text):
         return (
             False,
-            f"{probe.REQUIRED_TOOLSET} not exposed — the gateway didn't "
-            "load our MCP server (the guide would have no hands). Try: "
-            "hermes -p second-arrow mcp test second_arrow, then restart "
-            "the gateway",
+            "profile config doesn't register our MCP server — the guide "
+            "would have no hands. Run: uv run tools/wire_hermes_profile.py, "
+            "then restart the gateway",
             [],
         )
     try:

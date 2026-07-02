@@ -94,3 +94,41 @@ def test_required_toolset_is_our_mcp_server():
     # the gate.
     assert probe.REQUIRED_TOOLSET == "mcp-second_arrow"
     assert probe.REQUIRED_TOOLSET in probe.ALLOWED_TOOLSETS
+
+
+# --- config_mcp_wired: MCP presence is judged from the profile config -------
+# (the gateway's /v1/toolsets enumerates only built-in/plugin toolsets;
+# mcp-<server> toolsets NEVER appear there — verified in gateway source)
+
+
+WIRED_CONFIG = """\
+model:
+  default: gpt-5.5
+mcp_servers:
+  second_arrow:
+    command: "uv"
+    args: ["run", "/repo/tools/mcp_second_arrow.py"]
+platform_toolsets:
+  api_server:
+    - mcp-second_arrow
+    - clarify
+"""
+
+
+def test_config_mcp_wired_accepts_the_wired_shape():
+    assert probe.config_mcp_wired(WIRED_CONFIG) is True
+
+
+def test_config_mcp_wired_needs_both_server_and_pin():
+    no_server = WIRED_CONFIG.replace("mcp_servers:\n  second_arrow:", "other:\n  thing:")
+    assert probe.config_mcp_wired(no_server) is False
+    no_pin = WIRED_CONFIG.replace("    - mcp-second_arrow\n", "")
+    assert probe.config_mcp_wired(no_pin) is False
+    assert probe.config_mcp_wired("") is False
+
+
+def test_config_mcp_wired_ignores_commented_lines():
+    commented = WIRED_CONFIG.replace("  second_arrow:", "  # second_arrow:").replace(
+        "    - mcp-second_arrow", "    # - mcp-second_arrow"
+    )
+    assert probe.config_mcp_wired(commented) is False

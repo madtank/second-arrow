@@ -30,9 +30,11 @@ Tests (pure parts):
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:8642"
 PROBE_TIMEOUT = 10  # seconds per GET
@@ -82,6 +84,25 @@ def excess_toolsets(exposed: set[str], allowed: frozenset | set) -> list[str]:
     return sorted(exposed - set(allowed))
 
 
+def config_mcp_wired(config_text: str) -> bool:
+    """Does the profile config register our MCP server AND pin its toolset?
+
+    GET /v1/toolsets enumerates only built-in and plugin toolsets —
+    mcp-<server> toolsets never appear there (gateway source,
+    _get_effective_configurable_toolsets), so MCP presence is judged
+    from the profile config: an mcp_servers entry named second_arrow
+    plus an `- mcp-second_arrow` pin. Commented lines don't count.
+    """
+    live = "\n".join(
+        line for line in config_text.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    has_block = re.search(r"^mcp_servers:", live, re.M)
+    has_server = re.search(r"^\s+second_arrow:", live, re.M)
+    has_pin = re.search(r"^\s*-\s*mcp-second_arrow\s*$", live, re.M)
+    return bool(has_block and has_server and has_pin)
+
+
 # --- the two read-only GETs --------------------------------------------------
 
 
@@ -118,15 +139,27 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    if REQUIRED_TOOLSET not in exposed:
+    profile_dir = Path(
+        os.environ.get(
+            "HERMES_PROFILE_DIR",
+            str(Path.home() / ".hermes" / "profiles" / "second-arrow"),
+        )
+    )
+    config_path = profile_dir / "config.yaml"
+    try:
+        config_text = config_path.read_text()
+    except OSError:
+        config_text = ""
+    if not config_mcp_wired(config_text):
         print(
-            f"GATE CLOSED — {REQUIRED_TOOLSET} is not exposed: the gateway "
-            "didn't load our MCP server (the guide would have no hands). "
-            "Try: hermes -p second-arrow mcp test second_arrow, then "
-            "restart the gateway.",
+            f"GATE CLOSED — {config_path} doesn't register our MCP server "
+            f"(mcp_servers.second_arrow + a {REQUIRED_TOOLSET} pin): the "
+            "guide would have no hands. Run: uv run "
+            "tools/wire_hermes_profile.py, then restart the gateway.",
             file=sys.stderr,
         )
         return 1
+    print(f"mcp evidence: {REQUIRED_TOOLSET} wired in {config_path}")
     print(f"gate open: exposed ⊆ {sorted(ALLOWED_TOOLSETS)}")
     return 0
 
