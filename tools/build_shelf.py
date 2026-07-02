@@ -9,6 +9,14 @@ and transcript, matches "Reach for it when ..." lines from curriculum/*.md
 by Source URL, and writes library/shelf.html (private, gitignored). Paths
 in the page are relative so audio plays over file://.
 
+The page is two panes: a sidebar (title, the path, one nav entry per talk,
+a Sessions placeholder) and a main pane showing one view at a time —
+#home or #talk/<slug> — routed by a tiny hashchange handler. With JS off
+the views simply render stacked (hiding happens only under a runtime "js"
+class). YouTube-sourced talks get a click-to-load embedded player: nothing
+third-party loads until the user presses "Play here". The guide chat panel
+sits below the active view and stays put across views.
+
 Run with:
     uv run tools/build_shelf.py
 Then:
@@ -24,6 +32,22 @@ AUDIO_EXTENSIONS = (".mp3", ".m4a", ".ogg", ".wav", ".flac", ".aac", ".opus")
 
 def escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def youtube_embed_url(source_url: str) -> str | None:
+    """Privacy-enhanced embed URL for a YouTube video link, else None.
+
+    Handles watch?v=<id> (with extra params in any order) and youtu.be/<id>
+    forms. Channel/playlist/anything-else URLs get None — only a single
+    video can be embedded.
+    """
+    url = source_url or ""
+    match = re.match(
+        r"https?://(?:www\.|m\.)?youtube\.com/watch\?(?:[^#\s]*&)?v=([\w-]{6,})", url
+    ) or re.match(r"https?://youtu\.be/([\w-]{6,})", url)
+    if not match:
+        return None
+    return f"https://www.youtube-nocookie.com/embed/{match.group(1)}"
 
 
 def parse_index(text: str) -> list[dict]:
@@ -117,8 +141,9 @@ def parse_study(text: str) -> dict:
 def render_path_strip(path: dict) -> str:
     """A small calm strip: studied talks with a check, queued with an arrow.
 
-    Returns "" when there is nothing to show, so a missing or empty
-    STUDY.md leaves the page untouched (it must stay statically shareable).
+    Rendered in the sidebar and again in the #home view. Returns "" when
+    there is nothing to show, so a missing or empty STUDY.md leaves the
+    page untouched (it must stay statically shareable).
     """
     marks = (("studied", "✓", "path-done"), ("queued", "→", "path-next"))
     items = [
@@ -129,8 +154,8 @@ def render_path_strip(path: dict) -> str:
     if not items:
         return ""
     return (
-        '<section class="card path-strip">\n<h2>The path</h2>\n'
-        '<p class="path-items">\n' + "\n".join(items) + "\n</p>\n</section>"
+        '<div class="path-strip">\n<h2>The path</h2>\n'
+        '<p class="path-items">\n' + "\n".join(items) + "\n</p>\n</div>"
     )
 
 
@@ -152,17 +177,51 @@ def probe(talk_dir: Path) -> dict:
 STYLE = """
   body { background: #faf7f2; color: #3c3833; margin: 0;
          font: 17px/1.6 -apple-system, "Helvetica Neue", Arial, sans-serif; }
-  main { max-width: 640px; margin: 0 auto; padding: 3rem 1.5rem 4rem; }
+  #layout { display: flex; min-height: 100vh; align-items: stretch; }
+  #sidebar { width: 260px; flex-shrink: 0; box-sizing: border-box;
+             background: #f5f0e6; border-right: 1px solid #e8e0d3;
+             padding: 2rem 1.25rem 1.5rem; position: sticky; top: 0;
+             height: 100vh; overflow-y: auto; }
+  #sidebar h1 { font-size: 1.35rem; margin: 0 0 0.2rem; }
+  #sidebar h2 { font-size: 0.95rem; color: #8a7f70; margin: 1.75rem 0 0.5rem;
+                text-transform: lowercase; letter-spacing: 0.03em; }
+  .epigraph { color: #8a7f70; font-style: italic; margin-top: 0;
+              font-size: 0.9rem; }
+  #talk-nav { list-style: none; margin: 0; padding: 0; }
+  #talk-nav a { display: block; padding: 0.45rem 0.6rem; border-radius: 8px;
+                color: #5a4d3a; text-decoration: none; font-size: 0.95rem;
+                line-height: 1.35; }
+  #talk-nav a:hover { background: #efe7d9; }
+  #talk-nav a.active { background: #efe7d9; }
+  .nav-teacher { display: block; color: #a99e8e; font-size: 0.8rem; }
+  .side-muted { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
+  #sidebar footer { margin-top: 2.5rem; }
+  #sidebar-toggle { display: none; position: fixed; top: 0.7rem; left: 0.7rem;
+                    z-index: 3; font: inherit; color: #5a4d3a;
+                    background: #efe7d9; border: 1px solid #e8e0d3;
+                    border-radius: 8px; padding: 0.2rem 0.7rem;
+                    cursor: pointer; }
+  main { flex: 1; min-width: 0; max-width: 680px; margin: 0 auto;
+         padding: 2rem 1.5rem 4rem; }
+  .js .view { display: none; }
+  .js .view.active { display: block; }
+  @media (max-width: 720px) {
+    #sidebar-toggle { display: block; }
+    #sidebar { position: fixed; z-index: 2; left: -290px;
+               transition: left 0.2s ease; box-shadow: none; }
+    #sidebar.open { left: 0; box-shadow: 0 0 24px rgba(60, 56, 51, 0.25); }
+    main { padding-top: 3.5rem; }
+  }
   h1, h2, h3, h4, h5 { font-family: Georgia, "Times New Roman", serif;
                        font-weight: normal; color: #4a4038; }
   h1 { font-size: 1.7rem; margin-bottom: 0.2rem; }
-  header p { color: #8a7f70; font-style: italic; margin-top: 0; }
   .card { background: #fffdf9; border: 1px solid #e8e0d3; border-radius: 10px;
           padding: 1.5rem 1.75rem; margin: 2rem 0; }
   .card h2 { font-size: 1.3rem; margin: 0 0 0.2rem; }
   .meta { color: #8a7f70; font-size: 0.9rem; margin: 0 0 1rem; }
   .reach { color: #6d5f4b; }
-  .path-strip { padding: 1rem 1.75rem; }
+  .path-strip { margin-top: 1.25rem; }
+  .path-strip h2 { font-size: 0.95rem; color: #8a7f70; margin: 0 0 0.2rem; }
   .path-items { display: flex; flex-wrap: wrap; gap: 0.3rem 1.2rem;
                 margin: 0.4rem 0 0; font-size: 0.92rem; }
   .path-done { color: #6d5f4b; }
@@ -172,6 +231,13 @@ STYLE = """
   .source-link { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem;
                  background: #efe7d9; border-radius: 8px; color: #5a4d3a;
                  text-decoration: none; }
+  .yt-embed { margin-top: 1rem; }
+  .yt-play { font: inherit; color: #5a4d3a; background: #efe7d9; border: none;
+             border-radius: 8px; padding: 0.5rem 1rem; cursor: pointer; }
+  .yt-link { margin-left: 0.75rem; font-size: 0.85rem; color: #a99e8e; }
+  .yt-frame { aspect-ratio: 16 / 9; }
+  .yt-frame iframe { width: 100%; height: 100%; border: 0;
+                     border-radius: 8px; }
   details { margin-top: 1rem; border-top: 1px solid #f0e9dd; padding-top: 0.75rem; }
   summary { cursor: pointer; color: #8a7f70; font-size: 0.95rem; }
   .raw-link { font-size: 0.85rem; margin: 0.5rem 0 0.3rem; }
@@ -388,10 +454,67 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 </script>"""
 
 
+# Hash routing, the sidebar toggle, and the click-to-load YouTube player.
+# Views are hidden only under the runtime "js" class (added below): with
+# JS off, or file:// oddities, every view simply renders stacked. The
+# player iframe is built with createElement + setAttribute — the page
+# makes no third-party request until the user presses "Play here".
+LAYOUT_SCRIPT = """<script>
+(function () {
+  var sidebar = document.getElementById("sidebar");
+  var toggle = document.getElementById("sidebar-toggle");
+  var views = document.querySelectorAll(".view");
+  var links = document.querySelectorAll("#talk-nav a");
+  document.body.classList.add("js"); // hiding starts here, never in the HTML
+
+  function show() {
+    var hash = location.hash || "#home";
+    var id = hash.indexOf("#talk/") === 0 ? "talk-" + hash.slice(6) : "view-home";
+    if (!document.getElementById(id)) id = "view-home"; // unknown hash: go home
+    views.forEach(function (view) {
+      view.classList.toggle("active", view.id === id);
+    });
+    links.forEach(function (link) {
+      link.classList.toggle("active", link.getAttribute("href") === hash);
+    });
+  }
+  window.addEventListener("hashchange", show);
+  show();
+
+  toggle.addEventListener("click", function () {
+    sidebar.classList.toggle("open");
+  });
+  links.forEach(function (link) {
+    link.addEventListener("click", function () {
+      sidebar.classList.remove("open"); // narrow screens: picking closes it
+    });
+  });
+
+  document.querySelectorAll(".yt-embed").forEach(function (holder) {
+    var button = holder.querySelector(".yt-play");
+    if (!button) return;
+    button.addEventListener("click", function () {
+      var frame = document.createElement("iframe");
+      frame.setAttribute("src", holder.getAttribute("data-embed") + "?autoplay=1");
+      frame.setAttribute("title", "YouTube player");
+      frame.setAttribute("allow", "accelerometer; autoplay; clipboard-write; "
+        + "encrypted-media; gyroscope; picture-in-picture; web-share");
+      frame.setAttribute("allowfullscreen", "");
+      frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
+      var box = document.createElement("div");
+      box.className = "yt-frame";
+      box.appendChild(frame);
+      holder.replaceChild(box, button);
+    });
+  });
+})();
+</script>"""
+
+
 def render_card(talk: dict, files: dict, reach: str | None) -> str:
     slug = talk["slug"]
     parts = [
-        '<section class="card">',
+        f'<section class="card view" id="talk-{escape(slug)}">',
         f"<h2>{escape(talk.get('title', slug))}</h2>",
         f'<p class="meta">{escape(talk.get("teacher", ""))}'
         f" &middot; {escape(talk.get('themes', ''))}</p>",
@@ -409,10 +532,37 @@ def render_card(talk: dict, files: dict, reach: str | None) -> str:
             f'<audio controls preload="none" src="{escape(slug)}/{escape(files["audio"])}"></audio>'
         )
     elif talk.get("source"):
-        parts.append(
-            f'<a class="source-link" href="{escape(talk["source"])}">Listen at the source &rarr;</a>'
-        )
+        source = talk["source"]
+        embed = youtube_embed_url(source)
+        if embed:
+            # Click-to-load: the iframe exists only after "Play here", so
+            # the page stays light and makes no third-party request until
+            # asked. A small new-tab escape hatch sits alongside.
+            parts.append(
+                f'<div class="yt-embed" data-embed="{escape(embed)}">\n'
+                '<button type="button" class="yt-play">Play here ▸</button>\n'
+                f'<a class="yt-link" href="{escape(source)}" target="_blank" '
+                'rel="noopener">open on YouTube ↗</a>\n</div>'
+            )
+        else:
+            parts.append(
+                f'<a class="source-link" href="{escape(source)}" target="_blank" '
+                'rel="noopener">Listen at the source &rarr;</a>'
+            )
     return "\n".join(parts)
+
+
+def render_nav(talks: list[dict]) -> str:
+    """The sidebar's Talks list: one hash link per talk (title + teacher)."""
+    if not talks:
+        return '<p class="side-muted">The library is empty so far.</p>'
+    items = [
+        f'<li><a href="#talk/{escape(talk["slug"])}">'
+        f'<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>'
+        f'<span class="nav-teacher">{escape(talk.get("teacher", ""))}</span></a></li>'
+        for talk in talks
+    ]
+    return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>"
 
 
 def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
@@ -420,8 +570,9 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     study_path = library.parent / "STUDY.md"
     study = study_path.read_text() if study_path.exists() else ""
     path_strip = render_path_strip(parse_study(study))
+    talks = parse_index((library / "INDEX.md").read_text())
     cards = []
-    for talk in parse_index((library / "INDEX.md").read_text()):
+    for talk in talks:
         talk_dir = library / talk["slug"]
         files = probe(talk_dir) if talk_dir.is_dir() else probe(library / "_missing_")
         card = [render_card(talk, files, reach.get(talk.get("source", "")))]
@@ -445,7 +596,8 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
             )
         card.append("</section>")
         cards.append("\n".join(card))
-    body = "\n\n".join(cards) if cards else "<p>The library is empty so far.</p>"
+    talk_views = "\n\n".join(cards)
+    empty_note = "" if cards else "\n<p>The library is empty so far.</p>"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -455,23 +607,38 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <style>{STYLE}</style>
 </head>
 <body>
-<main>
-<header>
-<h1>Second Arrow — Study Shelf</h1>
-<p>Pain happens. The second arrow is optional.</p>
-</header>
-
+<button type="button" id="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
+<div id="layout">
+<nav id="sidebar">
+<h1>Second Arrow</h1>
+<p class="epigraph">Pain happens. The second arrow is optional.</p>
 {path_strip}
-
-{body}
-
-{CHAT_PANEL}
-
+<h2>Talks</h2>
+{render_nav(talks)}
+<h2>Sessions</h2>
+<p class="side-muted">conversation history arrives in the next iteration</p>
 <footer>
 Private — generated from your library.
 Rebuild: <code>uv run tools/build_shelf.py</code>
 </footer>
+</nav>
+<main>
+<div id="views">
+<section class="card view" id="view-home">
+<h2>Study shelf</h2>
+<p class="epigraph">Pain happens. The second arrow is optional.</p>
+{path_strip}
+<p>When you're ready, pick a talk from the sidebar, or talk to the guide
+below.</p>{empty_note}
+</section>
+
+{talk_views}
+</div>
+
+{CHAT_PANEL}
 </main>
+</div>
+{LAYOUT_SCRIPT}
 </body>
 </html>
 """

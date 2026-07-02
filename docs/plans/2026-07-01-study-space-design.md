@@ -174,6 +174,20 @@ phone), revisit with real usage behind the decision.
   retrieval (quote the transcript, surface notes) more than free-form
   teaching. Everything else is already local: Whisper transcription,
   Kokoro TTS, the library and journal on disk.
+- **Iter 4 — DONE: two-pane shelf, embedded player.** The shelf grew a
+  sidebar (title, the path, one nav entry per talk, a Sessions
+  placeholder) and a main pane showing one view at a time via
+  `location.hash` routing (`#talk/<slug>`, default `#home`) — built to
+  survive 50 talks, degrading to a stacked page with JS off. YouTube
+  talks get a click-to-load embedded player (youtube-nocookie iframe,
+  created only on "Play here" — no third-party request until asked) plus
+  a new-tab escape hatch; non-YouTube source links open in a new tab,
+  nothing navigates the page away. Chat stays the constant companion
+  below the active view.
+- **Iter 5 — NEXT: sessions + recall.** Fill the sidebar's Sessions
+  section: past conversations from `library/.chat/history.jsonl` become
+  browsable (and searchable enough), so a thought from last week can be
+  found and continued instead of lost.
 
 ## Boundaries
 

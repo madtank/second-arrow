@@ -1,5 +1,10 @@
 import importlib.util
+import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "build_shelf.py"
 SPEC = importlib.util.spec_from_file_location("build_shelf", MODULE_PATH)
@@ -111,6 +116,13 @@ def _make_library(tmp_path):
 - **Source:** https://example.org/far-talk.html
 - **Themes:** patience
 - **Path:** library/far-talk/
+
+## demon-story
+- **Title:** Demon Story
+- **Teacher:** Ajahn Brahm
+- **Source:** https://www.youtube.com/watch?v=me7Wm5LOpx0
+- **Themes:** anger, stories
+- **Path:** library/demon-story/
 """
     )
     quiet = library / "quiet-mind"
@@ -265,11 +277,11 @@ def test_render_shelf_omits_path_strip_without_study_md(tmp_path):
     library = _make_library(tmp_path)  # no STUDY.md next to library/
     html = build_shelf.render_shelf(library, {})
     assert "The path" not in html
-    assert 'class="card path-strip"' not in html
+    assert 'class="path-strip"' not in html
     # An empty STUDY.md is treated the same (static shareability).
     (tmp_path / "STUDY.md").write_text("# Study Memory\n")
     html = build_shelf.render_shelf(library, {})
-    assert 'class="card path-strip"' not in html
+    assert 'class="path-strip"' not in html
 
 
 def test_render_shelf_path_strip_escapes_names(tmp_path):
@@ -280,3 +292,138 @@ def test_render_shelf_path_strip_escapes_names(tmp_path):
     html = build_shelf.render_shelf(library, {})
     assert "✓ Quiet &lt;Talk&gt; &amp; Friends" in html
     assert "<Talk>" not in html
+
+
+# --- youtube_embed_url ------------------------------------------------------
+
+
+def test_youtube_embed_url_watch_form():
+    assert build_shelf.youtube_embed_url(
+        "https://www.youtube.com/watch?v=me7Wm5LOpx0"
+    ) == "https://www.youtube-nocookie.com/embed/me7Wm5LOpx0"
+    # Without the www, and over plain http, still recognized.
+    assert build_shelf.youtube_embed_url(
+        "http://youtube.com/watch?v=Haj6wtNSP2k"
+    ) == "https://www.youtube-nocookie.com/embed/Haj6wtNSP2k"
+
+
+def test_youtube_embed_url_youtu_be_form():
+    assert build_shelf.youtube_embed_url(
+        "https://youtu.be/me7Wm5LOpx0"
+    ) == "https://www.youtube-nocookie.com/embed/me7Wm5LOpx0"
+
+
+def test_youtube_embed_url_survives_extra_params():
+    # The video id is picked out; timestamps and share cruft are dropped.
+    assert build_shelf.youtube_embed_url(
+        "https://www.youtube.com/watch?v=me7Wm5LOpx0&t=120s"
+    ) == "https://www.youtube-nocookie.com/embed/me7Wm5LOpx0"
+    assert build_shelf.youtube_embed_url(
+        "https://www.youtube.com/watch?t=120s&v=me7Wm5LOpx0"
+    ) == "https://www.youtube-nocookie.com/embed/me7Wm5LOpx0"
+    assert build_shelf.youtube_embed_url(
+        "https://youtu.be/me7Wm5LOpx0?si=AbCd_123"
+    ) == "https://www.youtube-nocookie.com/embed/me7Wm5LOpx0"
+
+
+def test_youtube_embed_url_non_youtube_is_none():
+    assert build_shelf.youtube_embed_url("https://example.org/patience.html") is None
+    assert build_shelf.youtube_embed_url("https://vimeo.com/12345") is None
+    # YouTube pages that are not a single video get no embed either.
+    assert build_shelf.youtube_embed_url("https://www.youtube.com/@AjahnBrahm") is None
+    assert build_shelf.youtube_embed_url("") is None
+
+
+# --- iteration 4: embedded player + two-pane layout -------------------------
+
+
+def test_render_shelf_youtube_talk_gets_click_to_load_embed(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The demon-story talk (YouTube source, no local audio) gets a calm
+    # click-to-load button instead of a navigate-away link ...
+    assert "Play here" in html
+    assert 'data-embed="https://www.youtube-nocookie.com/embed/me7Wm5LOpx0"' in html
+    # ... and a small escape hatch that opens in a NEW tab.
+    assert "open on YouTube" in html
+    demon = html[html.index("Demon Story"):]
+    anchor = re.search(r'<a class="yt-link"[^>]*>', demon)
+    assert anchor and 'target="_blank"' in anchor.group(0)
+    assert 'rel="noopener"' in anchor.group(0)
+    # No iframe in the static page: nothing loads until the user asks.
+    assert "<iframe" not in html
+
+
+def test_render_shelf_non_youtube_source_never_navigates_away(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # far-talk keeps its source link, but it opens in a new tab now.
+    link = re.search(
+        r'<a class="source-link"[^>]*href="https://example.org/far-talk.html"[^>]*>',
+        html,
+    )
+    assert link, "far-talk source link missing"
+    assert 'target="_blank"' in link.group(0)
+    assert 'rel="noopener"' in link.group(0)
+
+
+def test_render_shelf_sidebar_lists_each_talk(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S)
+    assert sidebar, "sidebar nav missing"
+    for title, slug in [
+        ("Quiet Mind &amp; &lt;Friends&gt;", "quiet-mind"),
+        ("Far Talk", "far-talk"),
+        ("Demon Story", "demon-story"),
+    ]:
+        assert title in sidebar.group(0)
+        assert f'href="#talk/{slug}"' in sidebar.group(0)
+    # The sidebar also carries the epigraph and the sessions placeholder.
+    assert "The second arrow is optional." in sidebar.group(0)
+    assert "conversation history arrives in the next iteration" in sidebar.group(0)
+
+
+def test_render_shelf_hash_views_present(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # One full-pane view per talk, plus the home/welcome view, routed by a
+    # tiny hashchange handler (CSS :target can't also highlight the nav).
+    assert 'id="talk-quiet-mind"' in html
+    assert 'id="talk-far-talk"' in html
+    assert 'id="talk-demon-story"' in html
+    assert 'id="view-home"' in html
+    assert "hashchange" in html
+    assert "pick a talk from the sidebar" in html
+
+
+def test_render_shelf_degrades_gracefully_without_js(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Views are hidden by a "js" class added at runtime — never by inline
+    # style — so with JS off everything renders stacked and readable.
+    assert 'classList.add("js")' in html
+    assert ".js .view" in html
+    assert 'style="' not in html  # no inline styles at all, hiding or otherwise
+    # Every display:none rule for views is gated behind the runtime class.
+    for match in re.finditer(r"([^{};]*)\{[^{}]*display:\s*none", html):
+        selector = match.group(1)
+        assert ".js" in selector or ".view" not in selector, selector
+
+
+def test_shelf_js_still_never_uses_innerhtml_for_iframe(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The player iframe is built with createElement + setAttribute.
+    assert "createElement" in html
+    assert "setAttribute" in html
+    assert "innerHTML" not in html
+
+
+def test_inline_scripts_parse_with_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    assert scripts, "no inline scripts found"
+    for i, script in enumerate(scripts):
+        js = tmp_path / f"inline-{i}.js"
+        js.write_text(script)
+        result = subprocess.run(
+            ["node", "--check", str(js)], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
