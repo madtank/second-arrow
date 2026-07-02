@@ -154,14 +154,6 @@ def test_chat_js_renders_replies_as_text_never_html(tmp_path):
     assert "innerHTML" not in html
 
 
-def test_chat_panel_has_brain_toggle_pills(tmp_path):
-    html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    assert 'data-brain="claude"' in html
-    assert 'data-brain="ollama"' in html
-    assert "claude · deep" in html
-    assert "ollama · offline" in html
-
-
 def test_chat_js_has_safe_rich_renderer_and_history_restore(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # Completed bubbles are dressed by the DOM-only mini-markdown renderer;
@@ -1273,7 +1265,7 @@ def test_card_done_for_now_is_the_primary_action(tmp_path):
     (tmp_path / "STUDY.md").write_text(DONE_STUDY)
     html = build_shelf.render_shelf(library, {})
     # far-talk: current, heard-status irrelevant — the one clear way to
-    # say "done with this one, onto the next".
+    # say "done with this one", reading as completion at a glance.
     far_card = re.search(
         r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
     ).group(0)
@@ -1283,15 +1275,61 @@ def test_card_done_for_now_is_the_primary_action(tmp_path):
     assert button, "done-for-now action missing"
     assert 'data-slug="far-talk"' in button.group(0)
     assert 'data-title="Far Talk"' in button.group(0)
-    assert button.group(1) == "Done for now → next"
+    assert button.group(1) == "✓ Done with this talk"
     # Not yet heard: no wrap-up link riding along.
     assert "wrap-up-talk" not in far_card
-    # quiet-mind: already done on the path — nothing left to declare.
+    # quiet-mind: already done on the path — no completion button, just
+    # the quiet reopen door.
     quiet_card = re.search(
         r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
     ).group(0)
     assert "done-for-now" not in quiet_card
-    assert "wrap-up-talk" not in quiet_card
+    assert "reopen — wrap it up again / talk about it" in quiet_card
+
+
+def test_card_status_line_names_the_three_states(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_STUDY)
+    html = build_shelf.render_shelf(library, {})
+    # quiet-mind: studied AND heard — ✓ done with the listen date.
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    assert re.search(
+        r'<span class="status-mark status-done">✓ done · \d{4}-\d{2}-\d{2}</span>',
+        quiet_card,
+    )
+    # far-talk: queued, unheard — the sidebar's "current" vocabulary.
+    far_card = re.search(
+        r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
+    ).group(0)
+    assert '<span class="status-mark status-next">→ current</span>' in far_card
+    # heard but not closed out: the phrasing that explains the button.
+    (tmp_path / "STUDY.md").write_text(
+        "## Queued\n- **Quiet Mind & <Friends>** — next.\n"
+    )
+    html = build_shelf.render_shelf(library, {})
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    assert (
+        '<span class="status-mark status-heard">heard — not closed out yet</span>'
+        in quiet_card
+    )
+    # The status line sits at the top: before the players, after the meta.
+    assert quiet_card.index('class="card-status"') < quiet_card.index("<audio")
+
+
+def test_done_click_answers_instantly_in_js(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The optimistic receipt on the button itself...
+    assert "✓ done — finding what's next…" in html
+    # ...the sidebar entry flips ✓ right away, with an undo kept for the
+    # failure path (the send outcome is awaited)...
+    assert "markSidebarDone" in html
+    assert "undoMark" in html
+    # ...and sendMessage reports that outcome to optimistic callers.
+    assert "return !failed;" in html
 
 
 def test_card_heard_but_not_done_offers_the_wrap_up_door(tmp_path):
@@ -1598,9 +1636,8 @@ def test_turn_end_checks_version_immediately(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # The finally of a streamed turn (success or error alike) polls right
     # away — never waiting out the 8s tick after the guide builds things.
-    finally_block = re.search(r"\.finally\(function \(\) \{[\s\S]*?\n    \}\);", html)
-    assert finally_block, "sendMessage finally missing"
-    assert "checkVersion()" in finally_block.group(0)
+    finally_block = re.search(r"\.finally\(function \(\) \{[^}]*checkVersion\(\);", html)
+    assert finally_block, "sendMessage finally must poll the version"
 
 
 def test_pending_reload_auto_applies_under_node(tmp_path):
@@ -1694,63 +1731,104 @@ def test_room_bindings_are_container_scoped_for_rebinding(tmp_path):
     assert 'event.target.closest("#talk-nav a")' in html
 
 
-# --- the hermes pill, route picker, popover, machinery card ----------------
+# --- the chat identity line + the settings room -----------------------------
 
 
-def test_hermes_pill_names_the_profile_not_a_model(tmp_path):
+def test_chat_header_is_one_quiet_identity_line(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    # The pill is profile identity — never a model name.
-    assert re.search(
-        r'<button[^>]*data-brain="hermes"[^>]*>hermes · second-arrow</button>', html
-    )
-    # The route picker, the no-routes note, and the ⓘ all start hidden;
-    # /health decides what shows.
-    assert '<select id="hermes-route" hidden></select>' in html
-    assert '<span id="hermes-model-note" hidden></span>' in html
-    assert re.search(r'<button[^>]*id="hermes-info"[^>]*hidden', html)
-    assert "innerHTML" not in html
+    # No brain chrome over the conversation: the pills, route dropdown and
+    # ⓘ are gone — one identity line links to the settings room instead.
+    assert 'id="chat-identity"' in html
+    assert '<a href="#settings" id="identity-link"' in html
+    assert "brain-pill" not in html
+    assert "data-brain=" not in html
+    assert 'id="hermes-popover"' not in html
+    # The line tells the truth in both states.
+    assert '"on Hermes · second-arrow"' in html
+    assert 'hermes not wired' in html
 
 
-def test_hermes_ghost_state_carries_the_exact_wiring_ritual(tmp_path):
+def test_settings_room_presents_hermes_as_the_home_harness(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    # The disabled ghost's tooltip names the three exact commands.
-    assert "hermes — not wired" in html
+    start = html.index('id="view-settings"')
+    end = html.index('<section class="card view" id="talk-', start)
+    room = html[start:end]  # nested <section>s: slice to the next room
+    # The headline section: harness, profile, tool count — and the radio
+    # rows the /health filler builds (route rows ARE the hermes pick).
+    assert "hermes-agent (Nous Research)" in room
+    assert "<code>second-arrow</code>" in room
+    assert "14 reviewed tools" in room
+    assert 'id="route-rows"' in room
+    assert 'id="hermes-wired-state"' in room
+    # Fallback brains + the relocated ollama model picker, hidden until
+    # /health answers.
+    assert 'id="fallback-rows"' in room
+    assert '<select id="chat-model" hidden></select>' in room
+    assert 'id="fallback-note"' in room
+    # The machinery card and the nightly-prep controls live here too.
+    assert '<ul id="machinery-list"></ul>' in room
+    assert 'id="prep-run"' in room and 'id="prep-pause"' in room
+    assert 'id="prep-resume"' in room
+
+
+def test_settings_carries_the_exact_wiring_ritual_and_config_pointer(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The unwired state names the three exact commands...
+    assert 'id="hermes-unwired"' in html
     assert "uv run tools/wire_hermes_profile.py" in html
     assert "hermes -p second-arrow gateway restart" in html
     assert "uv run tools/hermes_probe.py" in html
-
-
-def test_hermes_popover_says_where_the_model_lives(tmp_path):
-    html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    assert 'id="hermes-popover"' in html
+    # ...and the config that lives in Hermes is stated plainly — the page
+    # never writes ~/.hermes.
     assert "~/.hermes/profiles/second-arrow/config.yaml" in html
     assert "hermes -p second-arrow config set model.default" in html
-    assert "The shelf never edits Hermes config." in html
-    # Dismissible, inline.
-    assert 'id="hermes-popover-close"' in html
+    assert "This page never edits Hermes config." in html
+
+
+def test_settings_room_is_routable_and_linked(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The router knows the room...
+    assert 'hash === "#settings"' in html
+    # ...and the quiet doors exist: sidebar footer + begin-here pointer.
+    assert '<a class="side-settings" href="#settings">settings</a>' in html
+    home = re.search(
+        r'<section class="card view" id="view-home">.*?</section>', html, re.S
+    ).group(0)
+    assert '<div id="machinery" hidden>' in home
+    assert "the room's machinery → settings" in home
+
+
+def test_brain_and_route_picks_persist_and_fall_back_out_loud(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Sticky selection: restored on load, written only on the user's own
+    # pick in settings.
+    assert 'savedPick("sa-brain")' in html
+    assert 'savedPick("sa-route")' in html
+    assert 'storePick("sa-brain", name)' in html
+    assert 'storePick("sa-route", hermesRoute)' in html
+    # The page renders the server's request-time truth by default...
+    assert "h.default_brain || h.brain" in html
+    # ...and an unhonorable restore falls back OUT LOUD, never silently.
+    assert "isn't reachable — using " in html
+    # The one-line note under the fallback radios.
+    assert "until you switch back" in html
 
 
 def test_hermes_route_pick_rides_as_the_request_model(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # The send body: ollama keeps its model, hermes sends the route alias.
     assert 'brain === "hermes" ? hermesRoute : null' in html
-    # No routes configured: the picker collapses to a static note.
-    assert '"model: " + hermes.model' in html
+    # Picking a route row IS picking hermes.
+    assert 'pickBrain("hermes", route.alias)' in html
 
 
-def test_begin_here_carries_the_machinery_card(tmp_path):
+def test_prep_controls_talk_to_the_narrow_proxy_only(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    home = re.search(r'<section class="card view" id="view-home">.*?</section>', html, re.S)
-    assert home, "expected the home view"
-    # The card starts hidden (static shelf: /health never answers) and is
-    # filled by JS with createElement + textContent only.
-    assert '<div id="machinery" hidden>' in home.group(0)
-    assert "the room's machinery" in home.group(0)
-    assert '<ul id="machinery-list"></ul>' in home.group(0)
-    # The filler states each brain, the aX presence, and the nightly prep.
-    assert "not yet scheduled" in html
-    assert "aX presence" in html
-    assert "not wired" in html
+    assert '"/api/prep/" + action' in html
+    assert 'fetch("/api/prep")' in html
+    # Only the three reviewed actions can leave the page.
+    assert '"run"' in html and '"pause"' in html and '"resume"' in html
+    assert "/api/jobs" not in html  # the gateway's API stays server-side
 
 
 def test_sidebar_collapser_is_a_fletched_arrow(tmp_path):

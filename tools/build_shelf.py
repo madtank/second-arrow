@@ -466,15 +466,18 @@ STYLE = """
   .listened-replay { font: inherit; font-size: 0.85rem; color: #7a6a50;
                      background: none; border: none; padding: 0;
                      cursor: pointer; text-decoration: underline; }
-  .mark-heard-line { margin: 0.4rem 0 0; }
   .mark-heard { font: inherit; font-size: 0.82rem; color: #a99e8e;
                 background: none; border: none; padding: 0; cursor: pointer;
                 border-bottom: 1px dotted #d8cbb4; }
   .mark-heard:hover { color: #7a6a50; }
   .mark-heard:disabled { color: #c2b8a6; cursor: default;
                          border-bottom-color: transparent; }
-  .done-line { margin: 1rem 0 0; display: flex; align-items: center;
-               flex-wrap: wrap; gap: 0.3rem 0.9rem; }
+  .card-status { margin: 0.7rem 0 0.2rem; display: flex; align-items: center;
+                 flex-wrap: wrap; gap: 0.3rem 0.9rem; }
+  .status-mark { font-size: 0.9rem; }
+  .status-done { color: #6d5f4b; }
+  .status-next { color: #a99e8e; }
+  .status-heard { color: #8a9a70; }
   .done-for-now { font: inherit; font-size: 0.92rem; color: #5a4d3a;
                   background: #efe7d9; border: 1px solid #d8cbb4;
                   border-radius: 999px; padding: 0.45rem 1.1rem;
@@ -598,42 +601,51 @@ STYLE = """
   .chat-thinking { color: #a99e8e; font-style: italic; }
   .chat-system { background: none; text-align: center; color: #a99e8e;
                  font-size: 0.8rem; font-style: italic; padding: 0; }
-  #chat-brain { display: flex; gap: 0.4rem; }
-  .brain-pill { font: inherit; font-size: 0.8rem; color: #5a4d3a;
-                background: none; border: 1px solid #e8e0d3;
-                border-radius: 999px; padding: 0.15rem 0.7rem; cursor: pointer; }
-  .brain-pill.brain-active { background: #efe7d9; border-color: #d8cbb4; }
-  .brain-pill:disabled { opacity: 0.4; cursor: default; }
-  #chat-model, #hermes-route { font: inherit; font-size: 0.8rem;
+  #chat-identity { font-size: 0.8rem; }
+  #chat-identity a { color: #a99e8e; text-decoration: none;
+                     border-bottom: 1px dotted #d8cbb4; }
+  #chat-identity a:hover { color: #5a4d3a; }
+  #chat-model { font: inherit; font-size: 0.85rem;
                 color: #5a4d3a; background: #fffdf9;
                 border: 1px solid #e8e0d3; border-radius: 8px;
-                padding: 0.15rem 0.4rem; max-width: 13rem; }
-  #hermes-model-note { color: #a99e8e; font-size: 0.8rem;
-                       align-self: center; font-style: italic; }
-  #hermes-info { font: inherit; font-size: 0.85rem; color: #a99e8e;
-                 background: none; border: none; border-radius: 999px;
-                 padding: 0 0.35rem; cursor: pointer; }
-  #hermes-info:hover { background: #efe7d9; color: #5a4d3a; }
-  #hermes-popover { position: relative; background: #f9f5ec;
-                    border: 1px solid #eee4d2; border-radius: 10px;
-                    padding: 0.7rem 2.1rem 0.7rem 0.9rem;
-                    margin: 0.4rem 0 0.2rem; font-size: 0.84rem;
-                    color: #5a4d3a; }
-  #hermes-popover p { margin: 0; line-height: 1.5; }
-  #hermes-popover code { background: #f3ecdd; border-radius: 4px;
-                         padding: 0 0.25rem; font-size: 0.78rem; }
-  #hermes-popover-close { position: absolute; top: 0.35rem; right: 0.45rem;
-                          font: inherit; font-size: 0.8rem; color: #a99e8e;
-                          background: none; border: none; cursor: pointer;
-                          padding: 0.1rem 0.3rem; }
+                padding: 0.15rem 0.4rem; max-width: 15rem;
+                margin: 0.2rem 0 0 1.7rem; display: block; }
   #machinery { margin-top: 1.8rem; padding-top: 1rem;
                border-top: 1px solid #f0e9dd; }
-  #machinery h3 { font-size: 0.95rem; color: #8a7f70; margin: 0 0 0.45rem; }
-  #machinery ul { list-style: none; padding: 0; margin: 0; }
-  #machinery li { display: flex; justify-content: space-between;
+  .machinery-link a { color: #a99e8e; font-size: 0.85rem;
+                      text-decoration: none;
+                      border-bottom: 1px dotted #d8cbb4; }
+  .machinery-link a:hover { color: #5a4d3a; }
+  #machinery-list { list-style: none; padding: 0; margin: 0; }
+  #machinery-list li { display: flex; justify-content: space-between;
                   gap: 1rem; font-size: 0.85rem; color: #5a4d3a;
                   padding: 0.15rem 0; }
   .machinery-state { color: #a99e8e; text-align: right; }
+  .set-group { margin-top: 1.6rem; padding-top: 1rem;
+               border-top: 1px solid #f0e9dd; }
+  .set-group h3 { font-size: 0.95rem; color: #8a7f70; margin: 0 0 0.45rem; }
+  .set-headline { color: #5a4d3a; line-height: 1.55; }
+  .set-state { color: #a99e8e; }
+  .set-fine { color: #a99e8e; font-size: 0.85rem; line-height: 1.55; }
+  .set-fine code, .set-headline code { background: #f3ecdd;
+                border-radius: 4px; padding: 0 0.25rem; font-size: 0.8rem; }
+  .pick-rows { margin: 0.5rem 0 0.2rem; }
+  .pick-row { display: flex; gap: 0.55rem; align-items: center;
+              padding: 0.22rem 0; font-size: 0.92rem; color: #5a4d3a;
+              cursor: pointer; }
+  .pick-row input { accent-color: #a9853f; margin: 0; }
+  .pick-row input:disabled { cursor: default; }
+  .pick-row input:disabled + span { color: #c2b8a6; }
+  .prep-btn { font: inherit; font-size: 0.85rem; color: #5a4d3a;
+              background: #efe7d9; border: 1px solid #d8cbb4;
+              border-radius: 999px; padding: 0.25rem 0.9rem;
+              cursor: pointer; margin-right: 0.5rem; }
+  .prep-btn:hover { background: #e7dcc8; }
+  .prep-btn:disabled { color: #a99e8e; cursor: default; }
+  .side-settings { display: inline-block; margin-top: 0.5rem;
+                   color: #a99e8e; text-decoration: none;
+                   border-bottom: 1px dotted #d8cbb4; }
+  .side-settings:hover { color: #7a6a50; }
   .chat-row { display: flex; gap: 0.5rem; align-items: flex-start;
               margin: 0.6rem 0; }
   .chat-row-user { flex-direction: row-reverse; }
@@ -661,10 +673,10 @@ STYLE = """
   .chat-conversation-mode #now-playing { top: 4.4rem; }
   #guide-chat.chat-docked h2,
   .chat-docked #chat-messages { display: none; }
-  #guide-chat.chat-docked #chat-brain { opacity: 0.55; margin: 0 0.6rem 0.3rem;
-                justify-content: flex-end; }
-  #guide-chat.chat-docked #chat-brain:hover,
-  #guide-chat.chat-docked #chat-brain:focus-within { opacity: 1; }
+  #guide-chat.chat-docked #chat-identity { opacity: 0.55;
+                margin: 0 0.6rem 0.3rem; text-align: right; }
+  #guide-chat.chat-docked #chat-identity:hover,
+  #guide-chat.chat-docked #chat-identity:focus-within { opacity: 1; }
   #guide-chat.chat-conversation { top: 0; background: #fcf9f3;
                 pointer-events: auto; padding-top: 2rem; }
   #guide-chat.chat-conversation #chat-messages { flex: 1; max-height: none;
@@ -778,24 +790,9 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 </template>
 <h2>the guide</h2>
 <button type="button" id="chat-minimize" title="back to the page — everything stays as you left it">▾ back to the room</button>
-<p class="meta" id="chat-brain">
-<button type="button" class="brain-pill" data-brain="claude">claude · deep</button>
-<button type="button" class="brain-pill" data-brain="ollama">ollama · offline</button>
-<button type="button" class="brain-pill" data-brain="hermes">hermes · second-arrow</button>
-<select id="chat-model" hidden></select>
-<select id="hermes-route" hidden></select>
-<span id="hermes-model-note" hidden></span>
-<button type="button" id="hermes-info" hidden title="about the hermes profile" aria-label="about the hermes profile">ⓘ</button>
+<p class="meta" id="chat-identity" hidden>
+<a href="#settings" id="identity-link" title="settings — the guide's brain, fallbacks, nightly prep"></a>
 </p>
-<div id="hermes-popover" hidden>
-<p>This is the <strong>second-arrow</strong> Hermes profile. Its default
-model lives in <code>~/.hermes/profiles/second-arrow/config.yaml</code> —
-change it with <code>hermes -p second-arrow config set model.default …</code>
-or the Hermes app → Settings → Model, then
-<code>hermes -p second-arrow gateway restart</code>.
-The shelf never edits Hermes config.</p>
-<button type="button" id="hermes-popover-close" aria-label="close">✕</button>
-</div>
 <div id="chat-messages"></div>
 <div id="chat-peek" hidden>
 <span id="peek-mark" aria-hidden="true"></span>
@@ -829,19 +826,16 @@ The shelf never edits Hermes config.</p>
   var form = document.getElementById("chat-form");
   var input = document.getElementById("chat-input");
   var send = document.getElementById("chat-send");
-  var pills = document.querySelectorAll("#chat-brain .brain-pill[data-brain]");
-  var modelSelect = document.getElementById("chat-model");
-  var routeSelect = document.getElementById("hermes-route");
-  var hermesNote = document.getElementById("hermes-model-note");
-  var hermesInfoBtn = document.getElementById("hermes-info");
-  var hermesPopover = document.getElementById("hermes-popover");
+  var identityRow = document.getElementById("chat-identity");
+  var identityLink = document.getElementById("identity-link");
   var history = [];
   var brain = null; // which brain the next message goes to (/health default)
   var session = null; // which conversation the next message continues
   var model = null; // which installed local model the ollama brain uses
+  var modelList = null; // /api/models payload, kept for settings re-renders
   var hermes = null; // /health's hermes entry: wired, reason, model, routes
   var hermesRoute = null; // the picked route alias (null = profile default)
-  var healthInfo = null; // the last /health payload (the machinery card)
+  var healthInfo = null; // the last /health payload (settings + machinery)
 
   function add(role, text) {
     var div = document.createElement("div");
@@ -965,15 +959,39 @@ The shelf never edits Hermes config.</p>
       + JSON.stringify(button.getAttribute("data-title"))
       + " from its transcript and notes — remember I prefer listening-first.");
   });
-  // "Done for now → next" — the card's one primary action: record the
-  // listen if the player never saw one (same endpoint as the automatic
-  // report; its response carries the rebuilt page's mtime, adopted so
-  // the version poll doesn't reload under the streaming reply), then
-  // hand the path work to the guide through the same ONE send path.
+  // The optimistic sidebar flip for "✓ Done with this talk": the entry
+  // shows ✓ immediately; returns an undo for the failure path. The soft
+  // refresh replaces the whole nav with the real state soon after.
+  function markSidebarDone(slug) {
+    var link = document.querySelector('#talk-nav a[href="#talk/' + slug + '"]');
+    if (!link || link.querySelector(".nav-state.nav-done")) return null;
+    var old = link.querySelector(".nav-state");
+    var mark = document.createElement("span");
+    mark.className = "nav-state nav-done";
+    mark.textContent = "✓";
+    if (old) link.replaceChild(mark, old);
+    else link.insertBefore(mark, link.firstChild);
+    return function () {
+      if (!mark.parentNode) return; // a swap already brought the truth
+      if (old) link.replaceChild(old, mark);
+      else link.removeChild(mark);
+    };
+  }
+
+  // "✓ Done with this talk" — the card's one completion action: record
+  // the listen if the player never saw one (same endpoint as the
+  // automatic report; its response carries the rebuilt page's mtime,
+  // adopted so the version poll doesn't reload under the streaming
+  // reply), then hand the path work to the guide through the same ONE
+  // send path. The click answers INSTANTLY: the button becomes its own
+  // receipt and the sidebar flips ✓ — both revert only if the send fails.
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".done-for-now");
     if (!button || button.disabled) return;
     button.disabled = true;
+    var was = button.textContent;
+    button.textContent = "✓ done — finding what's next…";
+    var undoMark = markSidebarDone(button.getAttribute("data-slug"));
     var room = button.closest(".view");
     if (!(room && room.querySelector(".listened-line"))) {
       fetch("/api/listened", {
@@ -987,10 +1005,23 @@ The shelf never edits Hermes config.</p>
           }
         }).catch(function () { /* the message still carries the intent */ });
     }
-    sendMessage("I'm done with " + button.getAttribute("data-title")
+    var sent = sendMessage("I'm done with " + button.getAttribute("data-title")
       + " for now — mark it done on the path and line up what's next. "
       + "If nothing new is left in the queue, fetch the next talk from "
       + "the curriculum and let me know when it's ready.");
+    if (sent && sent.then) {
+      sent.then(function (ok) {
+        if (ok) return; // the soft refresh brings the real state
+        button.disabled = false; // the send failed: quietly re-arm
+        button.textContent = was;
+        if (undoMark) undoMark();
+      });
+    } else {
+      // Busy or static shelf: nothing was sent — undo immediately.
+      button.disabled = false;
+      button.textContent = was;
+      if (undoMark) undoMark();
+    }
   });
   // "…or wrap it up together" — the heard card's quieter door into the
   // full wrap-up conversation, through the same send path.
@@ -1107,11 +1138,42 @@ The shelf never edits Hermes config.</p>
     bubble.appendChild(go);
   }
 
-  function markActive() {
-    pills.forEach(function (pill) {
-      pill.classList.toggle(
-        "brain-active", pill.getAttribute("data-brain") === brain);
-    });
+  // --- sticky selection: sa-brain / sa-route survive reloads ------------
+  // The pick changes ONLY on the user's own click in settings; restores
+  // that can't be honored fall back hermes→claude out loud, never
+  // silently, and never overwrite the stored pick.
+  function savedPick(key) {
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+  }
+
+  function storePick(key, value) {
+    try {
+      if (value) localStorage.setItem(key, value);
+      else localStorage.removeItem(key);
+    } catch (e) { /* storage blocked: the pick just doesn't persist */ }
+  }
+
+  function brainAvailable(name, brains) {
+    if (name === "hermes") {
+      var entry = brains.hermes;
+      return !!(entry && typeof entry === "object" && entry.wired);
+    }
+    return brains[name] !== false;
+  }
+
+  // The one quiet line over the conversation: who answers, linking to
+  // the settings room where that can change.
+  function renderIdentity() {
+    if (!healthInfo || !identityLink) return;
+    var wired = brainAvailable("hermes", healthInfo.brains || {});
+    if (brain === "hermes") {
+      identityLink.textContent = "on Hermes · second-arrow";
+    } else if (!wired) {
+      identityLink.textContent = "on " + brain + " — hermes not wired";
+    } else {
+      identityLink.textContent = "on " + brain;
+    }
+    identityRow.hidden = false;
   }
 
   function currentView() {
@@ -1125,97 +1187,193 @@ The shelf never edits Hermes config.</p>
     history.length = 0;
   }
 
-  // The local-model picker: visible only while the ollama pill is active
-  // and /api/models actually answered (claude mode and the static shelf
-  // never show it). Options are built with createElement + textContent.
-  // The hermes route picker follows the hermes pill the same way; with
-  // no routes configured it collapses to a static model.default note.
+  // The local-model picker (settings room, under the ollama row): visible
+  // only while ollama is the picked brain and /api/models answered. The
+  // select is re-queried per call — the soft refresh swaps the settings
+  // room in whole, so no node reference may be held.
   function updateModelVisibility() {
-    modelSelect.hidden = brain !== "ollama" || modelSelect.options.length === 0;
-    var hermesOn = brain === "hermes" && !!hermes && !!hermes.wired;
-    routeSelect.hidden = !hermesOn || routeSelect.options.length === 0;
-    hermesNote.hidden = !hermesOn || routeSelect.options.length > 0;
-    hermesInfoBtn.hidden = !hermesOn;
-    if (!hermesOn) hermesPopover.hidden = true;
+    var picker = document.getElementById("chat-model");
+    if (!picker) return;
+    picker.hidden = brain !== "ollama" || picker.options.length === 0;
   }
 
-  // The hermes pill tells the truth from /health: the PROFILE identity,
-  // never a model name. Not wired => an honest ghost carrying the exact
-  // wiring ritual; wired => selectable, with the profile's model routes
-  // (alias · resolved model) as the per-request picker.
-  var wireRitual = "not wired — run:\\n"
-    + "uv run tools/wire_hermes_profile.py\\n"
-    + "hermes -p second-arrow gateway restart\\n"
-    + "uv run tools/hermes_probe.py";
-
-  function setupHermes(info, pill) {
-    hermes = (info && typeof info === "object") ? info : null;
-    while (routeSelect.firstChild) routeSelect.removeChild(routeSelect.firstChild);
-    hermesRoute = null;
-    if (!hermes || !hermes.wired) {
-      pill.disabled = true;
-      pill.textContent = "hermes — not wired";
-      pill.title = (hermes && hermes.reason ? hermes.reason + "\\n" : "")
-        + wireRitual;
-      return;
-    }
-    pill.title = "the second-arrow Hermes profile"
-      + (hermes.model ? " · model: " + hermes.model : "");
-    var routes = hermes.routes || [];
-    if (routes.length) {
-      var base = document.createElement("option");
-      base.value = ""; // profile default: `model` omitted from requests
-      base.textContent = "default" + (hermes.model ? " · " + hermes.model : "");
-      routeSelect.appendChild(base);
-      routes.forEach(function (route) {
-        var option = document.createElement("option");
-        option.value = route.alias;
-        option.textContent = route.alias + " · " + route.model;
-        routeSelect.appendChild(option);
-      });
-    } else {
-      hermesNote.textContent = hermes.model
-        ? "model: " + hermes.model
-        : "model: set in the Hermes profile";
-    }
+  function fillModelPicker() {
+    var picker = document.getElementById("chat-model");
+    if (!picker) return;
+    while (picker.firstChild) picker.removeChild(picker.firstChild);
+    ((modelList && modelList.models) || []).forEach(function (item) {
+      var option = document.createElement("option");
+      option.value = item.name;
+      option.textContent = item.name
+        + (item.tools ? " · tools" : "")
+        + " · " + item.size_gb + "GB";
+      picker.appendChild(option);
+    });
+    if (model) picker.value = model;
+    updateModelVisibility();
   }
-
-  routeSelect.addEventListener("change", function () {
-    hermesRoute = routeSelect.value || null;
-    add("system", "— hermes route: " + (hermesRoute || "profile default") + " —");
-  });
-
-  hermesInfoBtn.addEventListener("click", function () {
-    hermesPopover.hidden = !hermesPopover.hidden;
-  });
-  document.getElementById("hermes-popover-close").addEventListener(
-    "click", function () { hermesPopover.hidden = true; });
 
   function loadModels() {
     fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
-      (data.models || []).forEach(function (item) {
-        var option = document.createElement("option");
-        option.value = item.name;
-        option.textContent = item.name
-          + (item.tools ? " · tools" : "")
-          + " · " + item.size_gb + "GB";
-        modelSelect.appendChild(option);
-      });
-      if (data.current) {
-        modelSelect.value = data.current;
-        // Only adopt it when it is really one of the options — a default
-        // that is not installed must not ride along with requests.
-        if (modelSelect.value === data.current) model = data.current;
-      }
-      updateModelVisibility();
+      modelList = data;
+      // Only adopt the server's current when it is really installed — a
+      // default that is not must not ride along with requests.
+      if (data.current && (data.models || []).some(function (item) {
+        return item.name === data.current;
+      })) model = data.current;
+      fillModelPicker();
       renderMachinery(); // the card can now name the local model too
     }).catch(function () { /* ollama down or older server: picker stays hidden */ });
   }
 
-  // --- the room's machinery: a quiet read-only card on Begin here -------
-  // Built from /health with createElement + textContent only. No controls,
-  // no secrets — presence booleans and display names, honestly stated.
-  // Re-rendered after a soft refresh swaps the home view in fresh.
+  // --- the settings room: one choice, made of calm radio rows -----------
+  // The guide's brain section lists the Hermes routes (picking one IS
+  // picking hermes); the fallback section lists claude/ollama. Exactly
+  // one row is checked across both groups. Rebuilt after every /health
+  // read and every soft refresh — rows carry their own listeners.
+  function pickRow(container, label, checked, disabled, onPick) {
+    var row = document.createElement("label");
+    row.className = "pick-row";
+    var radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "guide-brain";
+    radio.checked = checked;
+    radio.disabled = !!disabled;
+    radio.addEventListener("change", function () {
+      if (radio.checked) onPick();
+    });
+    var text = document.createElement("span");
+    text.textContent = label;
+    row.appendChild(radio);
+    row.appendChild(text);
+    container.appendChild(row);
+  }
+
+  function pickBrain(name, route) {
+    brain = name;
+    storePick("sa-brain", name);
+    if (name === "hermes") {
+      hermesRoute = route || null;
+      storePick("sa-route", hermesRoute);
+    }
+    var note = document.getElementById("fallback-note");
+    if (note) {
+      note.hidden = name === "hermes";
+      if (name !== "hermes") {
+        note.textContent =
+          "the guide answers via " + name + " until you switch back";
+      }
+    }
+    updateModelVisibility();
+    renderIdentity();
+  }
+
+  function renderBrainPicker() {
+    var routeBox = document.getElementById("route-rows");
+    var fallbackBox = document.getElementById("fallback-rows");
+    if (!routeBox || !fallbackBox || !healthInfo) return;
+    while (routeBox.firstChild) routeBox.removeChild(routeBox.firstChild);
+    while (fallbackBox.firstChild) fallbackBox.removeChild(fallbackBox.firstChild);
+    var brains = healthInfo.brains || {};
+    var wired = brainAvailable("hermes", brains);
+    var wiredState = document.getElementById("hermes-wired-state");
+    if (wiredState) {
+      wiredState.textContent = wired
+        ? "wired" + (hermes && hermes.model ? " · " + hermes.model : "")
+        : "not wired";
+    }
+    var unwiredHelp = document.getElementById("hermes-unwired");
+    if (unwiredHelp) unwiredHelp.hidden = wired;
+    // "default" rides first: the profile's own model, no route alias.
+    var routes = [{ alias: "", model: (hermes && hermes.model) || "" }]
+      .concat((hermes && hermes.routes) || []);
+    routes.forEach(function (route) {
+      pickRow(routeBox,
+        (route.alias || "default") + (route.model ? " · " + route.model : ""),
+        brain === "hermes" && (hermesRoute || "") === route.alias,
+        !wired,
+        function () { pickBrain("hermes", route.alias); });
+    });
+    [
+      { name: "claude", label: "claude · deep", off: brains.claude === false },
+      { name: "ollama", label: "ollama · offline", off: brains.ollama === false }
+    ].forEach(function (item) {
+      pickRow(fallbackBox, item.label, brain === item.name, item.off,
+        function () { pickBrain(item.name, null); });
+    });
+    var fallbackSection = document.getElementById("set-fallback");
+    if (fallbackSection) fallbackSection.hidden = false;
+    fillModelPicker();
+  }
+
+  // --- nightly prep: the ONE gateway job, three narrow controls ---------
+  function renderPrep() {
+    var section = document.getElementById("set-prep");
+    var line = document.getElementById("prep-line");
+    var controls = document.getElementById("prep-controls");
+    if (!section || !line || !controls) return;
+    section.hidden = false;
+    fetch("/api/prep").then(function (r) { return r.json(); }).then(function (data) {
+      if (!data.wired || !data.found) {
+        line.textContent = data.wired
+          ? "no nightly-prep job yet — install it: uv run tools/hermes_cron_setup.py"
+          : "gateway not wired — the job sleeps until it is";
+        controls.hidden = true;
+        return;
+      }
+      var job = data.job || {};
+      line.textContent = (job.schedule ? job.schedule + " · " : "")
+        + (job.model ? job.model + " · " : "")
+        + (job.enabled ? "on" : "paused");
+      controls.hidden = false;
+      document.getElementById("prep-pause").hidden = !job.enabled;
+      document.getElementById("prep-resume").hidden = !!job.enabled;
+    }).catch(function () {
+      line.textContent = "the gateway did not answer";
+      controls.hidden = true;
+    });
+  }
+
+  // Delegated: the buttons live in the settings room, which the soft
+  // refresh swaps in whole.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".prep-btn");
+    if (!button || button.disabled) return;
+    var action = button.id === "prep-run" ? "run"
+      : (button.id === "prep-pause" ? "pause" : "resume");
+    button.disabled = true;
+    var feedback = document.getElementById("prep-feedback");
+    fetch("/api/prep/" + action, { method: "POST" })
+      .then(function (r) {
+        return r.json().then(function (data) {
+          if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
+          return data;
+        });
+      })
+      .then(function () {
+        if (feedback) {
+          feedback.hidden = false;
+          feedback.textContent = action === "run"
+            ? "started — output lands under the profile's cron/output/"
+            : (action === "pause"
+              ? "paused — nothing runs until resumed"
+              : "resumed — next run on schedule");
+        }
+        renderPrep(); // the fresh enabled/paused state
+      })
+      .catch(function (error) {
+        if (feedback) {
+          feedback.hidden = false;
+          feedback.textContent = error.message;
+        }
+      })
+      .finally(function () { button.disabled = false; });
+  });
+
+  // --- the room's machinery: a quiet read-only card in Settings ---------
+  // Built from /health with createElement + textContent only. No secrets —
+  // presence booleans and display names, honestly stated. Begin here keeps
+  // one pointer line to it. Re-rendered after every soft-refresh swap.
   function machineryLine(listEl, label, value) {
     var item = document.createElement("li");
     var name = document.createElement("span");
@@ -1230,20 +1388,20 @@ The shelf never edits Hermes config.</p>
   }
 
   function renderMachinery() {
-    var box = document.getElementById("machinery");
     var listEl = document.getElementById("machinery-list");
-    if (!box || !listEl || !healthInfo) return;
+    if (!listEl || !healthInfo) return;
     while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
     var brains = healthInfo.brains || {};
+    var h = brains.hermes;
+    // Hermes leads: it is the guide's home harness.
+    machineryLine(listEl, "hermes · second-arrow",
+      (h && typeof h === "object" && h.wired)
+        ? (h.model ? "wired · " + h.model : "wired") : "not wired");
     machineryLine(listEl, "claude · deep",
       brains.claude === false ? "not found" : "ready");
     machineryLine(listEl, "ollama · offline",
       brains.ollama === false ? "not running"
         : "ready" + (model ? " · " + model : ""));
-    var h = brains.hermes;
-    machineryLine(listEl, "hermes · second-arrow",
-      (h && typeof h === "object" && h.wired)
-        ? (h.model ? "wired · " + h.model : "wired") : "not wired");
     machineryLine(listEl, "aX presence",
       healthInfo.ax && healthInfo.ax.wired ? "wired" : "not set up");
     var prep = healthInfo.prep_cron;
@@ -1252,11 +1410,17 @@ The shelf never edits Hermes config.</p>
         ? (prep.schedule ? prep.schedule + " · " : "")
           + "installed " + String(prep.installed_at).slice(0, 10)
         : "not yet scheduled");
-    box.hidden = false;
+    var section = document.getElementById("set-machinery");
+    if (section) section.hidden = false;
+    var link = document.getElementById("machinery"); // begin-here's pointer
+    if (link) link.hidden = false;
   }
 
-  modelSelect.addEventListener("change", function () {
-    model = modelSelect.value;
+  // Delegated: the settings swap replaces the select node itself.
+  document.addEventListener("change", function (event) {
+    var picker = event.target;
+    if (!picker || picker.id !== "chat-model") return;
+    model = picker.value;
     add("system", "— ollama model: " + model + " —");
   });
 
@@ -1406,7 +1570,7 @@ The shelf never edits Hermes config.</p>
   function restoreHistory(sid) {
     var url = "/api/history"
       + (sid ? "?session=" + encodeURIComponent(sid) : "");
-    fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+    return fetch(url).then(function (r) { return r.json(); }).then(function (data) {
       clearMessages();
       if (data.session) session = data.session;
       (data.turns || []).forEach(function (turn) {
@@ -1424,35 +1588,39 @@ The shelf never edits Hermes config.</p>
   fetch("/health").then(function (r) { return r.json(); }).then(function (h) {
     if (!h.ok) return;
     healthInfo = h;
-    brain = h.brain;
     var brains = h.brains || {};
-    pills.forEach(function (pill) {
-      var name = pill.getAttribute("data-brain");
-      if (name === "hermes") {
-        // Wiredness, routes, the honest ghost — all decided here. An
-        // older server without the hermes entry reads as not wired.
-        setupHermes(brains.hermes, pill);
-      } else if (brains[name] === false) { // an older server omits the map
-        pill.disabled = true;
-        pill.title = name === "ollama"
-          ? "start ollama serve" : "claude CLI not found";
+    hermes = (brains.hermes && typeof brains.hermes === "object")
+      ? brains.hermes : null;
+    // The server's request-time truth: hermes when wired, else claude.
+    brain = h.default_brain || h.brain;
+    // Sticky selection: restore the user's own pick. A pick whose brain
+    // can't answer right now falls back hermes→claude OUT LOUD (one
+    // quiet system line below) — sa-brain itself stays put, so the pick
+    // returns by itself once its brain is back.
+    var saved = savedPick("sa-brain");
+    var fallbackNote = null;
+    if (saved === "claude" || saved === "ollama" || saved === "hermes") {
+      if (brainAvailable(saved, brains)) {
+        brain = saved;
+      } else {
+        brain = brainAvailable("hermes", brains) ? "hermes" : "claude";
+        fallbackNote = "— " + saved + " isn't reachable — using "
+          + brain + " for now —";
       }
-      pill.addEventListener("click", function () {
-        if (pill.disabled || name === brain) return;
-        brain = name;
-        markActive();
-        updateModelVisibility(); // the pickers follow their pills
-        add("system", "— switched to " + name
-          + (name === "ollama" ? " (offline)"
-            : (name === "hermes" ? " (second-arrow profile)" : " (deep)"))
-          + " —");
-      });
-    });
-    markActive();
-    updateModelVisibility();
-    renderMachinery(); // the begin-here card states the room's machinery
+    }
+    var savedRoute = savedPick("sa-route");
+    if (savedRoute && hermes && (hermes.routes || []).some(function (route) {
+      return route.alias === savedRoute;
+    })) hermesRoute = savedRoute; // only a route the gateway still has
+    renderIdentity();
+    renderBrainPicker(); // the settings room's radio rows
+    renderMachinery(); // the settings status card (+ begin-here pointer)
+    renderPrep(); // the nightly-prep job, live from the gateway
     panel.hidden = false;
-    restoreHistory(); // the conversation continues across reloads
+    var restored = restoreHistory(); // the conversation continues across reloads
+    if (fallbackNote) {
+      restored.then(function () { add("system", fallbackNote); });
+    }
     loadModels(); // fill the local-model picker (served mode only)
     mountArtifacts(); // artifact links become sandboxed live views
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
@@ -1584,7 +1752,11 @@ The shelf never edits Hermes config.</p>
       if (window.saBindRoom) window.saBindRoom(node); // wiring back
       if (!panel.hidden) mountArtifacts(node); // served: live tool views
     });
-    renderMachinery(); // a swapped-in home view gets its card refilled
+    // A swapped-in settings/home room arrives as its static skeleton:
+    // refill the radio rows, the machinery card, and the prep controls.
+    renderBrainPicker();
+    renderMachinery();
+    renderPrep();
     if (window.saShowView) window.saShowView(); // active room, nav marks
     return true;
   }
@@ -1638,17 +1810,18 @@ The shelf never edits Hermes config.</p>
   checkVersion(); // baseline mtime
 
   function sendMessage(text) {
-    if (!text || busy) return;
+    if (!text || busy) return null;
     add("user", text);
     history.push({ role: "user", content: text });
     var pending = add("guide", "thinking…");
     pending.classList.add("chat-thinking");
     var shownProgress = 0;
+    var failed = false; // callers may await the outcome (e.g. Done-for-now)
     while (peekAction.firstChild) peekAction.removeChild(peekAction.firstChild);
     if (chatState === "docked") peekUpdate("thinking…"); // stay in the room
     busy = true;
     updateSendState();
-    fetch("/api/chat", {
+    return fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1724,6 +1897,7 @@ The shelf never edits Hermes config.</p>
       }
       history.push({ role: "assistant", content: reply });
     }).catch(function (error) {
+      failed = true;
       pending.classList.remove("chat-thinking");
       pending.textContent = "The guide is out of reach — " + error.message;
       peekUpdate(pending.textContent, true);
@@ -1733,6 +1907,8 @@ The shelf never edits Hermes config.</p>
       updateSendState();
       checkVersion(); // fresh content may have just landed
       input.focus({ preventScroll: true });
+    }).then(function () {
+      return !failed; // the outcome, for optimistic callers to settle on
     });
   }
 
@@ -1806,6 +1982,7 @@ LAYOUT_SCRIPT = """<script>
     var id = "view-home";
     if (hash.indexOf("#talk/") === 0) id = "talk-" + hash.slice(6);
     else if (hash === "#curriculum") id = "view-curriculum";
+    else if (hash === "#settings") id = "view-settings";
     if (!document.getElementById(id)) id = "view-home"; // unknown hash: go home
     // Queried live, never cached: the soft refresh swaps rooms and the
     // sidebar path in and out under this router.
@@ -2333,11 +2510,12 @@ def render_card(
     state: str | None = None,
 ) -> str:
     slug = talk["slug"]
+    title = talk.get("title", slug)
     cap = duration_to_seconds(talk.get("duration", ""))
     cap_attr = f' data-duration="{cap}"' if cap else ""
     parts = [
         f'<section class="card view" id="talk-{escape(slug)}"{cap_attr}>',
-        f"<h2>{escape(talk.get('title', slug))}</h2>",
+        f"<h2>{escape(title)}</h2>",
         # The room-side guide-navigation lock: shown only while THIS talk
         # is the one playing (the capsule carries its twin).
         f'<button type="button" class="guide-lock room-lock" '
@@ -2345,6 +2523,54 @@ def render_card(
         f'<p class="meta">{escape(talk.get("teacher", ""))}'
         f" &middot; {escape(talk.get('themes', ''))}</p>",
     ]
+    # The card names its own place on the path, right at the top — the
+    # same three-state vocabulary as the sidebar — and the one completion
+    # action sits beside it, so status and action read as one unit.
+    heard = bool(listened and listened.get("last"))
+    status_bits = []
+    if state == "studied":
+        date = f' · {escape(listened["last"][:10])}' if heard else ""
+        status_bits.append(
+            f'<span class="status-mark status-done">✓ done{date}</span>'
+        )
+        # A closed talk still has a door — quiet, dotted, one line.
+        status_bits.append(
+            f'<button type="button" class="reopen-talk wrap-up-talk" '
+            f'data-title="{escape(title)}">'
+            "reopen — wrap it up again / talk about it</button>"
+        )
+    else:
+        if heard:
+            # Named next to the Done button, so the button's purpose is
+            # obvious: heard, but not yet closed out on the path.
+            status_bits.append(
+                '<span class="status-mark status-heard">'
+                "heard — not closed out yet</span>"
+            )
+        elif state == "queued":
+            status_bits.append(
+                '<span class="status-mark status-next">→ current</span>'
+            )
+        status_bits.append(
+            '<button type="button" class="done-for-now" '
+            f'data-slug="{escape(slug)}" data-title="{escape(title)}">'
+            "✓ Done with this talk</button>"
+        )
+        if heard:
+            status_bits.append(
+                '<button type="button" class="wrap-up-talk" '
+                f'data-title="{escape(title)}">'
+                "…or wrap it up together — what landed?</button>"
+            )
+        else:
+            # The manual door, for listens the player couldn't see. On
+            # the static shelf the click fails quietly and re-arms.
+            status_bits.append(
+                f'<button type="button" class="mark-heard" data-slug="{escape(slug)}" '
+                'title="finished this talk somewhere the player couldn\'t see? '
+                'record it">mark as heard</button>'
+            )
+    parts.append('<p class="card-status">' + " ".join(status_bits) + "</p>")
     if reach:
         parts.append(f'<p class="reach"><em>{escape(reach)}</em></p>')
     if files["primer_mp3"]:
@@ -2394,43 +2620,13 @@ def render_card(
                 f'<a class="source-link" href="{escape(source)}" target="_blank" '
                 'rel="noopener">Listen at the source &rarr;</a>'
             )
-    title = talk.get("title", slug)
-    if listened and listened.get("last"):
+    if heard:
         # Finished at least once: say so quietly. Replay simply plays —
         # the resume position was cleared at the end, so it starts fresh.
         parts.append(
             f'<p class="listened-line">listened ✓ {escape(listened["last"][:10])}'
             f' · <button type="button" class="listened-replay" '
             f'data-slug="{escape(slug)}">replay</button></p>'
-        )
-    else:
-        # No completion on record: the manual door, for listens the player
-        # couldn't see (elsewhere, or stopped just shy of the end). On the
-        # static shelf the click fails quietly and the button re-arms.
-        parts.append(
-            '<p class="mark-heard-line">'
-            f'<button type="button" class="mark-heard" data-slug="{escape(slug)}" '
-            'title="finished this talk somewhere the player couldn\'t see? '
-            'record it">mark as heard</button></p>'
-        )
-    if state != "studied":
-        # The one clear way to say "done with this one, onto the next".
-        # It records the listen if the player never saw one, then hands
-        # the path work to the guide through the normal chat pipeline.
-        # When the talk has been heard, a quieter door into the full
-        # wrap-up conversation rides along.
-        wrap = (
-            ' <button type="button" class="wrap-up-talk" '
-            f'data-title="{escape(title)}">'
-            "…or wrap it up together — what landed?</button>"
-            if listened and listened.get("last")
-            else ""
-        )
-        parts.append(
-            '<p class="done-line">'
-            '<button type="button" class="done-for-now" '
-            f'data-slug="{escape(slug)}" data-title="{escape(title)}">'
-            f"Done for now → next</button>{wrap}</p>"
         )
     return "\n".join(parts)
 
@@ -2545,6 +2741,58 @@ def render_curriculum(curriculum: Path, talks: list[dict]) -> str:
         "on the shelf, the guide can fetch.</p>\n"
         f"{clusters}\n</section>"
     )
+
+
+# The settings room: a fixed skeleton the chat script fills from /health,
+# /api/models and /api/prep (createElement + textContent only — the rows
+# are rebuilt after every soft-refresh swap, so nothing here is stateful).
+# The static file:// shelf shows the plain-text parts and none of the
+# controls. Everything Hermes-side is stated as configuration to run BY
+# HAND — this page never writes ~/.hermes.
+SETTINGS_VIEW = """<section class="card view" id="view-settings">
+<h2>Settings</h2>
+<p class="meta">The guide's machinery — read honestly, changed here where
+the page has hands, and in Hermes itself where it doesn't.</p>
+<section class="set-group" id="set-brain">
+<h3>The guide's brain</h3>
+<p class="set-headline">The guide runs on <strong>Hermes</strong> —
+hermes-agent (Nous Research) · profile <code>second-arrow</code> ·
+14 reviewed tools. <span id="hermes-wired-state" class="set-state"></span></p>
+<div id="route-rows" class="pick-rows"></div>
+<p id="hermes-unwired" class="set-fine" hidden>not wired — run
+<code>uv run tools/wire_hermes_profile.py</code>, then
+<code>hermes -p second-arrow gateway restart</code>, then verify with
+<code>uv run tools/hermes_probe.py</code>.</p>
+<p class="set-fine">The profile's default model lives in
+<code>~/.hermes/profiles/second-arrow/config.yaml</code> — change it with
+<code>hermes -p second-arrow config set model.default …</code>
+or the Hermes app → Settings → Model, then
+<code>hermes -p second-arrow gateway restart</code>.
+This page never edits Hermes config.</p>
+</section>
+<section class="set-group" id="set-fallback" hidden>
+<h3>Fallback brains</h3>
+<div id="fallback-rows" class="pick-rows"></div>
+<select id="chat-model" hidden></select>
+<p id="fallback-note" class="set-fine" hidden></p>
+</section>
+<section class="set-group" id="set-machinery" hidden>
+<h3>The room's machinery</h3>
+<ul id="machinery-list"></ul>
+</section>
+<section class="set-group" id="set-prep" hidden>
+<h3>Nightly prep</h3>
+<p class="set-fine">A quiet job inside the Hermes gateway: primers and
+notes for queued talks, nothing fetched that isn't already on the path.</p>
+<p id="prep-line" class="set-state"></p>
+<p id="prep-controls" hidden>
+<button type="button" id="prep-run" class="prep-btn">run now</button>
+<button type="button" id="prep-pause" class="prep-btn">pause</button>
+<button type="button" id="prep-resume" class="prep-btn">resume</button>
+</p>
+<p id="prep-feedback" class="set-fine" hidden></p>
+</section>
+</section>"""
 
 
 def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
@@ -2695,7 +2943,8 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 {render_nav(talks, states, unfetched)}
 <footer>
 Private — generated from your library.
-Rebuild: <code>uv run tools/build_shelf.py</code>
+Rebuild: <code>uv run tools/build_shelf.py</code><br>
+<a class="side-settings" href="#settings">settings</a>
 </footer>
 </nav>
 <main>
@@ -2724,12 +2973,13 @@ Rebuild: <code>uv run tools/build_shelf.py</code>
 </div>
 {path_strip}{state_note}{empty_note}
 <div id="machinery" hidden>
-<h3>the room's machinery</h3>
-<ul id="machinery-list"></ul>
+<p class="machinery-link"><a href="#settings">the room's machinery → settings</a></p>
 </div>
 </section>
 
 {curriculum_view}
+
+{SETTINGS_VIEW}
 
 {talk_views}
 </div>

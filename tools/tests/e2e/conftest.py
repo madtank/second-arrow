@@ -6,8 +6,11 @@ app on an EPHEMERAL 127.0.0.1 port, and fake brains:
 
     claude  — a stub `claude` CLI on PATH that emits canned stream-json
     ollama  — a tiny HTTP fake answering /api/tags, /api/show, /api/chat
-    hermes  — a tiny gateway answering /health, /v1/toolsets, /v1/models
-              (the same shape as test_serve_shelf._start_fake_gateway)
+    hermes  — a tiny gateway answering /health, /v1/toolsets, /v1/models,
+              /v1/chat/completions (canned SSE, same marker phrases as
+              the stub claude — hermes is the default brain when wired),
+              and the narrow jobs API (ONE nightly-prep job, runs and
+              patches captured)
 
 Hard rules (see README.md here): ephemeral ports only — never 8765 or
 8642; never the real library/, STUDY.md, journal/, or ~/.hermes. The
@@ -263,10 +266,55 @@ def fake_ollama():
     server.server_close()
 
 
+class FakeHermes:
+    """The wired fake gateway's handle: its base URL plus what it saw."""
+
+    def __init__(self, base: str, captured: dict):
+        self.base = base
+        self.captured = captured
+
+
+def _hermes_sse_reply(prompt: str) -> bytes:
+    """Canned hermes SSE with the SAME marker-phrase behaviors as the stub
+    claude CLI — hermes is the default brain now, so the chat e2e tests
+    stream through this gateway."""
+    lowered = prompt.lower()
+    frames = []
+    if "take me to the curriculum" in lowered:
+        text = "Let's stand back and see the road ahead. [[go: curriculum]]"
+    elif "please rebuild" in lowered:
+        frames.append(
+            "event: hermes.tool.progress\n"
+            'data: {"tool": "mcp_second_arrow_rebuild_shelf"}\n\n'
+        )
+        text = "Done - the shelf is rebuilt."
+    else:
+        text = "Hello, friend. One breath, then we begin."
+    for i in range(0, len(text), 12):
+        frames.append(
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": text[i : i + 12]}}]})
+            + "\n\n"
+        )
+    frames.append("data: [DONE]\n\n")
+    return "".join(frames).encode()
+
+
 @pytest.fixture(scope="session")
 def fake_hermes():
     """A wired-looking hermes gateway: /health ok, allowed toolsets only,
-    two model routes (prior art: test_serve_shelf._start_fake_gateway)."""
+    two model routes, a canned chat endpoint (marker-phrase replies), and
+    the narrow jobs API the prep proxy uses — ONE nightly-prep job whose
+    runs/patches are captured for round-trip assertions."""
+    captured = {"chat": [], "runs": [], "patches": []}
+    job = {
+        "name": "nightly-prep",
+        "id": "job-e2e",
+        "schedule": "23 3 * * *",
+        "model": "gpt-5.5",
+        "provider": "openai-codex",
+        "enabled": True,
+    }
 
     class Handler(_JsonHandler):
         def do_GET(self):  # noqa: N802
@@ -284,11 +332,44 @@ def fake_hermes():
                         ]
                     }
                 )
+            elif self.path == "/api/jobs":
+                self._json([job])
             else:
                 self.send_error(404)
 
+        def do_POST(self):  # noqa: N802
+            if self.path.startswith("/api/jobs/") and self.path.endswith("/run"):
+                captured["runs"].append(self.path.split("/")[3])
+                self._json({})
+                return
+            if self.path != "/v1/chat/completions":
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length)) if length else {}
+            captured["chat"].append({"body": body, "headers": dict(self.headers)})
+            messages = body.get("messages") or [{}]
+            payload = _hermes_sse_reply(str(messages[-1].get("content") or ""))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_PATCH(self):  # noqa: N802
+            if not self.path.startswith("/api/jobs/"):
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length)) if length else {}
+            captured["patches"].append(
+                {"id": self.path.rsplit("/", 1)[-1], "body": body}
+            )
+            job["enabled"] = body.get("enabled", job["enabled"])
+            self._json({})
+
     server, base = _start_http(Handler)
-    yield base
+    yield FakeHermes(base, captured)
     server.shutdown()
     server.server_close()
 
@@ -388,7 +469,7 @@ def shelf_server(scratch_library, stub_bin, fake_ollama, fake_hermes, hermes_pro
         {
             "SECOND_ARROW_ROOT": str(scratch_library),
             "OLLAMA_URL": fake_ollama,
-            "HERMES_URL": fake_hermes,
+            "HERMES_URL": fake_hermes.base,
             "HERMES_PROFILE_DIR": str(hermes_profile),
         },
     )

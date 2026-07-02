@@ -104,46 +104,126 @@ def test_rooms_navigate_by_hash(page, shelf_server):
     page.wait_for_selector("#view-home.active")
 
 
-def test_begin_here_machinery_card_fills_from_health(page, shelf_server):
+def test_settings_room_carries_the_machinery_card(page, shelf_server):
     _open_shelf(page, shelf_server.base)
+    # Begin here keeps one quiet pointer; the card itself lives in settings.
+    page.wait_for_selector("#machinery:not([hidden])")
+    assert "the room's machinery → settings" in page.inner_text("#machinery")
+    page.evaluate("location.hash = '#settings'")
+    page.wait_for_selector("#view-settings.active")
     page.wait_for_selector("#machinery-list li")
-    card = page.inner_text("#machinery")
-    assert "claude · deep" in card and "ready" in card
-    assert "ollama · offline" in card
-    # The wired fake gateway + scratch profile: hermes states its model.
-    assert "hermes · second-arrow" in card
+    card = page.inner_text("#machinery-list")
+    # Hermes leads — it is the home harness — then the fallbacks.
+    assert card.index("hermes · second-arrow") < card.index("claude · deep")
     assert "wired · gpt-5.5" in card
+    assert "ollama · offline" in card
     assert "aX presence" in card and "not set up" in card
     assert "nightly prep" in card and "not yet scheduled" in card
 
 
-# --- brain pills ------------------------------------------------------------
+# --- the guide's brain: identity line + settings room ------------------------
 
 
-def test_brain_pills_reflect_health_and_hermes_routes(page, shelf_server):
+def test_identity_line_names_hermes_and_opens_settings(page, shelf_server):
     _open_shelf(page, shelf_server.base)
-    # claude is the server default and the active pill.
-    page.wait_for_selector('.brain-pill[data-brain="claude"].brain-active')
-    assert not page.locator('.brain-pill[data-brain="ollama"]').is_disabled()
-    hermes_pill = page.locator('.brain-pill[data-brain="hermes"]')
-    assert not hermes_pill.is_disabled()
-    # Picking hermes surfaces the route dropdown: default + two routes.
-    hermes_pill.click()
-    page.wait_for_selector("#hermes-route:not([hidden])")
-    options = page.locator("#hermes-route option").all_inner_texts()
-    assert len(options) == 3
-    assert "default · gpt-5.5" in options[0]
-    assert any("deep · gpt-5.5" in option for option in options)
-    assert any("local · gemma4:12b" in option for option in options)
+    # Wired gateway → hermes is the default; the chat header says so with
+    # ONE quiet line (no pills, no dropdowns over the conversation).
+    page.wait_for_selector("#chat-identity:not([hidden])")
+    assert page.inner_text("#identity-link") == "on Hermes · second-arrow"
+    assert page.locator(".brain-pill").count() == 0
+    page.click("#identity-link")
+    page.wait_for_selector("#view-settings.active")
+    # The route rows: default + the two configured routes, all enabled.
+    rows = page.locator("#route-rows .pick-row")
+    assert rows.count() == 3
+    labels = rows.all_inner_texts()
+    assert "default · gpt-5.5" in labels[0]
+    assert any("deep · gpt-5.5" in label for label in labels)
+    assert any("local · gemma4:12b" in label for label in labels)
+    assert page.locator("#route-rows input:disabled").count() == 0
+    # Exactly one pick across both groups: the hermes default row.
+    assert page.locator("#route-rows input").first.is_checked()
 
 
-def test_hermes_ghost_when_gateway_unreachable(page, ghost_hermes_server):
+def test_route_pick_persists_across_reload(page, shelf_server):
+    _open_shelf(page, shelf_server.base, "#settings")
+    page.wait_for_selector("#route-rows .pick-row")
+    # Pick the deep route — hermes stays the brain, the alias persists.
+    page.locator('#route-rows .pick-row:has-text("deep · gpt-5.5") input').check()
+    assert page.evaluate('localStorage.getItem("sa-route")') == "deep"
+    assert page.evaluate('localStorage.getItem("sa-brain")') == "hermes"
+    _open_shelf(page, shelf_server.base, "#settings")
+    page.wait_for_selector("#route-rows .pick-row")
+    assert page.locator(
+        '#route-rows .pick-row:has-text("deep · gpt-5.5") input'
+    ).is_checked()
+
+
+def test_fallback_brain_pick_persists_across_reload(page, shelf_server):
+    _open_shelf(page, shelf_server.base, "#settings")
+    page.wait_for_selector("#fallback-rows .pick-row")
+    page.locator('#fallback-rows .pick-row:has-text("claude · deep") input').check()
+    # The one-line note says what just changed; the identity line follows.
+    page.wait_for_selector('#fallback-note:not([hidden])')
+    assert "the guide answers via claude until you switch back" in page.inner_text(
+        "#fallback-note"
+    )
+    assert page.inner_text("#identity-link") == "on claude"
+    assert page.evaluate('localStorage.getItem("sa-brain")') == "claude"
+    _open_shelf(page, shelf_server.base)
+    page.wait_for_selector("#chat-identity:not([hidden])")
+    assert page.inner_text("#identity-link") == "on claude"
+    page.evaluate("location.hash = '#settings'")
+    page.wait_for_selector("#view-settings.active")
+    assert page.locator(
+        '#fallback-rows .pick-row:has-text("claude · deep") input'
+    ).is_checked()
+
+
+def test_unwired_gateway_is_an_honest_ghost(page, ghost_hermes_server):
     _open_shelf(page, ghost_hermes_server.base)
-    pill = page.locator('.brain-pill[data-brain="hermes"]')
-    page.wait_for_selector('.brain-pill[data-brain="hermes"][disabled]')
-    assert pill.inner_text() == "hermes — not wired"
-    # The honest ghost carries the wiring ritual, not a dead button.
-    assert "wire_hermes_profile" in pill.get_attribute("title")
+    # No saved pick: the server's default falls to claude and the identity
+    # line says why.
+    page.wait_for_selector("#chat-identity:not([hidden])")
+    assert page.inner_text("#identity-link") == "on claude — hermes not wired"
+    page.evaluate("location.hash = '#settings'")
+    page.wait_for_selector("#view-settings.active")
+    page.wait_for_selector("#route-rows .pick-row")
+    # The route rows are disabled ghosts and the wiring ritual is visible.
+    assert page.locator("#route-rows input:not(:disabled)").count() == 0
+    assert page.inner_text("#hermes-wired-state") == "not wired"
+    page.wait_for_selector("#hermes-unwired:not([hidden])")
+    assert "wire_hermes_profile" in page.inner_text("#hermes-unwired")
+
+
+def test_saved_hermes_pick_falls_back_out_loud_and_survives(
+    page, ghost_hermes_server
+):
+    _open_shelf(page, ghost_hermes_server.base)
+    page.evaluate('localStorage.setItem("sa-brain", "hermes")')
+    page.reload()
+    page.wait_for_function("() => !document.getElementById('guide-chat').hidden")
+    # The fallback is visible, never silent: one quiet system line.
+    page.wait_for_selector(
+        '.chat-msg.chat-system:has-text("hermes isn\'t reachable — using claude for now")',
+        state="attached",
+    )
+    assert page.inner_text("#identity-link") == "on claude — hermes not wired"
+    # The stored pick stays put — hermes returns by itself once wired.
+    assert page.evaluate('localStorage.getItem("sa-brain")') == "hermes"
+
+
+def test_prep_run_now_round_trips_to_the_gateway(page, shelf_server, fake_hermes):
+    _open_shelf(page, shelf_server.base, "#settings")
+    page.wait_for_selector("#set-prep:not([hidden])")
+    # The job reads honestly: schedule · pinned model · state.
+    page.wait_for_selector('#prep-line:has-text("23 3 * * *")')
+    assert "gpt-5.5" in page.inner_text("#prep-line")
+    runs_before = len(fake_hermes.captured["runs"])
+    page.click("#prep-run")
+    # The confirmation line lands and the gateway really saw the run.
+    page.wait_for_selector('#prep-feedback:has-text("started")')
+    assert fake_hermes.captured["runs"][runs_before:] == ["job-e2e"]
 
 
 # --- chat -------------------------------------------------------------------
@@ -329,6 +409,15 @@ def test_done_for_now_sends_the_canned_message(page, shelf_server):
     _open_shelf(page, shelf_server.base, "#talk/demon-story")
     page.wait_for_selector("#talk-demon-story.active")
     page.click("#talk-demon-story .done-for-now")
+    # INSTANT recognition, before any reply arrives: the button becomes
+    # its own receipt and the sidebar entry flips to ✓ optimistically.
+    page.wait_for_selector(
+        '#talk-demon-story .done-for-now:has-text("✓ done — finding what\'s next…")'
+    )
+    assert page.locator("#talk-demon-story .done-for-now").is_disabled()
+    page.wait_for_selector(
+        '#talk-nav a[href="#talk/demon-story"] .nav-state.nav-done'
+    )
     # The canned ask goes through the normal chat pipeline, in the user's
     # own voice...
     page.wait_for_selector(
