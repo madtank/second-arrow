@@ -378,7 +378,10 @@ def test_render_shelf_sidebar_lists_each_talk(tmp_path):
         assert f'href="#talk/{slug}"' in sidebar.group(0)
     # The sidebar also carries the epigraph and the sessions placeholder.
     assert "The second arrow is optional." in sidebar.group(0)
-    assert "conversation history arrives in the next iteration" in sidebar.group(0)
+    # The Sessions section is a real list now, filled from /api/sessions;
+    # like the chat panel it stays hidden on the static file:// shelf.
+    assert 'id="sessions-section"' in sidebar.group(0)
+    assert 'id="session-list"' in sidebar.group(0)
 
 
 def test_render_shelf_hash_views_present(tmp_path):
@@ -404,6 +407,21 @@ def test_render_shelf_degrades_gracefully_without_js(tmp_path):
     for match in re.finditer(r"([^{};]*)\{[^{}]*display:\s*none", html):
         selector = match.group(1)
         assert ".js" in selector or ".view" not in selector, selector
+
+
+def test_chat_panel_speaks_sessions_and_ambient_view(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The sidebar's Sessions list is fed from the server.
+    assert "/api/sessions" in html
+    section = re.search(r'<div id="sessions-section"[^>]*>', html)
+    assert section and "hidden" in section.group(0)
+    # A conversation can be started fresh, and the session that recorded
+    # each turn comes back to the panel in the X-Session header.
+    assert 'id="chat-new"' in html
+    assert "new conversation" in html
+    assert "X-Session" in html
+    # Every chat POST carries the ambient view (the open talk's slug).
+    assert "currentView" in html
 
 
 def test_shelf_js_still_never_uses_innerhtml_for_iframe(tmp_path):

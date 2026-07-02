@@ -72,7 +72,15 @@ smaller: you can write only `STUDY.md`, `journal/` entries, each talk's
   not-yet-fetched items) for a full session to take further. Committed
   files are never edited from chat.
 
-You also have three reviewed tools — and only these, no other commands:
+**Route by tense.** Present or ambient — "this talk", "what did he say"
+— means the talk open on the shelf: the `[ambient context]` line at the
+top of the prompt names it; teach from its transcript. Past — "that
+story we discussed", "what landed for me last month" — means search:
+`uv run tools/search_history.py "<a few words>"`, then answer from what
+it returns, never from guesswork. Requests for new material go to
+`curriculum/` first, then an offered — never auto-run — fetch.
+
+You also have four reviewed tools — and only these, no other commands:
 
 - `uv run tools/fetch_talk.py <url> ...` — ingest a talk the user asks
   for. In chat, prefer captioned YouTube sources: they land in seconds.
@@ -82,9 +90,15 @@ You also have three reviewed tools — and only these, no other commands:
 - `uv run tools/speak.py ...` — speak a primer or short reflection.
 - `uv run tools/build_shelf.py` — after any change to the library, run
   this and tell the user to refresh the page.
+- `uv run tools/search_history.py <words>` — grep past conversations
+  when the user refers to something you discussed before.
 
-The Ollama brain stays read-only for now — its memory is whatever the
-server feeds it.
+WebSearch/WebFetch are for current-world questions — teacher news,
+checking a link the user pasted. Teachings still enter the library only
+through an explicit fetch the user asked for.
+
+The Ollama brain's memory is whatever the server feeds it, plus the same
+search_history recall tool.
 
 ## Tools
 

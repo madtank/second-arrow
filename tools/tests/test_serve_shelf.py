@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -137,12 +139,15 @@ def test_chat_allowed_tools_covers_memory_scopes_and_reviewed_tools_only():
         "Bash(uv run tools/fetch_talk.py:*)",
         "Bash(uv run tools/speak.py:*)",
         "Bash(uv run tools/build_shelf.py:*)",
+        "Bash(uv run tools/search_history.py:*)",
+        "WebSearch",  # read-only: current-world questions (teacher news, links)
+        "WebFetch",
     }
     assert set(rules) == expected
     assert len(rules) == len(expected)  # no stray rules
     # No general Bash: every Bash rule is pinned to a reviewed tool command.
     for rule in rules:
-        assert rule.split("(")[0] in ("Edit", "Write", "Bash")
+        assert rule.split("(")[0] in ("Edit", "Write", "Bash", "WebSearch", "WebFetch")
         if rule.startswith("Bash("):
             assert rule.startswith("Bash(uv run tools/")
             assert rule.endswith(":*)")
@@ -829,39 +834,45 @@ def test_chat_state_roundtrip_and_tolerance(tmp_path):
     assert serve_shelf.load_chat_state(path) == {}
 
 
-def test_record_stream_persists_completed_turn_and_state(tmp_path):
-    history = tmp_path / "history.jsonl"
-    state_file = tmp_path / "state.json"
-    state = {"session_id": "s-live"}
+def test_record_stream_persists_completed_turn_and_session_meta(tmp_path):
+    turns_path = tmp_path / "sessions" / "s1.jsonl"
+    meta_path = tmp_path / "sessions" / "s1.json"
+    state = {"session_id": "c-live"}
     chunks = list(
         serve_shelf.record_stream(
             iter(["The demon ", "grows on anger."]),
             "what does it grow on?",
             "claude",
             state,
-            history_path=history,
-            state_path=state_file,
+            turns_path=turns_path,
+            meta_path=meta_path,
+            view="anger-eating-demons",
         )
     )
     assert chunks == ["The demon ", "grows on anger."]  # passthrough intact
-    turns = serve_shelf.load_history(history)
+    turns = serve_shelf.load_history(turns_path)
     assert [t["role"] for t in turns] == ["user", "assistant"]
     assert turns[1]["content"] == "The demon grows on anger."
     assert turns[1]["brain"] == "claude"
-    assert serve_shelf.load_chat_state(state_file) == {"session_id": "s-live"}
+    meta = serve_shelf.load_session_meta(meta_path)
+    # The claude thread id and the ambient talk both land in the sidecar.
+    assert meta["claude_session_id"] == "c-live"
+    assert meta["talks"] == ["anger-eating-demons"]
+    assert meta["title"] == "what does it grow on?"  # fallback until summarized
+    assert meta["updated"]
 
 
 def test_record_stream_skips_recording_empty_replies(tmp_path):
-    history = tmp_path / "history.jsonl"
-    state_file = tmp_path / "state.json"
+    turns_path = tmp_path / "sessions" / "s1.jsonl"
+    meta_path = tmp_path / "sessions" / "s1.json"
     list(
         serve_shelf.record_stream(
             iter([]), "hello?", "claude", {"session_id": None},
-            history_path=history, state_path=state_file,
+            turns_path=turns_path, meta_path=meta_path,
         )
     )
-    assert serve_shelf.load_history(history) == []
-    assert serve_shelf.load_chat_state(state_file) == {"session_id": None}
+    assert serve_shelf.load_history(turns_path) == []
+    assert serve_shelf.load_session_meta(meta_path) == {}  # no ghost sessions
 
 
 def test_resolve_ollama_model_prefers_configured_then_falls_back():
@@ -872,3 +883,308 @@ def test_resolve_ollama_model_prefers_configured_then_falls_back():
     )
     assert serve_shelf.resolve_ollama_model("missing", installed) == "llama3.2:latest"
     assert serve_shelf.resolve_ollama_model("qwen3", []) == "qwen3"
+
+
+# --- sessions (library/.chat/sessions/) -------------------------------------
+
+
+def _write_session(sessions_dir, sid, turns, meta=None):
+    for role, content in turns:
+        serve_shelf.append_turn(
+            sessions_dir / f"{sid}.jsonl", role, content, "claude", timestamp="t"
+        )
+    if meta is not None:
+        serve_shelf.save_session_meta(sessions_dir / f"{sid}.json", meta)
+
+
+def test_update_session_meta_creates_then_updates(tmp_path):
+    meta_path = tmp_path / "s1.json"
+    meta = serve_shelf.update_session_meta(
+        meta_path,
+        claude_session_id="c-1",
+        talk="patience",
+        fallback_title_text="  what is\n patience really about, in this talk here today? okay  ",
+    )
+    assert meta["id"] == "s1"
+    assert meta["talks"] == ["patience"]
+    assert meta["claude_session_id"] == "c-1"
+    assert meta["summary"] == ""
+    assert meta["created"] and meta["updated"]
+    # Fallback title: whitespace collapsed, capped calmly.
+    assert "\n" not in meta["title"]
+    assert len(meta["title"]) <= 61
+    assert meta["title"].startswith("what is patience")
+    again = serve_shelf.update_session_meta(
+        meta_path, claude_session_id="c-2", talk="patience",
+        fallback_title_text="ignored",
+    )
+    assert again["title"] == meta["title"]  # the first user line sticks
+    assert again["talks"] == ["patience"]  # no duplicates
+    assert again["claude_session_id"] == "c-2"
+    third = serve_shelf.update_session_meta(meta_path, talk="anger-eating-demons")
+    assert third["talks"] == ["patience", "anger-eating-demons"]
+    assert third["claude_session_id"] == "c-2"  # absent id never clears it
+
+
+def test_list_sessions_recency_sorted_with_meta_fallbacks(tmp_path):
+    _write_session(
+        tmp_path, "old", [("user", "about patience")],
+        {"id": "old", "title": "Patience chat", "summary": "Grim endurance, revisited.",
+         "updated": "2026-06-01T10:00:00+00:00"},
+    )
+    _write_session(
+        tmp_path, "recent", [("user", "tell me about the demon")],
+        {"id": "recent", "title": "Demon story", "summary": "",
+         "updated": "2026-07-01T10:00:00+00:00"},
+    )
+    _write_session(tmp_path, "bare", [("user", "no meta sidecar here")])
+    import os
+    import time
+
+    old_stamp = time.mktime((2026, 5, 1, 12, 0, 0, 0, 0, 0))
+    os.utime(tmp_path / "bare.jsonl", (old_stamp, old_stamp))  # deterministic mtime
+    sessions = serve_shelf.list_sessions(tmp_path)
+    assert [s["id"] for s in sessions] == ["recent", "old", "bare"]  # newest first
+    assert {s["id"] for s in sessions} == {"recent", "old", "bare"}
+    bare = next(s for s in sessions if s["id"] == "bare")
+    assert bare["title"] == "no meta sidecar here"  # first user line fallback
+    assert bare["updated"]  # mtime fallback, still sortable
+    for s in sessions:
+        assert set(s) == {"id", "title", "summary", "updated"}
+    assert serve_shelf.list_sessions(tmp_path / "missing") == []
+
+
+def test_migrate_history_folds_legacy_thread_into_first_session(tmp_path):
+    chat = tmp_path / ".chat"
+    serve_shelf.append_turn(chat / "history.jsonl", "user", "hello", "claude", timestamp="t")
+    serve_shelf.append_turn(chat / "history.jsonl", "assistant", "hi friend", "claude", timestamp="t")
+    serve_shelf.save_chat_state(chat / "state.json", {"session_id": "c-9"})
+    sid = serve_shelf.migrate_history(chat)
+    assert sid == "earlier-conversation"
+    assert not (chat / "history.jsonl").exists()  # moved, not copied
+    turns = serve_shelf.load_history(chat / "sessions" / f"{sid}.jsonl")
+    assert [t["content"] for t in turns] == ["hello", "hi friend"]
+    meta = serve_shelf.load_session_meta(chat / "sessions" / f"{sid}.json")
+    assert meta["title"] == "Earlier conversation"
+    assert meta["claude_session_id"] == "c-9"  # the thread continues
+    # Idempotent: nothing left to migrate the second time.
+    assert serve_shelf.migrate_history(chat) is None
+
+
+def test_resolve_session_defaults_and_new(tmp_path):
+    _write_session(tmp_path, "abc", [("user", "hi")], {"id": "abc", "updated": "2026-07-01T00:00:00+00:00"})
+    # The server's current session is trusted as-is.
+    assert serve_shelf.resolve_session(None, "cur-1", tmp_path) == "cur-1"
+    # No current: fall back to the most recent stored session.
+    assert serve_shelf.resolve_session(None, None, tmp_path) == "abc"
+    assert serve_shelf.resolve_session("", None, tmp_path) == "abc"
+    # An explicitly named, existing session is honoured.
+    assert serve_shelf.resolve_session("abc", "cur-1", tmp_path) == "abc"
+    # "new" mints a fresh id (safe charset, no collision with stored ones).
+    fresh = serve_shelf.resolve_session("new", "cur-1", tmp_path)
+    assert fresh != "abc" and fresh != "cur-1"
+    assert serve_shelf.SESSION_ID_RE.fullmatch(fresh)
+    # Nothing stored, no current: a first session is minted too.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert serve_shelf.SESSION_ID_RE.fullmatch(serve_shelf.resolve_session(None, None, empty))
+
+
+def test_resolve_session_rejects_bad_ids(tmp_path):
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.resolve_session("no-such-session", None, tmp_path)
+    assert excinfo.value.status == 404
+    for evil in ("../evil", ".hidden", "a/b", "a b", "..", ""):
+        if evil == "":
+            continue  # empty means "default", tested above
+        with pytest.raises(serve_shelf.BrainError) as excinfo:
+            serve_shelf.resolve_session(evil, None, tmp_path)
+        assert excinfo.value.status == 400
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.resolve_session(42, None, tmp_path)
+    assert excinfo.value.status == 400
+
+
+# --- session summaries -------------------------------------------------------
+
+
+def test_summarize_prompt_shapes_the_ask():
+    turns = [
+        {"role": "user", "content": "what did the demon grow on?"},
+        {"role": "assistant", "content": "It grows on anger and shrinks on kindness."},
+    ]
+    prompt = serve_shelf.summarize_prompt(turns)
+    assert "Title:" in prompt and "Summary:" in prompt
+    assert "Student: what did the demon grow on?" in prompt
+    assert "Guide: It grows on anger" in prompt
+
+
+def test_parse_summary_reads_title_and_summary_lines():
+    text = "Title: The demon and kindness\nSummary: We walked through the anger-eating demon story.\nExtra chatter."
+    assert serve_shelf.parse_summary(text) == (
+        "The demon and kindness",
+        "We walked through the anger-eating demon story.",
+    )
+    # Tolerant of case and light markdown dressing.
+    title, summary = serve_shelf.parse_summary("**title:** Demons\n**summary:** Short one.")
+    assert title == "Demons"
+    assert summary == "Short one."
+    assert serve_shelf.parse_summary("no structure at all") == (None, None)
+
+
+def test_summarize_session_writes_meta_and_tolerates_failure(tmp_path):
+    _write_session(
+        tmp_path, "s1", [("user", "demon story please"), ("assistant", "It grows on anger.")],
+        {"id": "s1", "title": "demon story please", "summary": ""},
+    )
+    asked = []
+
+    def ask(prompt):
+        asked.append(prompt)
+        return "Title: The anger-eating demon\nSummary: The story, told plainly."
+
+    serve_shelf.summarize_session("s1", tmp_path, ask=ask)
+    meta = serve_shelf.load_session_meta(tmp_path / "s1.json")
+    assert meta["title"] == "The anger-eating demon"
+    assert meta["summary"] == "The story, told plainly."
+    assert len(asked) == 1
+    # Already summarized: not asked again.
+    serve_shelf.summarize_session("s1", tmp_path, ask=ask)
+    assert len(asked) == 1
+    # A failing brain leaves the fallback title untouched.
+    _write_session(tmp_path, "s2", [("user", "hello")], {"id": "s2", "title": "hello", "summary": ""})
+
+    def boom(prompt):
+        raise RuntimeError("no brain")
+
+    serve_shelf.summarize_session("s2", tmp_path, ask=boom)
+    assert serve_shelf.load_session_meta(tmp_path / "s2.json")["title"] == "hello"
+    # An empty session is simply skipped.
+    serve_shelf.summarize_session("nothing-there", tmp_path, ask=ask)
+    assert len(asked) == 1
+
+
+# --- search_sessions (recall) -----------------------------------------------
+
+
+def _recall_fixture(tmp_path):
+    _write_session(
+        tmp_path, "demons",
+        [("user", "tell me the story about the maggots on the dog"),
+         ("assistant", "Ajahn Brahm tells of maggots and the kindness that followed.")],
+        {"id": "demons", "title": "Maggots and kindness",
+         "summary": "The maggot story, and meeting disgust with care.",
+         "updated": "2026-06-20T10:00:00+00:00"},
+    )
+    _write_session(
+        tmp_path, "patience",
+        [("user", "patience feels like grim endurance"),
+         ("assistant", "The adze handle wears slowly; progress is invisible.")],
+        {"id": "patience", "title": "Patience, not endurance",
+         "summary": "Patience as not wearing the burden all the time.",
+         "updated": "2026-06-25T10:00:00+00:00"},
+    )
+    return tmp_path
+
+
+def test_search_sessions_ranks_matching_session_first(tmp_path):
+    sessions_dir = _recall_fixture(tmp_path)
+    results = serve_shelf.search_sessions("what did we discuss about maggots?", sessions_dir)
+    assert results, "expected a hit"
+    top = results[0]
+    assert top["session_id"] == "demons"
+    assert set(top) == {"session_id", "title", "snippet", "when"}
+    assert "maggot" in top["snippet"].lower()
+    assert top["when"] == "2026-06-20T10:00:00+00:00"
+
+
+def test_search_sessions_matches_summaries_too(tmp_path):
+    sessions_dir = _recall_fixture(tmp_path)
+    # "disgust" appears only in the stored summary, not in any turn.
+    results = serve_shelf.search_sessions("meeting disgust", sessions_dir)
+    assert results and results[0]["session_id"] == "demons"
+
+
+def test_search_sessions_empty_and_no_match(tmp_path):
+    sessions_dir = _recall_fixture(tmp_path)
+    assert serve_shelf.search_sessions("", sessions_dir) == []
+    assert serve_shelf.search_sessions("the and of", sessions_dir) == []  # stopwords only
+    assert serve_shelf.search_sessions("quantum blockchain", sessions_dir) == []
+    assert serve_shelf.search_sessions("maggots", tmp_path / "missing") == []
+
+
+def test_search_history_cli_round_trip(tmp_path):
+    sessions_dir = _recall_fixture(tmp_path)
+    script = MODULE_PATH.parent / "search_history.py"
+    out = subprocess.run(
+        [sys.executable, str(script), "--sessions-dir", str(sessions_dir), "maggots", "story"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "Maggots and kindness" in out
+    assert "demons" in out  # the session id is printed for follow-up
+    empty = subprocess.run(
+        [sys.executable, str(script), "--sessions-dir", str(sessions_dir), "zzzunknownzzz"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "No past conversation" in empty
+
+
+# --- ambient context ----------------------------------------------------------
+
+
+def test_ambient_prefix_names_the_open_talk():
+    titles = {"patience": "Patience", "anger-eating-demons": "Anger Eating Demons"}
+    line = serve_shelf.ambient_prefix("patience", titles)
+    assert line.startswith("[") and line.endswith("]")
+    assert '"Patience"' in line
+    assert "library/patience/transcript.md" in line
+    assert "ambient context" in line
+    assert serve_shelf.ambient_prefix(None, titles) == ""
+    assert serve_shelf.ambient_prefix("not-a-talk", titles) == ""
+    assert serve_shelf.ambient_prefix("patience", {}) == ""
+
+
+def test_pick_chunks_for_view_leads_with_the_open_talk():
+    # The question points at the demon talk, but Patience is open on the
+    # shelf — its chunks must lead anyway.
+    picked = serve_shelf.pick_chunks_for_view(
+        "what does the anger eating demon grow on?", TRANSCRIPTS, "Patience", k=4
+    )
+    assert picked[0][0] == "Patience"
+    titles = [title for title, _ in picked]
+    assert "Anger Eating Demons" in titles  # general retrieval still follows
+
+
+def test_pick_chunks_for_view_no_overlap_still_grounds_the_open_talk():
+    picked = serve_shelf.pick_chunks_for_view(
+        "quantum blockchain synergy", TRANSCRIPTS, "Patience", k=4
+    )
+    assert picked and picked[0][0] == "Patience"  # opening chunk as ambient
+
+
+def test_pick_chunks_for_view_without_view_matches_plain_pick():
+    question = "what does the anger eating demon grow on?"
+    assert serve_shelf.pick_chunks_for_view(question, TRANSCRIPTS, None, k=4) == (
+        serve_shelf.pick_chunks(question, TRANSCRIPTS, k=4)
+    )
+    assert serve_shelf.pick_chunks_for_view(question, TRANSCRIPTS, "Unknown Talk", k=4) == (
+        serve_shelf.pick_chunks(question, TRANSCRIPTS, k=4)
+    )
+
+
+# --- search_history as an ollama tool -----------------------------------------
+
+
+def test_validate_tool_call_search_history():
+    argv = serve_shelf.validate_tool_call("search_history", {"q": "maggots story"})
+    assert argv == ["uv", "run", "tools/search_history.py", "maggots story"]
+    for bad in ("", "   ", "--sessions-dir /etc", None, 7):
+        with pytest.raises(ValueError):
+            serve_shelf.validate_tool_call("search_history", {"q": bad})
+
+
+def test_ollama_tools_cover_the_four_reviewed_hands():
+    names = {tool["function"]["name"] for tool in serve_shelf.OLLAMA_TOOLS}
+    assert names == {"fetch_talk", "rebuild_shelf", "speak", "search_history"}
+    assert "search_history" in serve_shelf.TOOL_PROGRESS
+    assert "search_history" in serve_shelf.AGENCY_TOOLS_NOTE

@@ -10,12 +10,14 @@ by Source URL, and writes library/shelf.html (private, gitignored). Paths
 in the page are relative so audio plays over file://.
 
 The page is two panes: a sidebar (title, the path, one nav entry per talk,
-a Sessions placeholder) and a main pane showing one view at a time —
-#home or #talk/<slug> — routed by a tiny hashchange handler. With JS off
-the views simply render stacked (hiding happens only under a runtime "js"
-class). YouTube-sourced talks get a click-to-load embedded player: nothing
-third-party loads until the user presses "Play here". The guide chat panel
-sits below the active view and stays put across views.
+a Sessions list fed from /api/sessions in served mode) and a main pane
+showing one view at a time — #home or #talk/<slug> — routed by a tiny
+hashchange handler. With JS off the views simply render stacked (hiding
+happens only under a runtime "js" class). YouTube-sourced talks get a
+click-to-load embedded player: nothing third-party loads until the user
+presses "Play here". The guide chat panel sits below the active view and
+stays put across views; each POST carries the open talk's slug ("view")
+as ambient context and the session id it continues.
 
 Run with:
     uv run tools/build_shelf.py
@@ -195,6 +197,15 @@ STYLE = """
   #talk-nav a.active { background: #efe7d9; }
   .nav-teacher { display: block; color: #a99e8e; font-size: 0.8rem; }
   .side-muted { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
+  .session-item { display: block; width: 100%; text-align: left; font: inherit;
+                  color: #5a4d3a; background: none; border: none;
+                  border-radius: 8px; padding: 0.45rem 0.6rem; cursor: pointer; }
+  .session-item:hover { background: #efe7d9; }
+  .session-item.session-active { background: #efe7d9; }
+  .session-title { display: block; font-size: 0.92rem; line-height: 1.35; }
+  .session-summary { display: block; color: #a99e8e; font-size: 0.8rem;
+                     line-height: 1.3; }
+  #chat-new { margin-left: auto; }
   #sidebar footer { margin-top: 2.5rem; }
   #sidebar-toggle { display: none; position: fixed; top: 0.7rem; left: 0.7rem;
                     z-index: 3; font: inherit; color: #5a4d3a;
@@ -289,6 +300,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 <p class="meta" id="chat-brain">
 <button type="button" class="brain-pill" data-brain="claude">claude · deep</button>
 <button type="button" class="brain-pill" data-brain="ollama">ollama · offline</button>
+<button type="button" class="brain-pill" id="chat-new">new conversation</button>
 </p>
 <div id="chat-messages"></div>
 <form id="chat-form">
@@ -304,9 +316,13 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
   var form = document.getElementById("chat-form");
   var input = document.getElementById("chat-input");
   var send = document.getElementById("chat-send");
-  var pills = document.querySelectorAll("#chat-brain .brain-pill");
+  var pills = document.querySelectorAll("#chat-brain .brain-pill[data-brain]");
+  var newButton = document.getElementById("chat-new");
+  var sessionsSection = document.getElementById("sessions-section");
+  var sessionList = document.getElementById("session-list");
   var history = [];
   var brain = null; // which brain the next message goes to (/health default)
+  var session = null; // which conversation the next message continues
 
   function add(role, text) {
     var div = document.createElement("div");
@@ -322,6 +338,50 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       pill.classList.toggle(
         "brain-active", pill.getAttribute("data-brain") === brain);
     });
+  }
+
+  function currentView() {
+    // The ambient context: the talk open on the shelf right now, or null.
+    var match = location.hash.match(/^#talk\\/(.+)$/);
+    return match ? match[1] : null;
+  }
+
+  function clearMessages() {
+    while (list.firstChild) list.removeChild(list.firstChild);
+    history.length = 0;
+  }
+
+  // The sidebar's Sessions list: title + summary per stored conversation,
+  // textContent only. Clicking one loads its turns and continues it.
+  function renderSessions(sessions) {
+    while (sessionList.firstChild) sessionList.removeChild(sessionList.firstChild);
+    sessions.forEach(function (item) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "session-item"
+        + (item.id === session ? " session-active" : "");
+      var title = document.createElement("span");
+      title.className = "session-title";
+      title.textContent = item.title || "Conversation";
+      button.appendChild(title);
+      if (item.summary) {
+        var summary = document.createElement("span");
+        summary.className = "session-summary";
+        summary.textContent = item.summary; // model-written: stays inert text
+        button.appendChild(summary);
+      }
+      button.addEventListener("click", function () {
+        session = item.id;
+        restoreHistory(item.id);
+      });
+      sessionList.appendChild(button);
+    });
+  }
+
+  function loadSessions() {
+    fetch("/api/sessions").then(function (r) { return r.json(); }).then(function (data) {
+      renderSessions(data.sessions || []);
+    }).catch(function () { /* an older server has no /api/sessions */ });
   }
 
   // Safe mini-markdown for COMPLETED guide bubbles: **bold**, *italic*,
@@ -346,14 +406,19 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     if (rest) el.appendChild(document.createTextNode(rest));
   }
 
-  function restoreHistory() {
-    fetch("/api/history").then(function (r) { return r.json(); }).then(function (data) {
+  function restoreHistory(sid) {
+    var url = "/api/history"
+      + (sid ? "?session=" + encodeURIComponent(sid) : "");
+    fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+      clearMessages();
+      if (data.session) session = data.session;
       (data.turns || []).forEach(function (turn) {
         if (turn.role !== "user" && turn.role !== "assistant") return;
         var div = add(turn.role === "user" ? "user" : "guide", turn.content);
         if (turn.role === "assistant") renderRich(div, turn.content);
         history.push({ role: turn.role, content: turn.content });
       });
+      loadSessions(); // re-render so the open session is highlighted
     }).catch(function () { /* an older server has no /api/history */ });
   }
 
@@ -378,8 +443,17 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     });
     markActive();
     panel.hidden = false;
-    restoreHistory(); // earlier turns come back after a reload or restart
+    sessionsSection.hidden = false; // served mode: the sidebar list wakes up
+    restoreHistory(); // the current session comes back after a reload
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
+
+  newButton.addEventListener("click", function () {
+    session = "new"; // the next message starts a fresh session (and thread)
+    clearMessages();
+    add("system", "— new conversation —");
+    loadSessions();
+    input.focus();
+  });
 
   form.addEventListener("submit", function (event) {
     event.preventDefault();
@@ -394,8 +468,13 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: history, brain: brain })
+      body: JSON.stringify({
+        messages: history, brain: brain,
+        session: session, view: currentView()
+      })
     }).then(function (r) {
+      var sid = r.headers.get("X-Session");
+      if (sid) session = sid; // the session that recorded this turn
       var type = r.headers.get("content-type") || "";
       if (!r.ok || type.indexOf("application/json") !== -1) {
         // pre-stream failure: the server still answers with JSON {error}.
@@ -435,6 +514,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       }
       renderRich(pending, reply); // bubble completed: dress the markdown
       history.push({ role: "assistant", content: reply });
+      loadSessions(); // recency order (and any fresh summaries) shift
     }).catch(function (error) {
       pending.classList.remove("chat-thinking");
       pending.textContent = "The guide is out of reach — " + error.message;
@@ -615,8 +695,10 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 {path_strip}
 <h2>Talks</h2>
 {render_nav(talks)}
+<div id="sessions-section" hidden>
 <h2>Sessions</h2>
-<p class="side-muted">conversation history arrives in the next iteration</p>
+<div id="session-list"></div>
+</div>
 <footer>
 Private — generated from your library.
 Rebuild: <code>uv run tools/build_shelf.py</code>

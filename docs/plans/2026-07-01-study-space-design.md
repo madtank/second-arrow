@@ -184,10 +184,24 @@ phone), revisit with real usage behind the decision.
   a new-tab escape hatch; non-YouTube source links open in a new tab,
   nothing navigates the page away. Chat stays the constant companion
   below the active view.
-- **Iter 5 — NEXT: sessions + recall.** Fill the sidebar's Sessions
-  section: past conversations from `library/.chat/history.jsonl` become
-  browsable (and searchable enough), so a thought from last week can be
-  found and continued instead of lost.
+- **Iter 5 — DONE: sessions with recall; ambient talk context; web
+  search.** Chat memory became sessions
+  (`library/.chat/sessions/<id>.jsonl` plus a meta sidecar with
+  title/summary/talks/claude thread; the old history.jsonl folds into an
+  "Earlier conversation" session on startup). The sidebar's Sessions
+  list is live: click to reopen and continue, "new conversation" to
+  start fresh; when a session is left, one cheap non-streamed call
+  (ollama preferred, claude fallback) writes its title + two-line
+  summary, degrading to the first user line. Every POST carries the
+  open talk's slug as ambient context — the claude prompt gets a
+  one-line "[the user has X open]" prefix, ollama retrieval leads with
+  that talk's chunks — so "this talk" means the thing on screen. Past
+  tense goes through search_sessions (keyword scoring over turns and
+  summaries), exposed as `tools/search_history.py` (allowlisted) and as
+  the ollama search_history tool; the claude brain also gained
+  read-only WebSearch/WebFetch for current-world questions. CLAUDE.md
+  carries the tense-routing contract: ambient → the open transcript,
+  past → search_history, new material → curriculum/fetch.
 
 ## Boundaries
 

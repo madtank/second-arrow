@@ -12,18 +12,39 @@ so importing it is fast, in-process, and fails loudly if it breaks.
 Routes:
     GET  /          the shelf page (library/shelf.html, freshly rebuilt)
     GET  /health    {"ok": true, "brain": <default>, "brains": {name: available}}
-    POST /api/chat  {"messages": [...], "brain": "claude"|"ollama"?} -> streamed
-                    reply. "brain" is optional and per-request (the panel's
-                    toggle); it falls back to the server's --brain default,
-                    unknown names are a 400. Claude session continuity is
-                    kept across switches (ollama turns don't touch it).
-    GET  /api/history  last 50 completed turns (library/.chat/history.jsonl)
+    POST /api/chat  {"messages": [...], "brain"?, "session"?, "view"?} ->
+                    streamed reply. "brain" is optional and per-request (the
+                    panel's toggle); it falls back to the server's --brain
+                    default, unknown names are a 400. "session" picks the
+                    conversation ("new" starts fresh — new claude thread
+                    too; default: the current/most-recent one). "view" is
+                    the talk slug open on the shelf, or null — it becomes
+                    ambient context (see below). The X-Session response
+                    header names the session that recorded the turn.
+    GET  /api/sessions  {"sessions": [{id,title,summary,updated}...]}, newest
+                    first, for the sidebar's Sessions list.
+    GET  /api/history?session=<id>  that session's last 50 completed turns
+                    (default: the current/most-recent session) plus its id.
     /<talk>/...     library/ served statically (Range supported, audio seeks)
 
 Chat memory persists under library/.chat/ (private, gitignored with the
-rest of library/): every completed turn is appended to history.jsonl and
-the claude session_id is saved to state.json, so both the transcript and
-the conversation thread survive page closes and server restarts.
+rest of library/): each conversation is a session — turns in
+sessions/<id>.jsonl, a sidecar sessions/<id>.json holding {id, title,
+summary, talks, created, updated, claude_session_id} — and state.json
+remembers which session is current. A pre-sessions history.jsonl is folded
+into a first "Earlier conversation" session on startup (migrate_history).
+When a session is left (a different one gets its first POST), a single
+non-streamed call to whichever brain is cheap and up (ollama preferred)
+writes its title + two-line summary into the sidecar; failures fall back
+to the first user line as the title.
+
+Ambient context: when "view" names a talk, the claude brain's prompt is
+prefixed with one line naming that talk and its transcript path, and the
+ollama brain's retrieval leads with that talk's chunks — "this talk" and
+"what did he say" then mean the thing on screen. Past-tense recall goes
+the other way: search_sessions scores keywords over stored turns and
+summaries, exposed to the claude brain as `uv run tools/search_history.py`
+(allowlisted) and to the ollama brain as the search_history tool.
 
 Chat replies stream as chunked plain text (`text/plain; charset=utf-8`,
 one raw text fragment per chunk — no SSE framing; the panel just appends
@@ -38,10 +59,11 @@ Two brains:
         so it inherits the CLAUDE.md guide persona and can read library/
         itself. Agency is scoped: `--permission-mode default` plus an
         --allowedTools allowlist grant Edit/Write ONLY on STUDY.md,
-        journal/**, library/**/notes.md, and library/INDEX.md, and Bash
-        ONLY for our reviewed tools (fetch_talk.py, speak.py,
-        build_shelf.py) — no general Bash, nothing else. That is the
-        safety boundary (see chat_allowed_tools).
+        journal/**, library/**/notes.md, and library/INDEX.md, Bash ONLY
+        for our reviewed tools (fetch_talk.py, speak.py, build_shelf.py,
+        search_history.py), plus read-only WebSearch/WebFetch — no
+        general Bash, nothing else. That is the safety boundary (see
+        chat_allowed_tools).
         Conversation continuity via `--resume <session_id>`, falling back
         to folding trimmed history into the prompt.
     --brain ollama  talks to a local Ollama (http://localhost:11434) with
@@ -51,11 +73,11 @@ Two brains:
         packed into the system prompt. <think> blocks are filtered out of
         the stream (ThinkFilter). If the model supports tool calling
         (/api/show capabilities), it gets a bounded agency loop
-        (ollama_tool_loop) over the same three reviewed tools the claude
-        brain has — fetch_talk, rebuild_shelf, speak — every call passed
-        through validate_tool_call (argv only, no shell). Models without
-        tool support degrade gracefully: they are told they have no hands
-        and answer normally.
+        (ollama_tool_loop) over the same four reviewed tools the claude
+        brain has — fetch_talk, rebuild_shelf, speak, search_history —
+        every call passed through validate_tool_call (argv only, no
+        shell). Models without tool support degrade gracefully: they are
+        told they have no hands and answer normally.
 
 Run with:
     uv run tools/serve_shelf.py                # then open http://localhost:8765
@@ -75,14 +97,19 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIBRARY = REPO_ROOT / "library"
 CHAT_DIR = LIBRARY / ".chat"  # private: covered by the library/ gitignore
-HISTORY_PATH = CHAT_DIR / "history.jsonl"
+HISTORY_PATH = CHAT_DIR / "history.jsonl"  # pre-sessions thread (migrated)
+SESSIONS_DIR = CHAT_DIR / "sessions"
 STATE_PATH = CHAT_DIR / "state.json"
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # no dot-files, no slashes
+SUMMARY_TIMEOUT = 120  # seconds for the one-shot leave-summary call
+SEARCH_LIMIT = 8  # sessions returned by search_sessions
 HISTORY_LIMIT = 50  # turns served back to the panel on page load
 OLLAMA_URL = "http://localhost:11434"
 CLAUDE_TIMEOUT = 600  # seconds — tool turns (ingest, TTS) take a while
@@ -176,6 +203,45 @@ def pick_chunks(
     return [(title, chunk) for _, title, chunk in scored[:k]]
 
 
+def pick_chunks_for_view(
+    question: str,
+    transcripts: dict[str, str],
+    view_title: str | None,
+    k: int = 4,
+) -> list[tuple[str, str]]:
+    """pick_chunks, but the talk open on the shelf leads the retrieval.
+
+    Its best-matching chunks come first; when the question shares no
+    keywords with it at all, its opening chunk still leads (the model must
+    know what "this talk" is). No view, or an unknown title, degrades to
+    plain pick_chunks.
+    """
+    if not view_title or view_title not in transcripts:
+        return pick_chunks(question, transcripts, k)
+    lead = pick_chunks(question, {view_title: transcripts[view_title]}, k=2)
+    if not lead:
+        opening = chunk_transcript(transcripts[view_title])[:1]
+        lead = [(view_title, chunk) for chunk in opening]
+    rest = [pair for pair in pick_chunks(question, transcripts, k) if pair not in lead]
+    return (lead + rest)[:k]
+
+
+def ambient_prefix(view: str | None, titles: dict[str, str]) -> str:
+    """One prompt line naming the talk open on the shelf, or "".
+
+    titles maps slug -> display title (from INDEX.md). The line teaches the
+    claude brain what "he" and "this talk" refer to, and where the
+    transcript lives.
+    """
+    if not view or view not in titles:
+        return ""
+    return (
+        f'[The user currently has "{titles[view]}" open on the shelf — its '
+        f"transcript is library/{view}/transcript.md. Treat it as the ambient "
+        'context; "he/this talk" refers to it.]'
+    )
+
+
 def build_system_prompt(
     study: str, index: str, chunks: list[tuple[str, str]], agency: str = ""
 ) -> str:
@@ -232,15 +298,23 @@ CHAT_BASH_SCOPES = (
     "uv run tools/fetch_talk.py",
     "uv run tools/speak.py",
     "uv run tools/build_shelf.py",
+    "uv run tools/search_history.py",
 )
+
+# Read-only reach beyond the repo: current-world questions (teacher news,
+# checking a link the user pasted). Teachings still enter the library only
+# through an explicit fetch_talk the user asked for.
+CHAT_READONLY_TOOLS = ("WebSearch", "WebFetch")
 
 
 def chat_allowed_tools(
     scopes: tuple[str, ...] = CHAT_WRITE_SCOPES,
     bash_scopes: tuple[str, ...] = CHAT_BASH_SCOPES,
+    readonly: tuple[str, ...] = CHAT_READONLY_TOOLS,
 ) -> str:
-    """Comma-joined --allowedTools rules: Edit+Write per memory scope plus
-    Bash pinned to the reviewed tool commands — nothing else.
+    """Comma-joined --allowedTools rules: Edit+Write per memory scope, Bash
+    pinned to the reviewed tool commands, and the read-only web tools —
+    nothing else.
 
     Verified against the real CLI: `--allowedTools "Edit(STUDY.md),..."`
     with `--permission-mode default` lets those through and leaves every
@@ -249,6 +323,7 @@ def chat_allowed_tools(
     """
     rules = [f"{tool}({scope})" for scope in scopes for tool in ("Edit", "Write")]
     rules += [f"Bash({command}:*)" for command in bash_scopes]
+    rules += list(readonly)
     return ",".join(rules)
 
 
@@ -473,9 +548,9 @@ def resolve_brain(requested, default: str, available: dict) -> str:
 # --- ollama agency: validated tools + a bounded loop ----------------------
 #
 # The ollama brain mirrors the claude brain's scope exactly, no more:
-# fetch_talk, rebuild_shelf, speak — three reviewed tools, argv-built,
-# never shell=True. validate_tool_call is the entire boundary between a
-# local model's output and subprocess.run.
+# fetch_talk, rebuild_shelf, speak, search_history — four reviewed tools,
+# argv-built, never shell=True. validate_tool_call is the entire boundary
+# between a local model's output and subprocess.run.
 
 OLLAMA_TOOLS = [
     {
@@ -525,21 +600,42 @@ OLLAMA_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_history",
+            "description": (
+                "Search past conversations for something discussed before "
+                "('that story we talked about'). Returns matching sessions "
+                "with snippets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "q": {"type": "string", "description": "a few keywords to look for"},
+                },
+                "required": ["q"],
+            },
+        },
+    },
 ]
 
 TOOL_PROGRESS = {
     "fetch_talk": "— fetching the talk… —",
     "rebuild_shelf": "— rebuilding the shelf… —",
     "speak": "— recording the audio… —",
+    "search_history": "— searching past conversations… —",
 }
 
 AGENCY_TOOLS_NOTE = """\
-You can act, sparingly, through three tools:
+You can act, sparingly, through four tools:
 - fetch_talk: ingest ONE talk from a URL the user explicitly gave
   (captioned YouTube preferred). Never invent or guess URLs.
 - rebuild_shelf: regenerate the shelf page after any library change,
   then tell the user to refresh.
 - speak: record a short reflection as audio on the shelf.
+- search_history: when the user refers to something you discussed in a
+  past conversation, look it up instead of guessing.
 Only use a tool when the user asks for the thing it does."""
 
 AGENCY_NO_TOOLS_NOTE = """\
@@ -592,6 +688,11 @@ def validate_tool_call(name: str, args) -> list[str]:
         if not slug:
             raise ValueError("out_name must contain letters or digits")
         return ["uv", "run", "tools/speak.py", "--text", text, "-o", f"library/{slug}.mp3"]
+    if name == "search_history":
+        q = args.get("q")
+        if not isinstance(q, str) or not q.strip() or q.lstrip().startswith("-"):
+            raise ValueError("q must be plain, non-empty text")
+        return ["uv", "run", "tools/search_history.py", q]
     raise ValueError(f"unknown tool {name!r}")
 
 
@@ -766,19 +867,359 @@ def save_chat_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
+# --- sessions: one conversation per file, a sidecar of meta -----------------
+
+
+def session_turns_path(sessions_dir: Path, sid: str) -> Path:
+    return sessions_dir / f"{sid}.jsonl"
+
+
+def session_meta_path(sessions_dir: Path, sid: str) -> Path:
+    return sessions_dir / f"{sid}.json"
+
+
+def load_session_meta(path: Path) -> dict:
+    """The session sidecar, or {} — same tolerance as load_chat_state."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_session_meta(path: Path, meta: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
+def fallback_title(text: str, limit: int = 60) -> str:
+    """First user line as a display title: whitespace collapsed, capped."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[:limit].rstrip() + "…"
+
+
+def new_session_id() -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{uuid.uuid4().hex[:4]}"
+
+
+def update_session_meta(
+    meta_path: Path,
+    claude_session_id: str | None = None,
+    talk: str | None = None,
+    fallback_title_text: str = "",
+) -> dict:
+    """Refresh a session's sidecar after a completed turn.
+
+    Creates it on first use (id from the filename, created/updated stamps,
+    the first user line as a provisional title). The ambient talk joins
+    meta["talks"]; the claude thread id is kept current so the conversation
+    can be resumed. A leave-summary later overwrites title/summary.
+    """
+    meta = load_session_meta(meta_path)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    meta.setdefault("id", meta_path.stem)
+    meta.setdefault("created", now)
+    meta["updated"] = now
+    meta.setdefault("summary", "")
+    if not meta.get("title") and fallback_title_text:
+        meta["title"] = fallback_title(fallback_title_text)
+    talks = [t for t in meta.get("talks") or [] if isinstance(t, str)]
+    if talk and talk not in talks:
+        talks.append(talk)
+    meta["talks"] = talks
+    if claude_session_id:
+        meta["claude_session_id"] = claude_session_id
+    save_session_meta(meta_path, meta)
+    return meta
+
+
+def _first_user_line(turns_path: Path) -> str:
+    for turn in load_history(turns_path, limit=10**6):
+        if turn.get("role") == "user":
+            return turn["content"]
+    return ""
+
+
+def list_sessions(sessions_dir: Path) -> list[dict]:
+    """[{id, title, summary, updated}] for every stored session, newest
+    first. Missing sidecars degrade to the first user line + file mtime."""
+    if not sessions_dir.is_dir():
+        return []
+    sessions: list[dict] = []
+    for turns_path in sessions_dir.glob("*.jsonl"):
+        sid = turns_path.stem
+        meta = load_session_meta(session_meta_path(sessions_dir, sid))
+        title = meta.get("title") or fallback_title(_first_user_line(turns_path))
+        updated = meta.get("updated") or datetime.fromtimestamp(
+            turns_path.stat().st_mtime, tz=timezone.utc
+        ).isoformat(timespec="seconds")
+        sessions.append(
+            {
+                "id": sid,
+                "title": title or "Conversation",
+                "summary": meta.get("summary") or "",
+                "updated": updated,
+            }
+        )
+    sessions.sort(key=lambda s: s["updated"], reverse=True)
+    return sessions
+
+
+def migrate_history(chat_dir: Path) -> str | None:
+    """Fold a pre-sessions history.jsonl into a first session, once.
+
+    The legacy thread becomes sessions/earlier-conversation.jsonl with a
+    ready-made sidecar; the old claude session_id (state.json) rides along
+    so the thread continues seamlessly. Returns the new session id, or
+    None when there is nothing to migrate.
+    """
+    legacy = chat_dir / "history.jsonl"
+    if not legacy.exists():
+        return None
+    sessions_dir = chat_dir / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    sid, counter = "earlier-conversation", 1
+    while session_turns_path(sessions_dir, sid).exists():
+        counter += 1
+        sid = f"earlier-conversation-{counter}"
+    legacy.rename(session_turns_path(sessions_dir, sid))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    meta = {
+        "id": sid,
+        "title": "Earlier conversation",
+        "summary": "",
+        "talks": [],
+        "created": now,
+        "updated": now,
+    }
+    old_session = load_chat_state(chat_dir / "state.json").get("session_id")
+    if old_session:
+        meta["claude_session_id"] = old_session
+    save_session_meta(session_meta_path(sessions_dir, sid), meta)
+    return sid
+
+
+def resolve_session(requested, current: str | None, sessions_dir: Path) -> str:
+    """Pick the session for one chat turn.
+
+    None/"" → the server's current session, else the most recent stored
+    one, else a fresh id. "new" always mints a fresh id (its empty sidecar
+    means a fresh claude thread too). A named session must be a safe id
+    (400) and exist (404). Raises BrainError — same shape the brain
+    resolution uses.
+    """
+    if requested in (None, ""):
+        if current:
+            return current
+        stored = list_sessions(sessions_dir)
+        return stored[0]["id"] if stored else new_session_id()
+    if not isinstance(requested, str):
+        raise BrainError(400, "session must be a string")
+    if requested == "new":
+        return new_session_id()
+    if not SESSION_ID_RE.fullmatch(requested):
+        raise BrainError(400, f"invalid session id {requested!r}")
+    if not session_turns_path(sessions_dir, requested).exists():
+        raise BrainError(404, f"no session {requested!r}")
+    return requested
+
+
+# --- leave-summaries ---------------------------------------------------------
+
+
+def summarize_prompt(turns: list[dict], limit: int = 20, clip: int = 400) -> str:
+    """The one-shot ask that turns a left-behind session into title+summary."""
+    lines = [
+        "Condense this conversation between a student and their Buddhist",
+        "study guide. Reply with exactly two lines, nothing else:",
+        "Title: <at most eight words>",
+        "Summary: <one or two short sentences>",
+        "",
+        "Conversation:",
+    ]
+    for turn in turns[-limit:]:
+        who = "Student" if turn.get("role") == "user" else "Guide"
+        lines.append(f"{who}: {turn.get('content', '')[:clip]}")
+    return "\n".join(lines)
+
+
+def parse_summary(text: str) -> tuple[str | None, str | None]:
+    """(title, summary) out of a brain's reply; (None, None) when unfindable.
+
+    Tolerates case and light markdown dressing around the labels.
+    """
+
+    def find(label: str) -> str | None:
+        match = re.search(
+            rf"^[\s*_#>-]*{label}[\s*_]*:[\s*_]*(.+)$", text, re.I | re.M
+        )
+        if not match:
+            return None
+        value = match.group(1).strip().strip("*_").strip()
+        return value or None
+
+    return find("title"), find("summary")
+
+
+def _ask_ollama_once(prompt: str, configured_model: str) -> str:
+    tags = _ollama_json("/api/tags", timeout=5)
+    installed = [m["name"] for m in tags.get("models", [])]
+    if not installed:
+        raise BrainError(503, "ollama has no models")
+    model = resolve_ollama_model(configured_model, installed)
+    data = _ollama_json(
+        "/api/chat",
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        },
+        timeout=SUMMARY_TIMEOUT,
+    )
+    return strip_think(data.get("message", {}).get("content") or "")
+
+
+def _ask_claude_once(prompt: str) -> str:
+    proc = subprocess.run(
+        ["claude", "-p", prompt, "--output-format", "json", "--permission-mode", "default"],
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=SUMMARY_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        raise BrainError(503, f"claude exited {proc.returncode}")
+    return parse_claude_output(proc.stdout)[0]
+
+
+def ask_cheap_brain(prompt: str, ollama_model: str = "qwen3") -> str:
+    """ONE non-streamed reply from whichever brain is cheap and up.
+
+    Ollama is preferred (local, free); the claude CLI is the fallback.
+    Raises when neither is available — the caller tolerates failure.
+    """
+    available = probe_brains()
+    if available.get("ollama"):
+        return _ask_ollama_once(prompt, ollama_model)
+    if available.get("claude"):
+        return _ask_claude_once(prompt)
+    raise BrainError(503, "no brain available to summarize")
+
+
+def summarize_session(
+    sid: str,
+    sessions_dir: Path = SESSIONS_DIR,
+    ollama_model: str = "qwen3",
+    ask=None,
+) -> None:
+    """Write a left session's title + summary into its sidecar, best-effort.
+
+    Skips empty and already-summarized sessions. Any failure (no brain,
+    timeout, unparseable reply) leaves the sidecar as it was — the first
+    user line already serves as the fallback title.
+    """
+    turns = load_history(session_turns_path(sessions_dir, sid), limit=10**6)
+    if not turns:
+        return
+    meta_path = session_meta_path(sessions_dir, sid)
+    meta = load_session_meta(meta_path)
+    if meta.get("summary"):
+        return
+    try:
+        reply = (ask or (lambda p: ask_cheap_brain(p, ollama_model)))(
+            summarize_prompt(turns)
+        )
+        title, summary = parse_summary(reply)
+    except Exception as error:  # noqa: BLE001 — summaries are best-effort by design
+        print(f"[serve_shelf] summary for {sid!r} failed: {error}")
+        return
+    if not title and not summary:
+        print(f"[serve_shelf] summary for {sid!r} unparseable — keeping the fallback title")
+        return
+    meta.setdefault("id", sid)
+    if title:
+        meta["title"] = title
+    if summary:
+        meta["summary"] = summary
+    save_session_meta(meta_path, meta)
+
+
+# --- recall: keyword search over stored sessions ------------------------------
+
+
+def _snippet(text: str, terms: set[str], width: int = 180) -> str:
+    """A readable window around the first matched term."""
+    flat = " ".join(text.split())
+    lower = flat.lower()
+    hits = [lower.find(term) for term in terms if lower.find(term) != -1]
+    index = min(hits) if hits else 0
+    start = max(0, index - width // 3)
+    piece = flat[start : start + width].strip()
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if start + width < len(flat) else ""
+    return f"{prefix}{piece}{suffix}"
+
+
+def search_sessions(q: str, sessions_dir: Path, limit: int = SEARCH_LIMIT) -> list[dict]:
+    """Keyword-scored recall over stored turns and summaries.
+
+    Returns [{session_id, title, snippet, when}], best score first (ties:
+    most recent first). The snippet comes from the best-matching text —
+    a turn or the stored title+summary line.
+    """
+    terms = _keywords(q)
+    if not terms:
+        return []
+    results: list[dict] = []
+    for info in list_sessions(sessions_dir):
+        texts = [f'{info["title"]} {info["summary"]}']
+        texts += [
+            turn["content"]
+            for turn in load_history(
+                session_turns_path(sessions_dir, info["id"]), limit=10**6
+            )
+        ]
+        best_score, best_text = 0, ""
+        for text in texts:
+            score = len(terms & _keywords(text))
+            if score > best_score:
+                best_score, best_text = score, text
+        if best_score:
+            results.append(
+                {
+                    "score": best_score,
+                    "session_id": info["id"],
+                    "title": info["title"],
+                    "snippet": _snippet(best_text, terms),
+                    "when": info["updated"],
+                }
+            )
+    results.sort(key=lambda r: r["when"], reverse=True)
+    results.sort(key=lambda r: -r["score"])  # stable: ties stay newest-first
+    return [
+        {key: r[key] for key in ("session_id", "title", "snippet", "when")}
+        for r in results[:limit]
+    ]
+
+
 def record_stream(
     stream,
     user_content: str,
     chosen: str,
     state: dict,
-    history_path: Path = HISTORY_PATH,
-    state_path: Path = STATE_PATH,
+    turns_path: Path,
+    meta_path: Path,
+    view: str | None = None,
 ):
     """Pass a reply stream through while persisting the completed turn.
 
     Once the stream finishes, the user message and the full reply are
-    appended to the history and the (possibly refreshed) claude session_id
-    is saved — so both survive page closes and server restarts.
+    appended to the session's turns and its sidecar is refreshed (updated
+    stamp, ambient talk, claude thread id) — so the conversation survives
+    page closes and server restarts. An empty reply records nothing: no
+    ghost sessions.
     """
     parts: list[str] = []
     for chunk in stream:
@@ -786,9 +1227,14 @@ def record_stream(
         yield chunk
     reply = "".join(parts)
     if reply.strip():
-        append_turn(history_path, "user", user_content, chosen)
-        append_turn(history_path, "assistant", reply, chosen)
-    save_chat_state(state_path, {"session_id": state.get("session_id")})
+        append_turn(turns_path, "user", user_content, chosen)
+        append_turn(turns_path, "assistant", reply, chosen)
+        update_session_meta(
+            meta_path,
+            claude_session_id=state.get("session_id"),
+            talk=view,
+            fallback_title_text=user_content,
+        )
 
 
 # --- shelf + library ----------------------------------------------------
@@ -820,6 +1266,15 @@ def load_transcripts(library: Path) -> dict[str, str]:
         if path.exists():
             transcripts[talk.get("title", talk["slug"])] = path.read_text()
     return transcripts
+
+
+def load_talk_titles(library: Path) -> dict[str, str]:
+    """Map talk slug -> display title (for ambient context)."""
+    build_shelf = load_build_shelf()
+    return {
+        talk["slug"]: talk.get("title", talk["slug"])
+        for talk in build_shelf.parse_index((library / "INDEX.md").read_text())
+    }
 
 
 # --- the two brains (both stream) ----------------------------------------
@@ -897,24 +1352,30 @@ def _drain_claude(proc: subprocess.Popen, state: dict):
     return emitted, finished and proc.returncode == 0
 
 
-def stream_claude(messages: list[dict], state: dict):
+def stream_claude(messages: list[dict], state: dict, prefix: str = ""):
     """Start a claude turn; return a generator of reply-text chunks.
 
-    Raises BrainError before any output if the CLI can't even start.
-    Mid-stream failures degrade gracefully: a resume that dies before
-    producing text is retried fresh with folded history (resume has proved
-    flaky); anything else keeps what arrived and appends one apology.
+    `prefix` (the ambient-context line) rides at the top of the outgoing
+    prompt when present. Raises BrainError before any output if the CLI
+    can't even start. Mid-stream failures degrade gracefully: a resume
+    that dies before producing text is retried fresh with folded history
+    (resume has proved flaky); anything else keeps what arrived and
+    appends one apology.
     """
+
+    def with_prefix(prompt: str) -> str:
+        return f"{prefix}\n\n{prompt}" if prefix else prompt
+
     session_id = state.get("session_id")
     prompt = messages[-1]["content"] if session_id else history_prompt(messages)
-    proc = _spawn_claude(prompt, session_id)
+    proc = _spawn_claude(with_prefix(prompt), session_id)
 
     def generate():
         emitted, ok = yield from _drain_claude(proc, state)
         if not ok and not emitted and session_id:
             state["session_id"] = None  # retry fresh with folded history
             try:
-                retry = _spawn_claude(history_prompt(messages), None)
+                retry = _spawn_claude(with_prefix(history_prompt(messages)), None)
             except BrainError as error:
                 yield f"The guide is out of reach — {error.message}"
                 return
@@ -988,7 +1449,9 @@ def run_tool(argv: list[str], timeout: int = TOOL_TIMEOUT) -> tuple[bool, str]:
     return True, f"{argv[2]} succeeded:\n{tail}"
 
 
-def stream_ollama(messages: list[dict], configured_model: str, library: Path):
+def stream_ollama(
+    messages: list[dict], configured_model: str, library: Path, view: str | None = None
+):
     """Start an Ollama turn; return a generator of reply-text chunks.
 
     Pre-flight (reachability, model resolution, opening the streamed POST)
@@ -1028,7 +1491,11 @@ def stream_ollama(messages: list[dict], configured_model: str, library: Path):
     study_path = library.parent / "STUDY.md"
     study = study_path.read_text() if study_path.exists() else ""
     index = (library / "INDEX.md").read_text()
-    chunks = pick_chunks(messages[-1]["content"], load_transcripts(library), k=4)
+    # The talk open on the shelf leads retrieval — "this talk" means it.
+    view_title = load_talk_titles(library).get(view) if view else None
+    chunks = pick_chunks_for_view(
+        messages[-1]["content"], load_transcripts(library), view_title, k=4
+    )
     payload = build_ollama_payload(
         trim_history(messages),
         model,
@@ -1081,11 +1548,23 @@ def create_app(brain: str, ollama_model: str):
     print(f"[serve_shelf] rebuilt {shelf}")
 
     app = FastAPI(title="Second Arrow — Study Shelf")
-    # The claude session survives restarts: state is loaded from disk here
-    # and saved after every completed turn (record_stream).
-    state: dict = {"session_id": load_chat_state(STATE_PATH).get("session_id")}
-    if state["session_id"]:
-        print(f"[serve_shelf] resuming claude session {state['session_id']}")
+    # A pre-sessions history.jsonl becomes the first session, once; the
+    # current session survives restarts via state.json {"current": id}.
+    migrated = migrate_history(CHAT_DIR)
+    if migrated:
+        print(f"[serve_shelf] migrated legacy history into session {migrated!r}")
+    current: dict = {"sid": load_chat_state(STATE_PATH).get("current") or migrated}
+    if current["sid"]:
+        save_chat_state(STATE_PATH, {"current": current["sid"]})
+        print(f"[serve_shelf] current session {current['sid']}")
+
+    def leave_session(sid: str) -> None:
+        """Summarize a left-behind session in the background, best-effort."""
+        threading.Thread(
+            target=summarize_session,
+            args=(sid, SESSIONS_DIR, ollama_model),
+            daemon=True,
+        ).start()
 
     @app.get("/")
     def index() -> FileResponse:
@@ -1095,9 +1574,18 @@ def create_app(brain: str, ollama_model: str):
     def health() -> dict:
         return {"ok": True, "brain": brain, "brains": probe_brains()}
 
+    @app.get("/api/sessions")
+    def api_sessions() -> dict:
+        return {"sessions": list_sessions(SESSIONS_DIR), "current": current["sid"]}
+
     @app.get("/api/history")
-    def api_history() -> dict:
-        return {"turns": load_history(HISTORY_PATH, HISTORY_LIMIT)}
+    def api_history(session: str | None = None):
+        try:
+            sid = resolve_session(session, current["sid"], SESSIONS_DIR)
+        except BrainError as error:
+            return JSONResponse({"error": error.message}, status_code=error.status)
+        turns = load_history(session_turns_path(SESSIONS_DIR, sid), HISTORY_LIMIT)
+        return {"session": sid, "turns": turns}
 
     @app.post("/api/chat")
     def chat(body: dict):
@@ -1117,21 +1605,41 @@ def create_app(brain: str, ollama_model: str):
                 {"error": "Body must be {\"messages\": [...]} ending with a user message."},
                 status_code=422,
             )
+        view = body.get("view") if isinstance(body.get("view"), str) else None
         try:
+            sid = resolve_session(body.get("session"), current["sid"], SESSIONS_DIR)
             chosen = resolve_brain(body.get("brain"), brain, probe_brains())
+        except BrainError as error:
+            return JSONResponse({"error": error.message}, status_code=error.status)
+        if current["sid"] and current["sid"] != sid:
+            leave_session(current["sid"])  # its title+summary get written
+        current["sid"] = sid
+        save_chat_state(STATE_PATH, {"current": sid})
+        # Each session carries its own claude thread in its sidecar, so
+        # switching sessions switches threads; ollama turns never touch it.
+        meta = load_session_meta(session_meta_path(SESSIONS_DIR, sid))
+        state = {"session_id": meta.get("claude_session_id")}
+        try:
             if chosen == "claude":
-                # `state` belongs to claude alone: ollama turns in between
-                # never touch it, so the claude session survives switches.
-                stream = stream_claude(messages, state)
+                prefix = ambient_prefix(view, load_talk_titles(LIBRARY))
+                stream = stream_claude(messages, state, prefix=prefix)
             else:
-                stream = stream_ollama(messages, ollama_model, LIBRARY)
+                stream = stream_ollama(messages, ollama_model, LIBRARY, view=view)
         except BrainError as error:
             return JSONResponse({"error": error.message}, status_code=error.status)
         # Chunked plain text: each chunk is a raw reply fragment (no framing).
         return StreamingResponse(
-            record_stream(stream, messages[-1]["content"], chosen, state),
+            record_stream(
+                stream,
+                messages[-1]["content"],
+                chosen,
+                state,
+                turns_path=session_turns_path(SESSIONS_DIR, sid),
+                meta_path=session_meta_path(SESSIONS_DIR, sid),
+                view=view,
+            ),
             media_type="text/plain; charset=utf-8",
-            headers={"X-Brain": chosen},
+            headers={"X-Brain": chosen, "X-Session": sid},
         )
 
     # Mounted last so /, /health, /api/chat win; everything else — primers,
