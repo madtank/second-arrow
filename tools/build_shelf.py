@@ -271,12 +271,14 @@ def normalize_title(name: str) -> str:
 
 
 def talk_states(path: dict, talks: list[dict]) -> tuple[dict[str, str], list[str]]:
-    """(slug -> "studied"|"queued"|"parked", queued names not yet fetched).
+    """(slug -> "studied"|"queued", queued names not yet fetched).
 
     Matches parse_study names against library titles via normalize_title.
-    Library talks absent from STUDY.md simply get no state; queued names
-    with no library match come back as `unfetched`, so the path ahead
-    stays visible in the sidebar.
+    Two states, matching the sidebar's marks: parked collapses into
+    "studied" — done for the shelf's purposes; its "set aside" nuance
+    stays in STUDY.md's own words. Library talks absent from STUDY.md
+    simply get no state; queued names with no library match come back as
+    `unfetched`, so the path ahead stays visible in the sidebar.
     """
     by_title = {
         normalize_title(talk.get("title", talk["slug"])): talk["slug"]
@@ -288,7 +290,7 @@ def talk_states(path: dict, talks: list[dict]) -> tuple[dict[str, str], list[str
         for name in path.get(state, []):
             slug = by_title.get(normalize_title(name))
             if slug:
-                states.setdefault(slug, state)
+                states.setdefault(slug, "studied" if state == "parked" else state)
             elif state == "queued":
                 unfetched.append(name)
     return states, unfetched
@@ -382,9 +384,8 @@ STYLE = """
   .nav-state { font-size: 0.85rem; }
   .nav-done { color: #6d5f4b; }
   .nav-next { color: #a99e8e; }
-  .nav-tag { margin-left: 0.5rem; color: #a99e8e; font-size: 0.72rem;
-             border: 1px solid #e8e0d3; border-radius: 999px;
-             padding: 0.05rem 0.5rem; vertical-align: middle; }
+  .nav-legend { margin: 0.6rem 0 0; padding: 0 0.6rem; color: #a99e8e;
+                font-size: 0.75rem; }
   .nav-unfetched { padding: 0.45rem 0.6rem; color: #a99e8e;
                    font-size: 0.95rem; line-height: 1.35; cursor: default; }
   .side-muted { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
@@ -465,6 +466,27 @@ STYLE = """
   .listened-replay { font: inherit; font-size: 0.85rem; color: #7a6a50;
                      background: none; border: none; padding: 0;
                      cursor: pointer; text-decoration: underline; }
+  .mark-heard-line { margin: 0.4rem 0 0; }
+  .mark-heard { font: inherit; font-size: 0.82rem; color: #a99e8e;
+                background: none; border: none; padding: 0; cursor: pointer;
+                border-bottom: 1px dotted #d8cbb4; }
+  .mark-heard:hover { color: #7a6a50; }
+  .mark-heard:disabled { color: #c2b8a6; cursor: default;
+                         border-bottom-color: transparent; }
+  .done-line { margin: 1rem 0 0; display: flex; align-items: center;
+               flex-wrap: wrap; gap: 0.3rem 0.9rem; }
+  .done-for-now { font: inherit; font-size: 0.92rem; color: #5a4d3a;
+                  background: #efe7d9; border: 1px solid #d8cbb4;
+                  border-radius: 999px; padding: 0.45rem 1.1rem;
+                  cursor: pointer; }
+  .done-for-now:hover { background: #e7dcc8; }
+  .done-for-now:disabled { color: #a99e8e; cursor: default; }
+  .wrap-up-talk { font: inherit; font-size: 0.85rem; color: #7a6a50;
+                  background: none; border: none; padding: 0;
+                  cursor: pointer; border-bottom: 1px dotted #d8cbb4; }
+  .wrap-up-talk:hover { color: #5a4d3a; }
+  .state-note { margin: 0.5rem 0 0; color: #a99e8e; font-size: 0.85rem;
+                font-style: italic; }
   audio { width: 100%; }
   .source-link { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem;
                  background: #efe7d9; border-radius: 8px; color: #5a4d3a;
@@ -942,6 +964,67 @@ The shelf never edits Hermes config.</p>
     sendMessage("Please create interactive tools for "
       + JSON.stringify(button.getAttribute("data-title"))
       + " from its transcript and notes — remember I prefer listening-first.");
+  });
+  // "Done for now → next" — the card's one primary action: record the
+  // listen if the player never saw one (same endpoint as the automatic
+  // report; its response carries the rebuilt page's mtime, adopted so
+  // the version poll doesn't reload under the streaming reply), then
+  // hand the path work to the guide through the same ONE send path.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".done-for-now");
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    var room = button.closest(".view");
+    if (!(room && room.querySelector(".listened-line"))) {
+      fetch("/api/listened", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: button.getAttribute("data-slug") }),
+      }).then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (data && typeof data.shelf_mtime === "number") {
+            shelfVersion = data.shelf_mtime;
+          }
+        }).catch(function () { /* the message still carries the intent */ });
+    }
+    sendMessage("I'm done with " + button.getAttribute("data-title")
+      + " for now — mark it done on the path and line up what's next. "
+      + "If nothing new is left in the queue, fetch the next talk from "
+      + "the curriculum and let me know when it's ready.");
+  });
+  // "…or wrap it up together" — the heard card's quieter door into the
+  // full wrap-up conversation, through the same send path.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".wrap-up-talk");
+    if (!button) return;
+    sendMessage("I've listened to " + button.getAttribute("data-title")
+      + " to the end — let's wrap it up: ask me what landed, "
+      + "then update the path.");
+  });
+  // "mark as heard" — the manual door when auto-completion didn't fire.
+  // Same server path as the automatic report; the response carries the
+  // rebuilt page's mtime (adopted BEFORE the poll sees it, so no reload),
+  // and the soft refresh flips the sidebar mark and the card in place.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".mark-heard");
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    button.textContent = "marking…";
+    fetch("/api/listened", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: button.getAttribute("data-slug") }),
+    }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (data) {
+      if (typeof data.shelf_mtime === "number") shelfVersion = data.shelf_mtime;
+      button.textContent = "heard ✓"; // instant, even in the playing room
+      return softRefresh();
+    }).catch(function () {
+      button.disabled = false; // static shelf or a hiccup: quietly re-arm
+      button.textContent = "mark as heard";
+    });
   });
   // The now-playing capsule (its own closure) asks the chat to step
   // aside before it navigates to the playing talk's room.
@@ -2242,7 +2325,13 @@ LAYOUT_SCRIPT = """<script>
 </script>"""
 
 
-def render_card(talk: dict, files: dict, reach: str | None, listened: dict | None = None) -> str:
+def render_card(
+    talk: dict,
+    files: dict,
+    reach: str | None,
+    listened: dict | None = None,
+    state: str | None = None,
+) -> str:
     slug = talk["slug"]
     cap = duration_to_seconds(talk.get("duration", ""))
     cap_attr = f' data-duration="{cap}"' if cap else ""
@@ -2305,6 +2394,7 @@ def render_card(talk: dict, files: dict, reach: str | None, listened: dict | Non
                 f'<a class="source-link" href="{escape(source)}" target="_blank" '
                 'rel="noopener">Listen at the source &rarr;</a>'
             )
+    title = talk.get("title", slug)
     if listened and listened.get("last"):
         # Finished at least once: say so quietly. Replay simply plays —
         # the resume position was cleared at the end, so it starts fresh.
@@ -2312,6 +2402,35 @@ def render_card(talk: dict, files: dict, reach: str | None, listened: dict | Non
             f'<p class="listened-line">listened ✓ {escape(listened["last"][:10])}'
             f' · <button type="button" class="listened-replay" '
             f'data-slug="{escape(slug)}">replay</button></p>'
+        )
+    else:
+        # No completion on record: the manual door, for listens the player
+        # couldn't see (elsewhere, or stopped just shy of the end). On the
+        # static shelf the click fails quietly and the button re-arms.
+        parts.append(
+            '<p class="mark-heard-line">'
+            f'<button type="button" class="mark-heard" data-slug="{escape(slug)}" '
+            'title="finished this talk somewhere the player couldn\'t see? '
+            'record it">mark as heard</button></p>'
+        )
+    if state != "studied":
+        # The one clear way to say "done with this one, onto the next".
+        # It records the listen if the player never saw one, then hands
+        # the path work to the guide through the normal chat pipeline.
+        # When the talk has been heard, a quieter door into the full
+        # wrap-up conversation rides along.
+        wrap = (
+            ' <button type="button" class="wrap-up-talk" '
+            f'data-title="{escape(title)}">'
+            "…or wrap it up together — what landed?</button>"
+            if listened and listened.get("last")
+            else ""
+        )
+        parts.append(
+            '<p class="done-line">'
+            '<button type="button" class="done-for-now" '
+            f'data-slug="{escape(slug)}" data-title="{escape(title)}">'
+            f"Done for now → next</button>{wrap}</p>"
         )
     return "\n".join(parts)
 
@@ -2321,6 +2440,8 @@ _NAV_MARKS = {
     "queued": '<span class="nav-state nav-next">→</span> ',
 }
 
+_NAV_LEGEND = '<p class="nav-legend">✓ done · → current</p>'
+
 
 def render_nav(
     talks: list[dict],
@@ -2329,10 +2450,12 @@ def render_nav(
 ) -> str:
     """The sidebar's Talks list — which IS the path.
 
-    Each entry carries its state inline: ✓ studied, → queued, a muted
-    "parked" tag, or nothing (in the library, not on the path). Queued
-    talks not yet fetched appear last, muted and unclickable, so the
-    path ahead stays visible.
+    Three states only, so a glance answers "am I done with this one?":
+    ✓ done, → current, or nothing (in the library, untouched). Parked
+    talks read as done here — their nuance stays in STUDY.md and notes.
+    Queued talks not yet fetched appear last, muted and unclickable, so
+    the path ahead stays visible. One tiny legend line keeps the marks
+    self-explanatory.
     """
     states = states or {}
     if not talks and not unfetched:
@@ -2341,10 +2464,9 @@ def render_nav(
     for talk in talks:
         state = states.get(talk["slug"])
         mark = _NAV_MARKS.get(state, "")
-        tag = '<span class="nav-tag">parked</span>' if state == "parked" else ""
         items.append(
             f'<li><a href="#talk/{escape(talk["slug"])}">'
-            f'{mark}<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>{tag}'
+            f'{mark}<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>'
             f'<span class="nav-teacher">{escape(talk.get("teacher", ""))}</span></a></li>'
         )
     for entry in unfetched:
@@ -2359,7 +2481,7 @@ def render_nav(
             f'{_NAV_MARKS["queued"]}<span class="nav-title">{escape(name)}</span>'
             f'<span class="nav-teacher">{hint}</span></li>'
         )
-    return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>"
+    return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>\n" + _NAV_LEGEND
 
 
 _URL_IN_HTML = re.compile(r"https?://[^\s<]+")
@@ -2458,7 +2580,8 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
         talk_dir = library / talk["slug"]
         files = probe(talk_dir) if talk_dir.is_dir() else probe(library / "_missing_")
         card = [render_card(talk, files, reach.get(talk.get("source", "")),
-                            listened=listening.get(talk["slug"]))]
+                            listened=listening.get(talk["slug"]),
+                            state=states.get(talk["slug"]))]
         slug = escape(talk["slug"])
         if files["primer_md"]:
             primer = md_to_html((talk_dir / "primer.md").read_text())
@@ -2538,6 +2661,15 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
         cards.append("\n".join(card))
     talk_views = "\n\n".join(cards)
     empty_note = "" if cards else "\n<p>The library is empty so far.</p>"
+    # One plain sentence next to the path summary, so "done" never needs
+    # guessing at. Only when there is a path to explain — an empty study
+    # space stays untouched.
+    state_note = (
+        '\n<p class="state-note">✓ done — say so with a talk\'s '
+        "“Done for now” button, or by wrapping it up with the guide.</p>"
+        if (path_strip or listening)
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2590,7 +2722,7 @@ Rebuild: <code>uv run tools/build_shelf.py</code>
 <p>Interactive tools live on each talk's card, made for you by the guide.</p>
 <p>And just tell the guide where you are — it remembers so you don't have to.</p>
 </div>
-{path_strip}{empty_note}
+{path_strip}{state_note}{empty_note}
 <div id="machinery" hidden>
 <h3>the room's machinery</h3>
 <ul id="machinery-list"></ul>

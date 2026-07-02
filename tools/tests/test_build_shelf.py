@@ -318,10 +318,11 @@ def test_talk_states_maps_slugs_and_surfaces_unfetched():
         "parked": ["Demon Story (Ajahn Brahm)"],
     }
     states, unfetched = build_shelf.talk_states(path, talks)
+    # Parked collapses into "studied": done for the shelf's purposes.
     assert states == {
         "quiet-mind": "studied",
         "far-talk": "queued",
-        "demon-story": "parked",
+        "demon-story": "studied",
     }
     # A queued talk with no library match is the visible path ahead.
     assert unfetched == ["Anger Issues (Thanissaro Bhikkhu, 2019)"]
@@ -352,8 +353,10 @@ def test_sidebar_talks_list_is_the_path(tmp_path):
     assert '<span class="nav-state nav-done">✓</span>' in quiet
     far = re.search(r'<li><a href="#talk/far-talk">.*?</a></li>', sidebar, re.S).group(0)
     assert '<span class="nav-state nav-next">→</span>' in far
+    # Parked reads as done in the sidebar — no chip, no fourth state.
     demon = re.search(r'<li><a href="#talk/demon-story">.*?</a></li>', sidebar, re.S).group(0)
-    assert '<span class="nav-tag">parked</span>' in demon
+    assert '<span class="nav-state nav-done">✓</span>' in demon
+    assert "nav-tag" not in sidebar
     # A queued talk not yet in the library appears muted and unclickable.
     # No curriculum in this fixture, so no URL is known anywhere for it.
     unfetched = re.search(r'<li class="nav-unfetched">.*?</li>', sidebar, re.S).group(0)
@@ -367,10 +370,13 @@ def test_sidebar_talks_list_is_the_path(tmp_path):
     assert html.count('class="path-strip"') == 1
 
 
-def test_sidebar_without_study_md_is_unmarked(tmp_path):
+def test_sidebar_without_study_md_carries_no_path_marks(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
-    assert "nav-state" not in sidebar
+    # No STUDY.md: no path marks (heard is a separate signal from the
+    # listening log — covered in its own section below).
+    assert "nav-done" not in sidebar
+    assert "nav-next" not in sidebar
     assert "nav-unfetched" not in sidebar
     assert 'href="#talk/quiet-mind"' in sidebar  # talks still listed
 
@@ -1179,6 +1185,158 @@ def test_completion_detection_js_markers(tmp_path):
     assert "the server remembers next time" in html
 
 
+# --- done for now: three sidebar states, one primary card action ---------------
+
+DONE_STUDY = """# Study Memory
+
+## Studied
+- **Quiet Mind & <Friends>** (Ajahn Test): landed.
+
+## Queued
+- **Far Talk (Ajahn Test)** — next up.
+- **Demon Story (Ajahn Brahm)** — parked, no obligation.
+"""
+
+
+def _nav_entry(sidebar, slug):
+    return re.search(
+        rf'<li><a href="#talk/{slug}">.*?</a></li>', sidebar, re.S
+    ).group(0)
+
+
+def test_sidebar_shows_three_states_only(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_STUDY)
+    html = build_shelf.render_shelf(library, {})
+    sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
+    # Done, current, or nothing — a glance answers "am I done with this?".
+    quiet = _nav_entry(sidebar, "quiet-mind")
+    assert '<span class="nav-state nav-done">✓</span>' in quiet
+    far = _nav_entry(sidebar, "far-talk")
+    assert '<span class="nav-state nav-next">→</span>' in far
+    # Parked reads as done here — no fourth state, no chip; the nuance
+    # stays in STUDY.md's own words.
+    demon = _nav_entry(sidebar, "demon-story")
+    assert '<span class="nav-state nav-done">✓</span>' in demon
+    assert "nav-tag" not in sidebar
+    # Untouched talks stay unmarked.
+    bare = _nav_entry(sidebar, "bare-yt")
+    assert "nav-state" not in bare
+
+
+def test_sidebar_legend_and_home_state_note(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_STUDY)
+    html = build_shelf.render_shelf(library, {})
+    # One tiny legend line under the talks list...
+    sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
+    legend = re.search(r'<p class="nav-legend">(.*?)</p>', sidebar)
+    assert legend, "sidebar legend missing"
+    assert legend.group(1) == "✓ done · → current"
+    # ...and one plain sentence on the begin-here status area saying how
+    # "done" happens.
+    home = re.search(
+        r'<section class="card view" id="view-home">.*?</section>', html, re.S
+    ).group(0)
+    assert re.search(r'<p class="state-note">✓ done — ', home)
+    assert "Done for now" in home
+
+
+def test_talk_states_parked_collapses_into_studied():
+    talks = [{"slug": s, "title": s.title()} for s in ("a", "b", "c")]
+    path = {"studied": ["A"], "queued": ["B"], "parked": ["C"]}
+    states, unfetched = build_shelf.talk_states(path, talks)
+    assert states == {"a": "studied", "b": "queued", "c": "studied"}
+    assert unfetched == []
+
+
+def test_card_offers_mark_as_heard_only_before_a_listen(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # far-talk has no completion on record: the quiet manual door.
+    far_card = re.search(
+        r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
+    ).group(0)
+    button = re.search(r'<button type="button" class="mark-heard"[^>]*>', far_card)
+    assert button, "mark-as-heard control missing"
+    assert 'data-slug="far-talk"' in button.group(0)
+    # quiet-mind already finished: the listened line IS the "heard ✓"
+    # state — no second door.
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    assert "mark-heard" not in quiet_card
+    assert "listened ✓" in quiet_card
+
+
+def test_card_done_for_now_is_the_primary_action(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_STUDY)
+    html = build_shelf.render_shelf(library, {})
+    # far-talk: current, heard-status irrelevant — the one clear way to
+    # say "done with this one, onto the next".
+    far_card = re.search(
+        r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
+    ).group(0)
+    button = re.search(
+        r'<button type="button" class="done-for-now"[^>]*>([^<]*)</button>', far_card
+    )
+    assert button, "done-for-now action missing"
+    assert 'data-slug="far-talk"' in button.group(0)
+    assert 'data-title="Far Talk"' in button.group(0)
+    assert button.group(1) == "Done for now → next"
+    # Not yet heard: no wrap-up link riding along.
+    assert "wrap-up-talk" not in far_card
+    # quiet-mind: already done on the path — nothing left to declare.
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    assert "done-for-now" not in quiet_card
+    assert "wrap-up-talk" not in quiet_card
+
+
+def test_card_heard_but_not_done_offers_the_wrap_up_door(tmp_path):
+    library = _make_library(tmp_path)
+    # quiet-mind is heard (fixture) — leave it OFF the studied path.
+    (tmp_path / "STUDY.md").write_text("## Queued\n- **Quiet Mind & <Friends>** — next.\n")
+    html = build_shelf.render_shelf(library, {})
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    # Heard + not done: the primary action AND the quieter conversation door.
+    assert 'class="done-for-now"' in quiet_card
+    wrap = re.search(
+        r'<button type="button" class="wrap-up-talk"[^>]*>([^<]*)</button>', quiet_card
+    )
+    assert wrap, "wrap-up door missing"
+    assert wrap.group(1) == "…or wrap it up together — what landed?"
+
+
+def test_done_for_now_and_wrap_up_js_wiring(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The manual mark shares the automatic report's endpoint, then the
+    # soft refresh flips the card in place — no reload (the page adopts
+    # the rebuilt mtime so the version poll stays quiet).
+    assert '".mark-heard"' in html
+    assert html.count('"/api/listened"') >= 3  # automatic + manual + done
+    assert "shelfVersion = data.shelf_mtime" in html
+    assert '"heard ✓"' in html
+    # Done-for-now composes the canned ask through the ONE send path.
+    assert '".done-for-now"' in html
+    assert "I'm done with " in html
+    assert (
+        " for now — mark it done on the path and line up what's next. " in html
+    )
+    assert (
+        "If nothing new is left in the queue, fetch the next talk from " in html
+    )
+    # The wrap-up door sends its own message the same way.
+    assert '".wrap-up-talk"' in html
+    assert " to the end — let's wrap it up: ask me what landed, " in html
+    assert "then update the path." in html
+    # Still no markup built from strings anywhere.
+    assert "innerHTML" not in html
+
+
 # --- capsule expand: chat steps aside ------------------------------------------
 
 
@@ -1381,9 +1539,11 @@ def test_generate_button_sends_the_composed_ask(tmp_path):
     assert '"Please create interactive tools for "' in html or "'Please create interactive tools for '" in html
     assert "listening-first" in html
     assert ".make-interactive" in html
-    # Titles are escaped in the data attribute.
-    assert 'data-title="Quiet Mind &amp; &lt;Friends&gt;"' not in html  # has artifacts: no button
-    assert 'data-title="Far Talk"' in html
+    # Titles are escaped in the data attribute. quiet-mind already has
+    # artifacts, so no generate button (data-title also rides on the
+    # done-for-now/wrap-up controls now — scope the check to this button).
+    assert 'class="make-interactive" data-title="Quiet Mind' not in html
+    assert 'class="make-interactive" data-title="Far Talk"' in html
 
 
 # --- artifact -> seek: anchored listening from interactives --------------------

@@ -302,6 +302,52 @@ def test_artifact_iframe_is_sandboxed_behind_the_csp_wall(page, shelf_server):
     assert frame.get_attribute("sandbox") == "allow-scripts"
 
 
+# --- done for now: the manual heard door and the path's primary action -------
+
+
+def test_mark_as_heard_flips_the_card_in_place(page, shelf_server):
+    _wait_for_version_baseline(page, shelf_server.base, "#talk/far-talk")
+    page.wait_for_selector("#talk-far-talk.active")
+    page.evaluate("window.__e2e_marker = 1")
+    # far-talk has no completion on record: the quiet manual door is open.
+    page.click("#talk-far-talk .mark-heard")
+    # The completed listen lands on the card in place (soft refresh)...
+    page.wait_for_selector("#talk-far-talk .listened-line")
+    # ...bringing the quieter wrap-up door with it...
+    page.wait_for_selector("#talk-far-talk .wrap-up-talk")
+    assert page.locator("#talk-far-talk .mark-heard").count() == 0
+    # ...without a reload — the page adopted the rebuilt shelf's mtime.
+    assert page.evaluate("window.__e2e_marker") == 1
+    # And the server wrote it on the SAME path the player's report uses.
+    entries = shelf_server.module.load_listening(
+        shelf_server.library / ".listening.jsonl"
+    )
+    assert "far-talk" in {entry["slug"] for entry in entries}
+
+
+def test_done_for_now_sends_the_canned_message(page, shelf_server):
+    _open_shelf(page, shelf_server.base, "#talk/demon-story")
+    page.wait_for_selector("#talk-demon-story.active")
+    page.click("#talk-demon-story .done-for-now")
+    # The canned ask goes through the normal chat pipeline, in the user's
+    # own voice...
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("I\'m done with Demon Story for now — '
+        'mark it done on the path and line up what\'s next.")',
+        state="attached",
+    )
+    # ...and the guide answers in the same conversation.
+    page.wait_for_selector(
+        '.chat-msg.chat-guide:has-text("One breath, then we begin")',
+        state="attached",
+    )
+    # The click also recorded the listen (none existed for demon-story).
+    entries = shelf_server.module.load_listening(
+        shelf_server.library / ".listening.jsonl"
+    )
+    assert "demon-story" in {entry["slug"] for entry in entries}
+
+
 def test_artifact_seek_postmessage_drives_the_player(page, shelf_server):
     _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
     # The anchored-listening button inside the sandboxed tool posts
