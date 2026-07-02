@@ -98,7 +98,11 @@ Use your memory as you go:
   HTML file to `library/<slug>/artifacts/<name>.html` (lowercase slug
   chars + `.html`). Inline CSS/JS only — no external scripts, styles,
   fonts, or network requests: the shelf renders it in a sandboxed iframe
-  behind a no-network CSP, so anything external simply won't load. Media
+  behind a no-network CSP, so anything external simply won't load. The
+  sandbox also denies storage: one unguarded `localStorage`/
+  `sessionStorage` touch throws and kills the whole script. Guard it
+  (try/catch or feature-detect, in-memory fallback) and never assume
+  persistence — full UI either way, just no memory across reloads. Media
   only via relative paths into the talk folder (`../../<slug>/audio.mp3`
   — that shape resolves both served and over file://). The shelf lists
   these under **Interactive** on the talk's card. When the user asks to
