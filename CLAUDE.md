@@ -159,6 +159,15 @@ Use your memory as you go:
   transcript.json segments, never guessed — then rebuild the shelf.
   The same anchoring belongs in artifacts (seek links) and in chat
   (`[[seek: …]]` cues).
+- **Completeness is a standard.** A talk's basics are its primer, its
+  notes, and its `## Moments`; ✦ buttons on the card exist to fill the
+  gaps (and add extras), each sending a canned ask. Recognize them like
+  the two above: "Read this talk's transcript and write a 60-90 second
+  primer … under '## Primer', speak it to primer.mp3 …" (write it into
+  the notes, speak it, rebuild), "Please start notes for this talk …"
+  (open notes.md with a few lines and a '## My takeaways' section), and
+  "Mark 2-3 MORE moments … beyond the ones already in '## Moments' …"
+  (same grounding rule — transcript.json, never guessed, no duplicates).
 - **Queued-but-unfetched talks have stub rooms** on the shelf carrying
   the curriculum's own title/teacher/URL/why. Their "✦ fetch this talk"
   button sends an explicit single-item fetch request naming the
