@@ -406,22 +406,35 @@ STYLE = """
   .js .view.audible { display: block; position: fixed;
                       left: -10000px; top: 0; width: 640px;
                       pointer-events: none; } /* playing, parked offscreen */
-  #sidebar-collapse { position: absolute; top: 0.9rem; right: 0.5rem;
-                      font: inherit; color: #a99e8e; background: none;
+  /* The collapser is a fletched arrow — this is Second Arrow, after all.
+     One glyph, drawn once: it points left to tuck the sidebar away and
+     is mirrored (scaleX) to point right when offering it back. Quiet ink
+     that deepens on hover; a comfortable ~2.2rem hit target. */
+  #sidebar-collapse { position: absolute; top: 0.8rem; right: 0.4rem;
+                      width: 2.2rem; height: 2.2rem; display: flex;
+                      align-items: center; justify-content: center;
+                      color: #a99e8e; background: none;
                       border: none; border-radius: 8px;
-                      padding: 0.15rem 0.55rem; cursor: pointer; }
+                      padding: 0; cursor: pointer;
+                      transition: color 0.15s ease, background 0.15s ease; }
+  #sidebar-collapse svg { width: 1.35rem; height: 1.35rem; }
   #sidebar-collapse:hover { background: #efe7d9; color: #5a4d3a; }
-  #sidebar-reopen { display: none; position: fixed; top: 0.9rem;
-                    left: 0.7rem; z-index: 3; font: inherit;
+  #sidebar-reopen { display: none; position: fixed; top: 0.8rem;
+                    left: 0.7rem; z-index: 3; width: 2.4rem; height: 2.4rem;
+                    align-items: center; justify-content: center;
                     color: #5a4d3a; background: #efe7d9;
                     border: 1px solid #e8e0d3; border-radius: 8px;
-                    padding: 0.2rem 0.7rem; cursor: pointer; }
+                    padding: 0; cursor: pointer;
+                    transition: color 0.15s ease, background 0.15s ease; }
+  #sidebar-reopen svg { width: 1.35rem; height: 1.35rem;
+                        transform: scaleX(-1); } /* same arrow, flying back */
+  #sidebar-reopen:hover { background: #e7dcc8; color: #4a4038; }
   @media (min-width: 721px) {
     #sidebar { transition: margin-left 0.25s ease; }
     body.sidebar-collapsed #sidebar { margin-left: -260px;
                                       visibility: hidden; }
     body.sidebar-collapsed #guide-chat { left: 0; }
-    body.sidebar-collapsed #sidebar-reopen { display: block; }
+    body.sidebar-collapsed #sidebar-reopen { display: flex; }
   }
   @media (max-width: 720px) {
     #sidebar-toggle { display: block; }
@@ -569,10 +582,36 @@ STYLE = """
                 border-radius: 999px; padding: 0.15rem 0.7rem; cursor: pointer; }
   .brain-pill.brain-active { background: #efe7d9; border-color: #d8cbb4; }
   .brain-pill:disabled { opacity: 0.4; cursor: default; }
-  #chat-model { font: inherit; font-size: 0.8rem; color: #5a4d3a;
-                background: #fffdf9; border: 1px solid #e8e0d3;
-                border-radius: 8px; padding: 0.15rem 0.4rem;
-                max-width: 13rem; }
+  #chat-model, #hermes-route { font: inherit; font-size: 0.8rem;
+                color: #5a4d3a; background: #fffdf9;
+                border: 1px solid #e8e0d3; border-radius: 8px;
+                padding: 0.15rem 0.4rem; max-width: 13rem; }
+  #hermes-model-note { color: #a99e8e; font-size: 0.8rem;
+                       align-self: center; font-style: italic; }
+  #hermes-info { font: inherit; font-size: 0.85rem; color: #a99e8e;
+                 background: none; border: none; border-radius: 999px;
+                 padding: 0 0.35rem; cursor: pointer; }
+  #hermes-info:hover { background: #efe7d9; color: #5a4d3a; }
+  #hermes-popover { position: relative; background: #f9f5ec;
+                    border: 1px solid #eee4d2; border-radius: 10px;
+                    padding: 0.7rem 2.1rem 0.7rem 0.9rem;
+                    margin: 0.4rem 0 0.2rem; font-size: 0.84rem;
+                    color: #5a4d3a; }
+  #hermes-popover p { margin: 0; line-height: 1.5; }
+  #hermes-popover code { background: #f3ecdd; border-radius: 4px;
+                         padding: 0 0.25rem; font-size: 0.78rem; }
+  #hermes-popover-close { position: absolute; top: 0.35rem; right: 0.45rem;
+                          font: inherit; font-size: 0.8rem; color: #a99e8e;
+                          background: none; border: none; cursor: pointer;
+                          padding: 0.1rem 0.3rem; }
+  #machinery { margin-top: 1.8rem; padding-top: 1rem;
+               border-top: 1px solid #f0e9dd; }
+  #machinery h3 { font-size: 0.95rem; color: #8a7f70; margin: 0 0 0.45rem; }
+  #machinery ul { list-style: none; padding: 0; margin: 0; }
+  #machinery li { display: flex; justify-content: space-between;
+                  gap: 1rem; font-size: 0.85rem; color: #5a4d3a;
+                  padding: 0.15rem 0; }
+  .machinery-state { color: #a99e8e; text-align: right; }
   .chat-row { display: flex; gap: 0.5rem; align-items: flex-start;
               margin: 0.6rem 0; }
   .chat-row-user { flex-direction: row-reverse; }
@@ -720,8 +759,21 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 <p class="meta" id="chat-brain">
 <button type="button" class="brain-pill" data-brain="claude">claude · deep</button>
 <button type="button" class="brain-pill" data-brain="ollama">ollama · offline</button>
+<button type="button" class="brain-pill" data-brain="hermes">hermes · second-arrow</button>
 <select id="chat-model" hidden></select>
+<select id="hermes-route" hidden></select>
+<span id="hermes-model-note" hidden></span>
+<button type="button" id="hermes-info" hidden title="about the hermes profile" aria-label="about the hermes profile">ⓘ</button>
 </p>
+<div id="hermes-popover" hidden>
+<p>This is the <strong>second-arrow</strong> Hermes profile. Its default
+model lives in <code>~/.hermes/profiles/second-arrow/config.yaml</code> —
+change it with <code>hermes -p second-arrow config set model.default …</code>
+or the Hermes app → Settings → Model, then
+<code>hermes -p second-arrow gateway restart</code>.
+The shelf never edits Hermes config.</p>
+<button type="button" id="hermes-popover-close" aria-label="close">✕</button>
+</div>
 <div id="chat-messages"></div>
 <div id="chat-peek" hidden>
 <span id="peek-mark" aria-hidden="true"></span>
@@ -757,10 +809,17 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   var send = document.getElementById("chat-send");
   var pills = document.querySelectorAll("#chat-brain .brain-pill[data-brain]");
   var modelSelect = document.getElementById("chat-model");
+  var routeSelect = document.getElementById("hermes-route");
+  var hermesNote = document.getElementById("hermes-model-note");
+  var hermesInfoBtn = document.getElementById("hermes-info");
+  var hermesPopover = document.getElementById("hermes-popover");
   var history = [];
   var brain = null; // which brain the next message goes to (/health default)
   var session = null; // which conversation the next message continues
   var model = null; // which installed local model the ollama brain uses
+  var hermes = null; // /health's hermes entry: wired, reason, model, routes
+  var hermesRoute = null; // the picked route alias (null = profile default)
+  var healthInfo = null; // the last /health payload (the machinery card)
 
   function add(role, text) {
     var div = document.createElement("div");
@@ -986,9 +1045,68 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   // The local-model picker: visible only while the ollama pill is active
   // and /api/models actually answered (claude mode and the static shelf
   // never show it). Options are built with createElement + textContent.
+  // The hermes route picker follows the hermes pill the same way; with
+  // no routes configured it collapses to a static model.default note.
   function updateModelVisibility() {
     modelSelect.hidden = brain !== "ollama" || modelSelect.options.length === 0;
+    var hermesOn = brain === "hermes" && !!hermes && !!hermes.wired;
+    routeSelect.hidden = !hermesOn || routeSelect.options.length === 0;
+    hermesNote.hidden = !hermesOn || routeSelect.options.length > 0;
+    hermesInfoBtn.hidden = !hermesOn;
+    if (!hermesOn) hermesPopover.hidden = true;
   }
+
+  // The hermes pill tells the truth from /health: the PROFILE identity,
+  // never a model name. Not wired => an honest ghost carrying the exact
+  // wiring ritual; wired => selectable, with the profile's model routes
+  // (alias · resolved model) as the per-request picker.
+  var wireRitual = "not wired — run:\\n"
+    + "uv run tools/wire_hermes_profile.py\\n"
+    + "hermes -p second-arrow gateway restart\\n"
+    + "uv run tools/hermes_probe.py";
+
+  function setupHermes(info, pill) {
+    hermes = (info && typeof info === "object") ? info : null;
+    while (routeSelect.firstChild) routeSelect.removeChild(routeSelect.firstChild);
+    hermesRoute = null;
+    if (!hermes || !hermes.wired) {
+      pill.disabled = true;
+      pill.textContent = "hermes — not wired";
+      pill.title = (hermes && hermes.reason ? hermes.reason + "\\n" : "")
+        + wireRitual;
+      return;
+    }
+    pill.title = "the second-arrow Hermes profile"
+      + (hermes.model ? " · model: " + hermes.model : "");
+    var routes = hermes.routes || [];
+    if (routes.length) {
+      var base = document.createElement("option");
+      base.value = ""; // profile default: `model` omitted from requests
+      base.textContent = "default" + (hermes.model ? " · " + hermes.model : "");
+      routeSelect.appendChild(base);
+      routes.forEach(function (route) {
+        var option = document.createElement("option");
+        option.value = route.alias;
+        option.textContent = route.alias + " · " + route.model;
+        routeSelect.appendChild(option);
+      });
+    } else {
+      hermesNote.textContent = hermes.model
+        ? "model: " + hermes.model
+        : "model: set in the Hermes profile";
+    }
+  }
+
+  routeSelect.addEventListener("change", function () {
+    hermesRoute = routeSelect.value || null;
+    add("system", "— hermes route: " + (hermesRoute || "profile default") + " —");
+  });
+
+  hermesInfoBtn.addEventListener("click", function () {
+    hermesPopover.hidden = !hermesPopover.hidden;
+  });
+  document.getElementById("hermes-popover-close").addEventListener(
+    "click", function () { hermesPopover.hidden = true; });
 
   function loadModels() {
     fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
@@ -1007,7 +1125,51 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
         if (modelSelect.value === data.current) model = data.current;
       }
       updateModelVisibility();
+      renderMachinery(); // the card can now name the local model too
     }).catch(function () { /* ollama down or older server: picker stays hidden */ });
+  }
+
+  // --- the room's machinery: a quiet read-only card on Begin here -------
+  // Built from /health with createElement + textContent only. No controls,
+  // no secrets — presence booleans and display names, honestly stated.
+  // Re-rendered after a soft refresh swaps the home view in fresh.
+  function machineryLine(listEl, label, value) {
+    var item = document.createElement("li");
+    var name = document.createElement("span");
+    name.className = "machinery-name";
+    name.textContent = label;
+    var state = document.createElement("span");
+    state.className = "machinery-state";
+    state.textContent = value;
+    item.appendChild(name);
+    item.appendChild(state);
+    listEl.appendChild(item);
+  }
+
+  function renderMachinery() {
+    var box = document.getElementById("machinery");
+    var listEl = document.getElementById("machinery-list");
+    if (!box || !listEl || !healthInfo) return;
+    while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+    var brains = healthInfo.brains || {};
+    machineryLine(listEl, "claude · deep",
+      brains.claude === false ? "not found" : "ready");
+    machineryLine(listEl, "ollama · offline",
+      brains.ollama === false ? "not running"
+        : "ready" + (model ? " · " + model : ""));
+    var h = brains.hermes;
+    machineryLine(listEl, "hermes · second-arrow",
+      (h && typeof h === "object" && h.wired)
+        ? (h.model ? "wired · " + h.model : "wired") : "not wired");
+    machineryLine(listEl, "aX presence",
+      healthInfo.ax && healthInfo.ax.wired ? "wired" : "not set up");
+    var prep = healthInfo.prep_cron;
+    machineryLine(listEl, "nightly prep",
+      prep && prep.installed_at
+        ? (prep.schedule ? prep.schedule + " · " : "")
+          + "installed " + String(prep.installed_at).slice(0, 10)
+        : "not yet scheduled");
+    box.hidden = false;
   }
 
   modelSelect.addEventListener("change", function () {
@@ -1178,11 +1340,16 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 
   fetch("/health").then(function (r) { return r.json(); }).then(function (h) {
     if (!h.ok) return;
+    healthInfo = h;
     brain = h.brain;
     var brains = h.brains || {};
     pills.forEach(function (pill) {
       var name = pill.getAttribute("data-brain");
-      if (brains[name] === false) { // an older server omits the map
+      if (name === "hermes") {
+        // Wiredness, routes, the honest ghost — all decided here. An
+        // older server without the hermes entry reads as not wired.
+        setupHermes(brains.hermes, pill);
+      } else if (brains[name] === false) { // an older server omits the map
         pill.disabled = true;
         pill.title = name === "ollama"
           ? "start ollama serve" : "claude CLI not found";
@@ -1191,12 +1358,16 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
         if (pill.disabled || name === brain) return;
         brain = name;
         markActive();
-        updateModelVisibility(); // the picker follows the ollama pill
+        updateModelVisibility(); // the pickers follow their pills
         add("system", "— switched to " + name
-          + (name === "ollama" ? " (offline)" : " (deep)") + " —");
+          + (name === "ollama" ? " (offline)"
+            : (name === "hermes" ? " (second-arrow profile)" : " (deep)"))
+          + " —");
       });
     });
     markActive();
+    updateModelVisibility();
+    renderMachinery(); // the begin-here card states the room's machinery
     panel.hidden = false;
     restoreHistory(); // the conversation continues across reloads
     loadModels(); // fill the local-model picker (served mode only)
@@ -1330,6 +1501,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       if (window.saBindRoom) window.saBindRoom(node); // wiring back
       if (!panel.hidden) mountArtifacts(node); // served: live tool views
     });
+    renderMachinery(); // a swapped-in home view gets its card refilled
     if (window.saShowView) window.saShowView(); // active room, nav marks
     return true;
   }
@@ -1399,7 +1571,8 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       body: JSON.stringify({
         messages: history, brain: brain,
         session: session, view: currentView(),
-        model: brain === "ollama" ? model : null
+        model: brain === "ollama" ? model
+          : (brain === "hermes" ? hermesRoute : null)
       })
     }).then(function (r) {
       var sid = r.headers.get("X-Session");
@@ -2375,10 +2548,14 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 </head>
 <body>
 <button type="button" id="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
-<button type="button" id="sidebar-reopen" title="show the sidebar" aria-label="show the sidebar">›</button>
+<button type="button" id="sidebar-reopen" title="show the sidebar" aria-label="show the sidebar">
+<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.2 12h15.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M9.8 6.8 4.2 12l5.6 5.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.6 12l3.1-2.9M14.6 12l3.1 2.9M17.4 12l3.1-2.9M17.4 12l3.1 2.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+</button>
 <div id="layout">
 <nav id="sidebar">
-<button type="button" id="sidebar-collapse" title="hide the sidebar" aria-label="hide the sidebar">‹</button>
+<button type="button" id="sidebar-collapse" title="hide the sidebar" aria-label="hide the sidebar">
+<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.2 12h15.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M9.8 6.8 4.2 12l5.6 5.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.6 12l3.1-2.9M14.6 12l3.1 2.9M17.4 12l3.1-2.9M17.4 12l3.1 2.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+</button>
 <h1>Second Arrow</h1>
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
 <a class="begin-link" href="#home">begin here</a>{curriculum_link}
@@ -2414,6 +2591,10 @@ Rebuild: <code>uv run tools/build_shelf.py</code>
 <p>And just tell the guide where you are — it remembers so you don't have to.</p>
 </div>
 {path_strip}{empty_note}
+<div id="machinery" hidden>
+<h3>the room's machinery</h3>
+<ul id="machinery-list"></ul>
+</div>
 </section>
 
 {curriculum_view}

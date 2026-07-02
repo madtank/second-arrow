@@ -1598,3 +1598,88 @@ def test_room_bindings_are_container_scoped_for_rebinding(tmp_path):
     # copies work without any rebinding at all.
     assert 'event.target.closest(".make-interactive")' in html
     assert 'event.target.closest("#talk-nav a")' in html
+
+
+# --- the hermes pill, route picker, popover, machinery card ----------------
+
+
+def test_hermes_pill_names_the_profile_not_a_model(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The pill is profile identity — never a model name.
+    assert re.search(
+        r'<button[^>]*data-brain="hermes"[^>]*>hermes · second-arrow</button>', html
+    )
+    # The route picker, the no-routes note, and the ⓘ all start hidden;
+    # /health decides what shows.
+    assert '<select id="hermes-route" hidden></select>' in html
+    assert '<span id="hermes-model-note" hidden></span>' in html
+    assert re.search(r'<button[^>]*id="hermes-info"[^>]*hidden', html)
+    assert "innerHTML" not in html
+
+
+def test_hermes_ghost_state_carries_the_exact_wiring_ritual(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The disabled ghost's tooltip names the three exact commands.
+    assert "hermes — not wired" in html
+    assert "uv run tools/wire_hermes_profile.py" in html
+    assert "hermes -p second-arrow gateway restart" in html
+    assert "uv run tools/hermes_probe.py" in html
+
+
+def test_hermes_popover_says_where_the_model_lives(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    assert 'id="hermes-popover"' in html
+    assert "~/.hermes/profiles/second-arrow/config.yaml" in html
+    assert "hermes -p second-arrow config set model.default" in html
+    assert "The shelf never edits Hermes config." in html
+    # Dismissible, inline.
+    assert 'id="hermes-popover-close"' in html
+
+
+def test_hermes_route_pick_rides_as_the_request_model(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The send body: ollama keeps its model, hermes sends the route alias.
+    assert 'brain === "hermes" ? hermesRoute : null' in html
+    # No routes configured: the picker collapses to a static note.
+    assert '"model: " + hermes.model' in html
+
+
+def test_begin_here_carries_the_machinery_card(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    home = re.search(r'<section class="card view" id="view-home">.*?</section>', html, re.S)
+    assert home, "expected the home view"
+    # The card starts hidden (static shelf: /health never answers) and is
+    # filled by JS with createElement + textContent only.
+    assert '<div id="machinery" hidden>' in home.group(0)
+    assert "the room's machinery" in home.group(0)
+    assert '<ul id="machinery-list"></ul>' in home.group(0)
+    # The filler states each brain, the aX presence, and the nightly prep.
+    assert "not yet scheduled" in html
+    assert "aX presence" in html
+    assert "not wired" in html
+
+
+def test_sidebar_collapser_is_a_fletched_arrow(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Both the collapse and reopen buttons carry the inline arrow SVG
+    # (stroke ink, no fills) — the reopen one is the same arrow mirrored
+    # in CSS. The old bare chevron glyphs are gone.
+    collapse = re.search(
+        r'<button[^>]*id="sidebar-collapse"[^>]*>\s*<svg.*?</svg>\s*</button>',
+        html,
+        re.S,
+    )
+    reopen = re.search(
+        r'<button[^>]*id="sidebar-reopen"[^>]*>\s*<svg.*?</svg>\s*</button>',
+        html,
+        re.S,
+    )
+    assert collapse and reopen
+    assert 'aria-label="hide the sidebar"' in collapse.group(0)
+    assert 'aria-label="show the sidebar"' in reopen.group(0)
+    for match in (collapse, reopen):
+        assert 'stroke="currentColor"' in match.group(0)
+        assert "<circle" not in match.group(0)
+    assert ">‹<" not in html and ">›<" not in html
+    assert "#sidebar-reopen svg { width: 1.35rem; height: 1.35rem;" in html
+    assert "transform: scaleX(-1);" in html
