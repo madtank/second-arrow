@@ -11,7 +11,12 @@ so importing it is fast, in-process, and fails loudly if it breaks.
 
 Routes:
     GET  /          the shelf page (library/shelf.html, freshly rebuilt)
-    GET  /health    {"ok": true, "brain": <default>, "brains": {name: available}}
+    GET  /health    {"ok": true, "brain": <default>, "brains": {...}, "ax":
+                    {"wired": bool}, "prep_cron": {...}|null}. brains maps
+                    claude/ollama to availability booleans and hermes to
+                    an object: {"wired", "reason", "profile", "model",
+                    "routes": [{"alias", "model"}...]} — the begin-here
+                    machinery card and the brain pills read this.
     POST /api/chat  {"messages": [...], "brain"?, "session"?, "view"?,
                     "model"?} -> streamed reply. "brain" is optional and
                     per-request (the panel's toggle); it falls back to the
@@ -86,7 +91,7 @@ still return JSON {"error": ...} with a 4xx/5xx status; failures MID-stream
 degrade gracefully: whatever text already arrived is kept and one plain
 error sentence is appended.
 
-Two brains:
+Three brains:
     --brain claude (default)  runs the authenticated Claude CLI headless in
         this repo (`--output-format stream-json --include-partial-messages`),
         so it inherits the CLAUDE.md guide persona and can read library/
@@ -111,6 +116,20 @@ Two brains:
         every call passed through validate_tool_call (argv only, no
         shell). Models without tool support degrade gracefully: they are
         told they have no hands and answer normally.
+    --brain hermes  talks to the second-arrow hermes-agent profile's
+        OpenAI-compatible gateway (http://127.0.0.1:8642). The gateway does
+        its own remembering: each episode maps to a gateway session via the
+        X-Hermes-Session-Id header (shelf-<episode>), so only the new user
+        message (+ the ambient-context prefix) is sent — body history is
+        ignored server-side by design. Behind a wired-gate (cached): the
+        gateway must be reachable AND expose toolsets ⊆ {mcp-second_arrow,
+        clarify} (the same wall as tools/hermes_probe.py, whose logic is
+        imported, not duplicated) — an over-provisioned gateway is refused.
+        Tool starts stream in as progress lines (hermes.tool.progress SSE
+        events); 429 (max_concurrent_runs) retries with backoff and turns
+        within one episode are serialized client-side. The shelf DISPLAYS
+        Hermes truth (profile, model.default, model_routes) and never
+        writes under ~/.hermes.
 
 Run with:
     uv run tools/serve_shelf.py                # then open http://localhost:8765
@@ -123,10 +142,12 @@ Tests (fastapi/uvicorn are lazy-imported, so plain pytest can load this file):
 import argparse
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -170,6 +191,23 @@ ARTIFACT_HEADERS = {
 }
 HISTORY_LIMIT = 50  # turns served back to the panel on page load
 OLLAMA_URL = "http://localhost:11434"
+
+# The hermes brain: the second-arrow profile's OpenAI-compatible gateway.
+# Env overrides exist for tests and odd setups; the defaults are the wired
+# profile. Everything here is read-only toward ~/.hermes — the shelf
+# displays Hermes truth, it never edits it.
+HERMES_URL = os.environ.get("HERMES_URL", "http://127.0.0.1:8642")
+HERMES_PROFILE = "second-arrow"
+HERMES_PROFILE_DIR = Path(
+    os.environ.get(
+        "HERMES_PROFILE_DIR", str(Path.home() / ".hermes" / "profiles" / "second-arrow")
+    )
+)
+HERMES_TIMEOUT = 5  # seconds per gateway GET (wired-gate, routes)
+HERMES_CHAT_TIMEOUT = 600  # seconds for a whole streamed hermes turn
+HERMES_STATUS_TTL = 10.0  # seconds the cached wired verdict is trusted
+HERMES_RETRIES_429 = 3  # attempts when the gateway is at max_concurrent_runs
+HERMES_BACKOFF = 1.0  # base seconds between 429 retries (1, 2, 4, ...)
 CLAUDE_TIMEOUT = 600  # seconds — tool turns (ingest, TTS) take a while
 TOOL_TIMEOUT = 600  # seconds per ollama tool subprocess
 MAX_TOOL_ROUNDS = 4  # ollama tool-calling rounds per chat turn
@@ -900,6 +938,11 @@ def pick_ollama_model(requested, state: dict, configured: str, installed: list[s
 BRAIN_HINTS = {
     "claude": "the claude CLI is not on PATH — install Claude Code",
     "ollama": "run `ollama serve` and try again",
+    "hermes": (
+        "hermes isn't wired yet — run: uv run tools/wire_hermes_profile.py, "
+        "restart the gateway (hermes -p second-arrow gateway restart), then "
+        "probe (uv run tools/hermes_probe.py)"
+    ),
 }
 
 
@@ -1836,7 +1879,304 @@ def load_talk_titles(library: Path) -> dict[str, str]:
     }
 
 
-# --- the two brains (both stream) ----------------------------------------
+# --- the hermes brain: wired-gate, truth-reading, SSE ---------------------
+#
+# The shelf never writes under ~/.hermes. It READS two local files
+# (config.yaml for model.default, .env for the API key fallback) and asks
+# the gateway the rest. The wired-gate reuses tools/hermes_probe.py's
+# parse/verdict logic — one wall, defined once.
+
+_HERMES_PROBE = None
+
+
+def load_hermes_probe():
+    """Import the sibling hermes_probe.py by path (the build_shelf pattern)."""
+    global _HERMES_PROBE
+    if _HERMES_PROBE is None:
+        path = Path(__file__).resolve().parent / "hermes_probe.py"
+        spec = importlib.util.spec_from_file_location("hermes_probe", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        _HERMES_PROBE = module
+    return _HERMES_PROBE
+
+
+def parse_env_api_key(text: str) -> str:
+    """API_SERVER_KEY out of a profile .env text ("" when absent)."""
+    match = re.search(r"^\s*API_SERVER_KEY\s*=\s*(\S+)\s*$", text or "", re.M)
+    return match.group(1) if match else ""
+
+
+def hermes_api_key(env_path: Path | None = None) -> str:
+    """The gateway bearer key: HERMES_API_KEY, else a READ-ONLY parse of
+    the profile .env. Never written, never logged, never served."""
+    key = os.environ.get("HERMES_API_KEY", "")
+    if key:
+        return key
+    path = env_path or (HERMES_PROFILE_DIR / ".env")
+    try:
+        return parse_env_api_key(path.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+
+
+def parse_model_default(text: str) -> str | None:
+    """model.default out of a profile config.yaml, without a YAML dep.
+
+    Handles the mapping form profiles use (model:\\n  default: X); a bare
+    `model: ""` scalar (fresh install sentinel) reads as None. The API
+    never exposes the real model name (only the profile name), so this
+    local read is how the shelf displays the truth (hermes-reference §3).
+    """
+    match = re.search(r"^model:[ \t]*\n((?:[ \t]+\S.*\n?)*)", text or "", re.M)
+    if not match:
+        return None
+    inner = re.search(r"^[ \t]+default:[ \t]*([^\n#]+)", match.group(1), re.M)
+    if not inner:
+        return None
+    value = inner.group(1).strip().strip("'\"").strip()
+    return value or None
+
+
+def hermes_default_model(config_path: Path | None = None) -> str | None:
+    path = config_path or (HERMES_PROFILE_DIR / "config.yaml")
+    try:
+        return parse_model_default(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def parse_hermes_routes(payload, profile: str | None = None) -> list[dict]:
+    """[{"alias", "model"}] from a GET /v1/models payload.
+
+    model_routes is source-verified but undocumented (hermes-reference
+    §3): each configured alias appears as an extra model entry whose
+    `root` carries the resolved model name — the one place the API leaks
+    a real model. Anything unexpected (no routes, an older gateway, a
+    shape drift) degrades to [] — this is display-only data.
+    """
+    profile = profile or HERMES_PROFILE
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    routes: list[dict] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        alias, root = item.get("id"), item.get("root")
+        if (
+            isinstance(alias, str)
+            and alias
+            and alias != profile
+            and isinstance(root, str)
+            and root
+        ):
+            routes.append({"alias": alias, "model": root})
+    return routes
+
+
+def _hermes_get(path: str, api_key: str, base: str | None = None):
+    request = urllib.request.Request(
+        (base or HERMES_URL).rstrip("/") + path,
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+    )
+    with urllib.request.urlopen(request, timeout=HERMES_TIMEOUT) as response:
+        return json.loads(response.read())
+
+
+def check_hermes_wired(
+    base: str | None = None, api_key: str | None = None
+) -> tuple[bool, str | None, list[dict]]:
+    """The wired-gate, live: (wired, reason, routes).
+
+    Same wall as tools/hermes_probe.py (whose parse_toolsets /
+    excess_toolsets this reuses): the gateway must answer /health AND
+    expose toolsets ⊆ {mcp-second_arrow, clarify}. An over-provisioned
+    gateway is NOT wired — that refusal is a safety wall, keep it in
+    code. Routes ride along from /v1/models once the gate is open
+    (display-only; absent routes are a fine answer).
+    """
+    probe = load_hermes_probe()
+    base = base or HERMES_URL
+    key = api_key if api_key is not None else hermes_api_key()
+    try:
+        _hermes_get("/health", key, base)
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False, f"gateway unreachable at {base}", []
+    try:
+        payload = _hermes_get("/v1/toolsets", key, base)
+    except urllib.error.HTTPError as error:
+        return (
+            False,
+            f"GET /v1/toolsets answered {error.code} — check HERMES_API_KEY "
+            "(or API_SERVER_KEY in the profile .env)",
+            [],
+        )
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False, "GET /v1/toolsets failed", []
+    excess = probe.excess_toolsets(
+        probe.parse_toolsets(payload), probe.ALLOWED_TOOLSETS
+    )
+    if excess:
+        return (
+            False,
+            "gateway over-provisioned — toolsets beyond "
+            f"{sorted(probe.ALLOWED_TOOLSETS)}: {excess}",
+            [],
+        )
+    try:
+        routes = parse_hermes_routes(_hermes_get("/v1/models", key, base))
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        routes = []
+    return True, None, routes
+
+
+_HERMES_STATUS_CACHE: dict = {"at": 0.0, "value": None}
+
+
+def hermes_status(force: bool = False, ttl: float = HERMES_STATUS_TTL) -> dict:
+    """The /health entry for the hermes brain (cached, re-checkable).
+
+    {"wired", "reason", "profile", "model", "routes"} — wired/reason from
+    the live gate, model from a read-only local config.yaml read, routes
+    from the gateway. Cached for ttl seconds so /health stays cheap;
+    force=True re-checks now.
+    """
+    now = time.monotonic()
+    cached = _HERMES_STATUS_CACHE["value"]
+    if not force and cached is not None and now - _HERMES_STATUS_CACHE["at"] < ttl:
+        return cached
+    wired, reason, routes = check_hermes_wired()
+    value = {
+        "wired": wired,
+        "reason": reason,
+        "profile": HERMES_PROFILE,
+        "model": hermes_default_model(),
+        "routes": routes,
+    }
+    _HERMES_STATUS_CACHE["at"] = now
+    _HERMES_STATUS_CACHE["value"] = value
+    return value
+
+
+def ax_wired(library: Path) -> bool:
+    """Is the aX presence set up? Presence of the token store only —
+    a boolean leaves this function, the tokens never do."""
+    return (library / ".ax" / "tokens.json").is_file()
+
+
+def load_prep_marker(library: Path) -> dict | None:
+    """library/.prep-cron.json ({installed_at, schedule}) or None.
+
+    Written by tools/hermes_cron_setup.py when the nightly-prep job is
+    installed on the gateway; read-only here, surfaced on /health for the
+    begin-here machinery card.
+    """
+    try:
+        data = json.loads((library / ".prep-cron.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        key: data[key] if isinstance(data.get(key), str) else None
+        for key in ("installed_at", "schedule")
+    }
+
+
+def iter_sse_events(lines):
+    """SSE frames out of an iterable of raw lines: {"event", "data"} each.
+
+    Handles bytes or str lines, multi-line data, and the optional
+    `event:` field (default "message"). Comments and ids are ignored;
+    a final unterminated frame still yields.
+    """
+    event, data_lines = None, []
+    for raw in lines:
+        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        line = line.rstrip("\r\n")
+        if not line:
+            if data_lines:
+                yield {"event": event or "message", "data": "\n".join(data_lines)}
+            event, data_lines = None, []
+        elif line.startswith("event:"):
+            event = line[len("event:") :].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:") :].lstrip())
+    if data_lines:
+        yield {"event": event or "message", "data": "\n".join(data_lines)}
+
+
+def parse_hermes_sse_event(event: dict) -> dict:
+    """{"text", "tool", "done"} out of one /v1/chat/completions SSE frame.
+
+    Standard chat.completion.chunk deltas carry text; the custom
+    hermes.tool.progress events carry a tool start (shape undocumented —
+    the obvious spellings are tolerated, anything else parses to nothing).
+    `data: [DONE]` ends the stream. Raises ValueError when the gateway
+    reports an error mid-stream (the OpenAI {"error": ...} shape).
+    """
+    parsed: dict = {"text": None, "tool": None, "done": False}
+    data = (event.get("data") or "").strip()
+    if not data:
+        return parsed
+    if data == "[DONE]":
+        parsed["done"] = True
+        return parsed
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return parsed  # one garbled frame shouldn't sink the reply
+    if not isinstance(payload, dict):
+        return parsed
+    if payload.get("error"):
+        error = payload["error"]
+        message = error.get("message") if isinstance(error, dict) else error
+        raise ValueError(str(message or "hermes reported an error"))
+    if (event.get("event") or "message") == "hermes.tool.progress":
+        for key in ("tool", "tool_name", "name"):
+            name = payload.get(key)
+            if isinstance(name, dict):
+                name = name.get("name")
+            if isinstance(name, str) and name:
+                parsed["tool"] = name
+                break
+        return parsed
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        delta = choices[0].get("delta") or {}
+        content = delta.get("content") if isinstance(delta, dict) else None
+        if isinstance(content, str) and content:
+            parsed["text"] = content
+        if choices[0].get("finish_reason"):
+            parsed["done"] = True
+    return parsed
+
+
+# The gateway's tools are OUR MCP tools, prefixed mcp_second_arrow_...;
+# reads are noise, writes and actions narrate (parity with the other
+# brains' progress lines).
+_HERMES_TOOL_PREFIX = "mcp_second_arrow_"
+_HERMES_QUIET_TOOLS = frozenset(
+    {"get_path", "get_library_index", "read_transcript", "read_notes", "clarify"}
+)
+_HERMES_TOOL_LINES = {
+    "update_path": "— updating the path… —",
+    "update_notes": "— taking notes… —",
+    "append_journal": "— writing the journal… —",
+}
+
+
+def hermes_tool_progress_line(name: str) -> str:
+    """tool_progress_line's hermes twin ("" = stay quiet)."""
+    short = name[len(_HERMES_TOOL_PREFIX) :] if name.startswith(_HERMES_TOOL_PREFIX) else name
+    if short in _HERMES_QUIET_TOOLS:
+        return ""
+    if short in _HERMES_TOOL_LINES:
+        return _HERMES_TOOL_LINES[short]
+    return TOOL_PROGRESS.get(short, "— working… —")
+
+
+# --- the three brains (all stream) ----------------------------------------
 
 STREAM_BROKE = "the stream broke off here. Ask again and I'll pick it back up."
 
@@ -2158,6 +2498,140 @@ def stream_ollama(
     return generate()
 
 
+# One turn at a time per episode: the gateway has no per-session locking
+# (hermes-reference §6), so the shelf serializes its own turns client-side.
+_HERMES_TURN_LOCKS: dict[str, threading.Lock] = {}
+_HERMES_TURN_LOCKS_GUARD = threading.Lock()
+
+
+def _hermes_turn_lock(session_id: str) -> threading.Lock:
+    with _HERMES_TURN_LOCKS_GUARD:
+        return _HERMES_TURN_LOCKS.setdefault(session_id, threading.Lock())
+
+
+def _open_hermes_chat(body: dict, api_key: str, session_id: str, base: str | None = None):
+    """POST the streamed turn; a 429 (max_concurrent_runs) retries with
+    backoff. Raises BrainError with a plain sentence on anything else."""
+    request = urllib.request.Request(
+        (base or HERMES_URL).rstrip("/") + "/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "X-Hermes-Session-Id": f"shelf-{session_id}",
+        },
+    )
+    delay = HERMES_BACKOFF
+    for attempt in range(HERMES_RETRIES_429):
+        try:
+            return urllib.request.urlopen(request, timeout=HERMES_CHAT_TIMEOUT)
+        except urllib.error.HTTPError as error:
+            if error.code == 429:
+                if attempt < HERMES_RETRIES_429 - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise BrainError(
+                    503,
+                    "The hermes gateway is at capacity (429) — "
+                    "try again in a moment.",
+                )
+            if error.code in (401, 403):
+                raise BrainError(
+                    503,
+                    "The hermes gateway refused the key — check HERMES_API_KEY "
+                    "(or API_SERVER_KEY in the profile .env).",
+                )
+            raise BrainError(503, f"The hermes gateway answered {error.code}.")
+        except (urllib.error.URLError, OSError, TimeoutError):
+            raise BrainError(
+                503,
+                "The hermes gateway stopped answering — "
+                "restart it (hermes -p second-arrow gateway restart) and try again.",
+            )
+
+
+def stream_hermes(
+    messages: list[dict],
+    session_id: str,
+    prefix: str = "",
+    model_alias: str | None = None,
+    base: str | None = None,
+    api_key: str | None = None,
+):
+    """Start a hermes turn; return a generator of reply-text chunks.
+
+    Continuity is the GATEWAY's: X-Hermes-Session-Id: shelf-<episode>
+    makes the profile load its own history for the thread and IGNORE any
+    body history (hermes-reference §8) — so ONLY the new user message
+    (plus the ambient-context prefix) is sent, never the transcript.
+    `model_alias` names a configured model_routes alias and rides as the
+    per-request `model` (omitted when none; unknown aliases fall through
+    to the profile default server-side, silently and by design). Text
+    deltas stream through the same chunked-text protocol as the other
+    brains; hermes.tool.progress events become "— doing a thing… —"
+    lines. Pre-flight failures raise BrainError; mid-stream failures keep
+    what arrived and append one apology.
+    """
+    key = api_key if api_key is not None else hermes_api_key()
+    if not key:
+        raise BrainError(
+            503,
+            "No Hermes API key — export HERMES_API_KEY or wire the profile "
+            "(uv run tools/wire_hermes_profile.py).",
+        )
+    content = messages[-1]["content"]
+    if prefix:
+        content = f"{prefix}\n\n{content}"
+    body: dict = {
+        "messages": [{"role": "user", "content": content}],
+        "stream": True,
+    }
+    if model_alias:
+        body["model"] = model_alias
+    lock = _hermes_turn_lock(session_id)
+    lock.acquire()  # released when the stream ends (generate's finally)
+    try:
+        response = _open_hermes_chat(body, key, session_id, base=base)
+    except BaseException:
+        lock.release()
+        raise
+
+    def generate():
+        emitted, finished = False, False
+        last_progress = None
+        try:
+            with response:
+                for event in iter_sse_events(response):
+                    try:
+                        parsed = parse_hermes_sse_event(event)
+                    except ValueError:
+                        break  # the gateway reported an error mid-stream
+                    if parsed["tool"]:
+                        progress = hermes_tool_progress_line(parsed["tool"])
+                        if progress and progress != last_progress:
+                            last_progress = progress
+                            emitted = True  # narrative counts as output
+                            yield "\n" + progress + "\n"
+                    if parsed["text"]:
+                        emitted = True
+                        yield parsed["text"]
+                    if parsed["done"]:
+                        finished = True
+                        break
+        except (urllib.error.URLError, OSError, TimeoutError):
+            finished = False
+        finally:
+            lock.release()
+        if not finished:
+            yield ("\n\n— " if emitted else "The guide is out of reach — ") + STREAM_BROKE
+        elif not emitted:
+            yield "The guide said nothing this time — try asking again."
+
+    return generate()
+
+
 # --- the server ---------------------------------------------------------
 
 
@@ -2206,7 +2680,19 @@ def create_app(brain: str, ollama_model: str):
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "brain": brain, "brains": probe_brains()}
+        # brains: claude/ollama stay booleans; hermes is an honest object
+        # (wired, reason, profile, model, routes). ax is presence only —
+        # a boolean, never the tokens. prep_cron is the nightly-prep
+        # marker (set by tools/hermes_cron_setup.py) or null.
+        brains = probe_brains()
+        brains["hermes"] = hermes_status()
+        return {
+            "ok": True,
+            "brain": brain,
+            "brains": brains,
+            "ax": {"wired": ax_wired(LIBRARY)},
+            "prep_cron": load_prep_marker(LIBRARY),
+        }
 
     @app.get("/api/sessions")
     def api_sessions() -> dict:
@@ -2311,7 +2797,13 @@ def create_app(brain: str, ollama_model: str):
             sid = resolve_session_with_rollover(
                 body.get("session"), current["sid"], SESSIONS_DIR
             )
-            chosen = resolve_brain(body.get("brain"), brain, probe_brains())
+            available = probe_brains()
+            if body.get("brain") == "hermes":
+                # The wired-gate (cached): an unreachable or
+                # over-provisioned gateway means NOT wired — refuse with
+                # the wiring ritual in the error, never talk to it.
+                available["hermes"] = hermes_status()["wired"]
+            chosen = resolve_brain(body.get("brain"), brain, available)
             model = ollama_model
             if chosen == "ollama":
                 requested_model = body.get("model")
@@ -2342,7 +2834,7 @@ def create_app(brain: str, ollama_model: str):
         meta = load_session_meta(session_meta_path(SESSIONS_DIR, sid))
         state = {"session_id": meta.get("claude_session_id")}
         try:
-            if chosen == "claude":
+            if chosen in ("claude", "hermes"):
                 # The prefix names the session (for update_session_summary),
                 # the open talk (ambient context), and whether that talk has
                 # been listened to the end (the bridge toward wrap-up).
@@ -2355,7 +2847,19 @@ def create_app(brain: str, ollama_model: str):
                     view, load_talk_titles(LIBRARY),
                     session_id=sid, listened_last=heard,
                 )
-                stream = stream_claude(messages, state, prefix=prefix)
+                if chosen == "claude":
+                    stream = stream_claude(messages, state, prefix=prefix)
+                else:
+                    # Per-request model = a route alias picked in the UI;
+                    # anything non-string is quietly no-alias (the gateway
+                    # ignores unknown values by design).
+                    alias = body.get("model")
+                    stream = stream_hermes(
+                        messages,
+                        sid,
+                        prefix=prefix,
+                        model_alias=alias if isinstance(alias, str) and alias else None,
+                    )
             else:
                 stream = stream_ollama(
                     messages, model, LIBRARY, view=view, session_id=sid
@@ -2387,7 +2891,9 @@ def create_app(brain: str, ollama_model: str):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve the study shelf with a guide chat.")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--brain", choices=("claude", "ollama"), default="claude")
+    parser.add_argument(
+        "--brain", choices=("claude", "ollama", "hermes"), default="claude"
+    )
     parser.add_argument("--ollama-model", default="qwen3")
     args = parser.parse_args()
 

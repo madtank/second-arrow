@@ -1771,3 +1771,406 @@ def test_api_version_reports_shelf_mtime(tmp_path):
     shelf.write_text("<html>")
     assert serve_shelf.shelf_mtime(tmp_path) == shelf.stat().st_mtime
 
+
+
+# --- the hermes brain -----------------------------------------------------
+#
+# Everything runs against tmp_path files and a fake gateway on an
+# EPHEMERAL scratch port (never 8765, never 8642) — the real ~/.hermes is
+# never read: every call passes explicit paths/keys or monkeypatches the
+# module constants.
+
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+FAKE_SSE = (
+    "event: hermes.tool.progress\n"
+    'data: {"tool": "mcp_second_arrow_rebuild_shelf"}\n'
+    "\n"
+    'data: {"choices": [{"delta": {"content": "Hello "}}]}\n'
+    "\n"
+    'data: {"choices": [{"delta": {"content": "friend."}}]}\n'
+    "\n"
+    "data: [DONE]\n"
+    "\n"
+)
+
+
+def _start_fake_gateway(config):
+    """A tiny scriptable hermes gateway: (server, base_url, captured).
+
+    config keys: toolsets (payload), toolsets_status, models (payload),
+    sse (str body), chat_statuses (list, consumed one per POST until one
+    remains). captured["chat"] records each POST's parsed body + headers.
+    """
+    captured = {"chat": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # noqa: N802 — quiet test server
+            pass
+
+        def _json(self, obj, status=200):
+            data = json.dumps(obj).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):  # noqa: N802
+            if self.path == "/health":
+                self._json({"status": "ok"})
+            elif self.path == "/v1/toolsets":
+                status = config.get("toolsets_status", 200)
+                if status != 200:
+                    self.send_error(status)
+                    return
+                self._json(config.get("toolsets", []))
+            elif self.path == "/v1/models":
+                self._json(config.get("models", {"data": []}))
+            else:
+                self.send_error(404)
+
+        def do_POST(self):  # noqa: N802
+            if self.path != "/v1/chat/completions":
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length)) if length else {}
+            captured["chat"].append({"body": body, "headers": dict(self.headers)})
+            statuses = config.setdefault("chat_statuses", [200])
+            status = statuses.pop(0) if len(statuses) > 1 else statuses[0]
+            if status != 200:
+                self.send_error(status)
+                return
+            payload = config.get("sse", FAKE_SSE).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}", captured
+
+
+@pytest.fixture
+def fake_gateway():
+    servers = []
+
+    def start(**config):
+        server, base, captured = _start_fake_gateway(config)
+        servers.append(server)
+        return base, captured
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def test_parse_env_api_key_reads_only_the_key_line():
+    text = "# comment\nAPI_SERVER_ENABLED=true\nAPI_SERVER_KEY=s3cret\nAPI_SERVER_PORT=8642\n"
+    assert serve_shelf.parse_env_api_key(text) == "s3cret"
+    assert serve_shelf.parse_env_api_key("API_SERVER_ENABLED=true\n") == ""
+    assert serve_shelf.parse_env_api_key("") == ""
+
+
+def test_hermes_api_key_env_wins_then_profile_env_file(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("API_SERVER_KEY=from-file\n")
+    monkeypatch.setenv("HERMES_API_KEY", "from-env")
+    assert serve_shelf.hermes_api_key(env_path=env_file) == "from-env"
+    monkeypatch.delenv("HERMES_API_KEY")
+    assert serve_shelf.hermes_api_key(env_path=env_file) == "from-file"
+    # A missing file is "" — never an exception, never a write.
+    assert serve_shelf.hermes_api_key(env_path=tmp_path / "absent.env") == ""
+
+
+def test_parse_model_default_shapes():
+    mapping = "plugins: {}\nmodel:\n  default: gpt-5.5\n  provider: openai-codex\n"
+    assert serve_shelf.parse_model_default(mapping) == "gpt-5.5"
+    quoted = 'model:\n  default: "gemma4:12b"\n'
+    assert serve_shelf.parse_model_default(quoted) == "gemma4:12b"
+    # The fresh-install sentinel and plain absence both read as unset.
+    assert serve_shelf.parse_model_default('model: ""\n') is None
+    assert serve_shelf.parse_model_default("agent:\n  x: 1\n") is None
+    assert serve_shelf.parse_model_default("") is None
+
+
+def test_hermes_default_model_reads_the_given_path_only(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("model:\n  default: gpt-5.5\n  provider: openai-codex\n")
+    assert serve_shelf.hermes_default_model(config_path=config) == "gpt-5.5"
+    assert serve_shelf.hermes_default_model(config_path=tmp_path / "nope.yaml") is None
+
+
+def test_parse_hermes_routes_reads_root_and_degrades():
+    payload = {
+        "data": [
+            {"id": "second-arrow", "object": "model"},  # the profile entry
+            {"id": "deep", "root": "gpt-5.5"},
+            {"id": "local", "root": "gemma4:12b"},
+            {"id": "junk"},  # no root: not a route
+            "garbage",
+        ]
+    }
+    assert serve_shelf.parse_hermes_routes(payload, profile="second-arrow") == [
+        {"alias": "deep", "model": "gpt-5.5"},
+        {"alias": "local", "model": "gemma4:12b"},
+    ]
+    # No routes configured / older gateway / alien shapes: empty, quietly.
+    assert serve_shelf.parse_hermes_routes({"data": [{"id": "second-arrow"}]}) == []
+    assert serve_shelf.parse_hermes_routes({"unexpected": 1}) == []
+    assert serve_shelf.parse_hermes_routes(None) == []
+
+
+def test_iter_sse_events_frames_and_unterminated_tail():
+    lines = [
+        b"event: hermes.tool.progress",
+        b'data: {"tool": "x"}',
+        b"",
+        b"data: part one",
+        b"data: part two",
+        b"",
+        b"data: [DONE]",  # no trailing blank line: still yielded
+    ]
+    events = list(serve_shelf.iter_sse_events(lines))
+    assert events == [
+        {"event": "hermes.tool.progress", "data": '{"tool": "x"}'},
+        {"event": "message", "data": "part one\npart two"},
+        {"event": "message", "data": "[DONE]"},
+    ]
+
+
+def test_parse_hermes_sse_event_text_tool_done_and_errors():
+    parse = serve_shelf.parse_hermes_sse_event
+    text = parse(
+        {"event": "message", "data": '{"choices": [{"delta": {"content": "hi"}}]}'}
+    )
+    assert text == {"text": "hi", "tool": None, "done": False}
+    done = parse({"event": "message", "data": "[DONE]"})
+    assert done["done"] is True and done["text"] is None
+    finish = parse(
+        {"event": "message", "data": '{"choices": [{"delta": {}, "finish_reason": "stop"}]}'}
+    )
+    assert finish["done"] is True
+    # The custom tool event, in its tolerated spellings.
+    for spelling in (
+        '{"tool": "mcp_second_arrow_speak"}',
+        '{"tool_name": "mcp_second_arrow_speak"}',
+        '{"name": "mcp_second_arrow_speak"}',
+        '{"tool": {"name": "mcp_second_arrow_speak"}}',
+    ):
+        event = parse({"event": "hermes.tool.progress", "data": spelling})
+        assert event["tool"] == "mcp_second_arrow_speak", spelling
+    # Unknown shapes parse to nothing; garbled JSON is skipped, not fatal.
+    assert parse({"event": "hermes.tool.progress", "data": '{"x": 1}'})["tool"] is None
+    assert parse({"event": "message", "data": "{not json"}) == {
+        "text": None,
+        "tool": None,
+        "done": False,
+    }
+    with pytest.raises(ValueError):
+        parse({"event": "message", "data": '{"error": {"message": "boom"}}'})
+
+
+def test_hermes_tool_progress_line_maps_our_mcp_tools():
+    line = serve_shelf.hermes_tool_progress_line
+    assert line("mcp_second_arrow_fetch_talk") == "— fetching the talk… —"
+    assert line("mcp_second_arrow_rebuild_shelf") == "— rebuilding the shelf… —"
+    assert line("mcp_second_arrow_update_path") == "— updating the path… —"
+    assert line("mcp_second_arrow_update_notes") == "— taking notes… —"
+    assert line("mcp_second_arrow_append_journal") == "— writing the journal… —"
+    # Reads are noise, not narrative — and clarify speaks for itself.
+    assert line("mcp_second_arrow_read_transcript") == ""
+    assert line("mcp_second_arrow_get_library_index") == ""
+    assert line("clarify") == ""
+    # Unknown tools degrade to the generic line.
+    assert line("mcp_second_arrow_mystery") == "— working… —"
+
+
+def test_check_hermes_wired_gate_open_with_routes(fake_gateway):
+    base, _ = fake_gateway(
+        toolsets=[{"name": "mcp-second_arrow"}, {"name": "clarify"}],
+        models={"data": [{"id": "second-arrow"}, {"id": "deep", "root": "gpt-5.5"}]},
+    )
+    wired, reason, routes = serve_shelf.check_hermes_wired(base=base, api_key="k")
+    assert wired is True and reason is None
+    assert routes == [{"alias": "deep", "model": "gpt-5.5"}]
+
+
+def test_check_hermes_wired_refuses_an_over_provisioned_gateway(fake_gateway):
+    base, _ = fake_gateway(
+        toolsets=[{"name": "mcp-second_arrow"}, {"name": "terminal"}, {"name": "web"}]
+    )
+    wired, reason, routes = serve_shelf.check_hermes_wired(base=base, api_key="k")
+    assert wired is False
+    assert "over-provisioned" in reason
+    assert "terminal" in reason and "web" in reason
+    assert routes == []
+
+
+def test_check_hermes_wired_unreachable_and_bad_key(fake_gateway):
+    # Unreachable: a port nothing listens on (bound then closed).
+    import socket
+
+    probe_socket = socket.socket()
+    probe_socket.bind(("127.0.0.1", 0))
+    dead_port = probe_socket.getsockname()[1]
+    probe_socket.close()
+    wired, reason, _ = serve_shelf.check_hermes_wired(
+        base=f"http://127.0.0.1:{dead_port}", api_key="k"
+    )
+    assert wired is False and "unreachable" in reason
+    # A refused key names the fix, not just the failure.
+    base, _ = fake_gateway(toolsets_status=401)
+    wired, reason, _ = serve_shelf.check_hermes_wired(base=base, api_key="bad")
+    assert wired is False and "HERMES_API_KEY" in reason
+
+
+def test_hermes_status_shape_and_cache(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_check(base=None, api_key=None):
+        calls["n"] += 1
+        return True, None, [{"alias": "deep", "model": "gpt-5.5"}]
+
+    monkeypatch.setattr(serve_shelf, "check_hermes_wired", fake_check)
+    monkeypatch.setattr(serve_shelf, "hermes_default_model", lambda config_path=None: "gpt-5.5")
+    monkeypatch.setitem(serve_shelf._HERMES_STATUS_CACHE, "value", None)
+    status = serve_shelf.hermes_status(force=True)
+    assert status == {
+        "wired": True,
+        "reason": None,
+        "profile": "second-arrow",
+        "model": "gpt-5.5",
+        "routes": [{"alias": "deep", "model": "gpt-5.5"}],
+    }
+    # Within the TTL the verdict is cached; force re-checks now.
+    assert serve_shelf.hermes_status() is status
+    assert calls["n"] == 1
+    serve_shelf.hermes_status(force=True)
+    assert calls["n"] == 2
+
+
+def test_resolve_brain_hermes_unavailable_names_the_ritual():
+    available = {"claude": True, "ollama": True, "hermes": False}
+    with pytest.raises(serve_shelf.BrainError) as error:
+        serve_shelf.resolve_brain("hermes", "claude", available)
+    assert error.value.status == 503
+    message = error.value.message
+    assert "wire_hermes_profile.py" in message
+    assert "gateway restart" in message
+    assert "hermes_probe.py" in message
+
+
+def test_stream_hermes_sends_only_the_new_message_with_session_header(fake_gateway):
+    base, captured = fake_gateway()
+    messages = [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "what did he say about the eggs?"},
+    ]
+    stream = serve_shelf.stream_hermes(
+        messages, "ep-1", prefix="[session: ep-1]", base=base, api_key="k"
+    )
+    reply = "".join(stream)
+    # The narrative line and the streamed text, through our chunked protocol.
+    assert "— rebuilding the shelf… —" in reply
+    assert "Hello friend." in reply.replace("\n", "")
+    request = captured["chat"][0]
+    # Continuity is the gateway's: ONLY the new message travels (body
+    # history is ignored server-side when the session header is present).
+    assert request["body"]["messages"] == [
+        {"role": "user", "content": "[session: ep-1]\n\nwhat did he say about the eggs?"}
+    ]
+    assert request["body"]["stream"] is True
+    assert "model" not in request["body"]  # no alias picked: omitted
+    assert request["headers"].get("X-Hermes-Session-Id") == "shelf-ep-1"
+    assert request["headers"].get("Authorization") == "Bearer k"
+
+
+def test_stream_hermes_carries_the_route_alias_as_model(fake_gateway):
+    base, captured = fake_gateway()
+    stream = serve_shelf.stream_hermes(
+        [{"role": "user", "content": "hi"}],
+        "ep-2",
+        model_alias="deep",
+        base=base,
+        api_key="k",
+    )
+    "".join(stream)
+    assert captured["chat"][0]["body"]["model"] == "deep"
+
+
+def test_stream_hermes_retries_a_429_with_backoff(fake_gateway, monkeypatch):
+    monkeypatch.setattr(serve_shelf, "HERMES_BACKOFF", 0.01)
+    base, captured = fake_gateway(chat_statuses=[429, 429, 200])
+    stream = serve_shelf.stream_hermes(
+        [{"role": "user", "content": "hi"}], "ep-3", base=base, api_key="k"
+    )
+    reply = "".join(stream)
+    assert "Hello" in reply
+    assert len(captured["chat"]) == 3  # two 429s, then the served turn
+
+
+def test_stream_hermes_gives_up_after_persistent_429(fake_gateway, monkeypatch):
+    monkeypatch.setattr(serve_shelf, "HERMES_BACKOFF", 0.01)
+    base, _ = fake_gateway(chat_statuses=[429])
+    with pytest.raises(serve_shelf.BrainError) as error:
+        serve_shelf.stream_hermes(
+            [{"role": "user", "content": "hi"}], "ep-4", base=base, api_key="k"
+        )
+    assert error.value.status == 503
+    assert "capacity" in error.value.message
+
+
+def test_stream_hermes_error_stream_keeps_calm_and_apologises(fake_gateway):
+    base, _ = fake_gateway(
+        sse='data: {"error": {"message": "boom"}}\n\n'
+    )
+    stream = serve_shelf.stream_hermes(
+        [{"role": "user", "content": "hi"}], "ep-5", base=base, api_key="k"
+    )
+    reply = "".join(stream)
+    assert "out of reach" in reply
+
+
+def test_stream_hermes_without_a_key_is_a_clean_503(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+    monkeypatch.setattr(serve_shelf, "HERMES_PROFILE_DIR", tmp_path)  # no .env
+    with pytest.raises(serve_shelf.BrainError) as error:
+        serve_shelf.stream_hermes([{"role": "user", "content": "hi"}], "ep-6")
+    assert error.value.status == 503
+    assert "HERMES_API_KEY" in error.value.message
+
+
+def test_stream_hermes_serializes_turns_within_one_episode():
+    # The per-episode lock is the serialization: same id, same lock.
+    lock_a = serve_shelf._hermes_turn_lock("ep-same")
+    lock_b = serve_shelf._hermes_turn_lock("ep-same")
+    lock_c = serve_shelf._hermes_turn_lock("ep-other")
+    assert lock_a is lock_b
+    assert lock_a is not lock_c
+
+
+def test_ax_wired_is_presence_only(tmp_path):
+    assert serve_shelf.ax_wired(tmp_path) is False
+    (tmp_path / ".ax").mkdir()
+    (tmp_path / ".ax" / "tokens.json").write_text('{"token": "SECRET"}')
+    assert serve_shelf.ax_wired(tmp_path) is True  # a boolean, never the tokens
+
+
+def test_load_prep_marker_reads_the_cron_setup_marker(tmp_path):
+    assert serve_shelf.load_prep_marker(tmp_path) is None
+    (tmp_path / ".prep-cron.json").write_text(
+        '{"installed_at": "2026-07-02T03:00:00+00:00", "schedule": "23 3 * * *"}'
+    )
+    assert serve_shelf.load_prep_marker(tmp_path) == {
+        "installed_at": "2026-07-02T03:00:00+00:00",
+        "schedule": "23 3 * * *",
+    }
+    (tmp_path / ".prep-cron.json").write_text("not json")
+    assert serve_shelf.load_prep_marker(tmp_path) is None
