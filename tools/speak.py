@@ -9,16 +9,29 @@ Engines:
 - kokoro (default): Kokoro-82M via mlx-audio. Natural voice, Apple Silicon.
 - say: macOS built-in TTS. Robotic but dependency-free fallback.
 
+The timing map: the kokoro engine renders per-chunk wav files and
+concatenates them, so it KNOWS where every chunk starts — measured from
+the wav sample counts before encoding, never guessed. Whenever output is
+produced via that chunk concat it also writes `<output-stem>.segments.json`
+next to the audio ({"segments": [{"start": <seconds>, "text": "<chunk>"}]});
+a single-chunk input honestly yields one segment at 0.0. The say engine
+renders in one piece and has no chunk timings: it writes NO map and
+removes a stale sibling map so the map never outlives the audio it
+described. The shelf uses the map to make a spoken reading's text
+click-to-seek.
+
 Run with:
     uv run tools/speak.py --file library/<slug>/primer.md -o library/<slug>/primer.mp3
     uv run tools/speak.py --text "Hello" -o /tmp/hello.mp3 --engine say
 """
 
 import argparse
+import json
 import re
 import subprocess
 import sys
 import tempfile
+import wave
 from pathlib import Path
 
 KOKORO_MODEL = "prince-canuma/Kokoro-82M"
@@ -69,6 +82,42 @@ def chunk_text(text: str, max_chars: int = 400) -> list[str]:
     return chunks
 
 
+def segments_from_durations(chunks: list[str], durations: list[float]) -> list[dict]:
+    """The timing map's offset assembly: chunk i starts where chunks
+    0..i-1 end. Pure — durations are measured elsewhere (wav sample
+    counts), one total per chunk, and must pair up with the chunks.
+    """
+    if len(chunks) != len(durations):
+        raise ValueError(
+            f"{len(chunks)} chunks but {len(durations)} durations — "
+            "every chunk needs its measured length"
+        )
+    segments: list[dict] = []
+    offset = 0.0
+    for chunk, duration in zip(chunks, durations):
+        segments.append({"start": round(offset, 3), "text": chunk})
+        offset += duration
+    return segments
+
+
+def wav_duration(path: Path) -> float:
+    """Exact seconds from a wav's own sample count — the pre-encode
+    truth, so offsets never drift with the mp3 encoder."""
+    with wave.open(str(path), "rb") as handle:
+        return handle.getnframes() / handle.getframerate()
+
+
+def write_segments_json(out_path: Path, segments: list[dict]) -> Path:
+    """Write the timing map next to the audio: reading.mp3 →
+    reading.segments.json, {"segments": [{"start", "text"}]}."""
+    path = out_path.with_suffix(".segments.json")
+    path.write_text(
+        json.dumps({"segments": segments}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def say_commands(text: str, out_path: Path) -> list[list[str]]:
     aiff = str(out_path.with_suffix(".aiff"))
     return [
@@ -81,6 +130,10 @@ def speak_with_say(text: str, out_path: Path) -> None:
     for cmd in say_commands(text, out_path):
         subprocess.run(cmd, check=True)
     out_path.with_suffix(".aiff").unlink(missing_ok=True)
+    # Honesty over convenience: say renders in one piece, so there are no
+    # chunk timings to map — and a stale map from an earlier kokoro run
+    # must never outlive the audio it described.
+    out_path.with_suffix(".segments.json").unlink(missing_ok=True)
 
 
 def _patch_kokoro_sinegen() -> None:
@@ -126,9 +179,11 @@ def speak_with_kokoro(text: str, out_path: Path, *, voice: str, speed: float) ->
     # error lines is what keeps a mid-chunk crash from becoming silently
     # truncated audio.
     model = load_model(model_path=KOKORO_MODEL)
+    chunks = chunk_text(text)
     with tempfile.TemporaryDirectory() as tmp:
         wav_files: list[Path] = []
-        for i, chunk in enumerate(chunk_text(text)):
+        chunk_durations: list[float] = []
+        for i, chunk in enumerate(chunks):
             prefix = f"chunk{i:03d}"
             log = io.StringIO()
             with redirect_stdout(log):
@@ -153,6 +208,9 @@ def speak_with_kokoro(text: str, out_path: Path, *, voice: str, speed: float) ->
             if not chunk_wavs:
                 raise RuntimeError(f"Kokoro produced no audio for chunk {i}")
             wav_files.extend(chunk_wavs)
+            # A chunk's length is the measured sum of its internal wavs —
+            # sample counts, the pre-encode truth (see the module docstring).
+            chunk_durations.append(sum(wav_duration(p) for p in chunk_wavs))
         list_file = Path(tmp) / "concat.txt"
         list_file.write_text("".join(f"file '{p}'\n" for p in wav_files), encoding="utf-8")
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +222,10 @@ def speak_with_kokoro(text: str, out_path: Path, *, voice: str, speed: float) ->
             ],
             check=True,
         )
+    # The timing map rides along whenever the chunk concat produced the
+    # audio — always, including the honest single-chunk case ([0.0, text]).
+    segments = segments_from_durations(chunks, chunk_durations)
+    print(f"Wrote {write_segments_json(out_path, segments)} ({len(segments)} segments)")
 
 
 def parse_args() -> argparse.Namespace:
