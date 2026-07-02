@@ -98,80 +98,14 @@ def test_md_to_html_escapes_script():
     assert "&amp; goodbye" in html
 
 
-def _make_library(tmp_path):
-    library = tmp_path / "library"
-    library.mkdir()
-    (library / "INDEX.md").write_text(
-        """# Library Index
-
-## quiet-mind
-- **Title:** Quiet Mind & <Friends>
-- **Teacher:** Ajahn Test
-- **Source:** https://example.org/quiet-mind.html
-- **Themes:** calm, anger
-- **Path:** library/quiet-mind/
-
-## far-talk
-- **Title:** Far Talk
-- **Teacher:** Ajahn Test
-- **Source:** https://example.org/far-talk.html
-- **Themes:** patience
-- **Path:** library/far-talk/
-
-## demon-story
-- **Title:** Demon Story
-- **Teacher:** Ajahn Brahm
-- **Source:** https://www.youtube.com/watch?v=me7Wm5LOpx0
-- **Duration:** 56:04
-- **Themes:** anger, stories
-- **Path:** library/demon-story/
-
-## bare-yt
-- **Title:** Bare YT
-- **Teacher:** Ajahn Test
-- **Source:** https://youtu.be/abcdefUVWXY
-- **Themes:** anger
-- **Path:** library/bare-yt/
-"""
-    )
-    quiet = library / "quiet-mind"
-    quiet.mkdir()
-    (quiet / "primer.mp3").write_bytes(b"\x00")
-    (quiet / "audio.mp3").write_bytes(b"\x00")
-    (quiet / "notes.md").write_text("# Notes\n\nWhat landed: **kindness** wins.\n")
-    (quiet / "artifacts").mkdir()
-    (quiet / "artifacts" / "breath-timer.html").write_text(
-        "<!DOCTYPE html><html><body><h1>Breathe</h1></body></html>"
-    )
-    # A whisper-shaped transcript.json (extra keys ride along).
-    (quiet / "transcript.json").write_text(
-        json.dumps(
-            {
-                "text": "ignored",
-                "segments": [
-                    {"id": 0, "seek": 0, "start": 0.0, "end": 4.5,
-                     "text": " Quiet begins & <opens>. ", "tokens": [1]},
-                    {"id": 1, "start": 4.5, "end": 9.0, "text": "It settles."},
-                ],
-            }
-        )
-    )
-    far = library / "far-talk"
-    far.mkdir()
-    (far / "transcript.md").write_text("# Far Talk\n\nWords.\n")
-    (library / ".listening.jsonl").write_text(
-        '{"slug": "quiet-mind", "at": "2026-06-30T10:00:00+00:00"}\n'
-        "{torn line\n"
-        '{"slug": "quiet-mind", "at": "2026-07-02T06:00:00+00:00"}\n'
-    )
-    demon = library / "demon-story"
-    demon.mkdir()
-    (demon / "thumbnail.jpg").write_bytes(b"\xff\xd8\xff")
-    # A captions-shaped transcript.json (bare start/end/text).
-    (demon / "transcript.json").write_text(
-        json.dumps({"segments": [{"start": 12.0, "end": 15.5, "text": "the demon arrives"}]})
-    )
-    return library
+# The library builder now lives in shelf_fixtures.py, shared with the
+# browser-level e2e suite (tools/tests/e2e/) — one fixture shape, reused.
+FIXTURES_PATH = Path(__file__).resolve().parent / "shelf_fixtures.py"
+_FIX_SPEC = importlib.util.spec_from_file_location("shelf_fixtures", FIXTURES_PATH)
+shelf_fixtures = importlib.util.module_from_spec(_FIX_SPEC)
+assert _FIX_SPEC and _FIX_SPEC.loader
+_FIX_SPEC.loader.exec_module(shelf_fixtures)
+_make_library = shelf_fixtures.make_library
 
 
 def test_render_shelf_end_to_end(tmp_path):

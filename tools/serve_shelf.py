@@ -155,7 +155,16 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# SECOND_ARROW_ROOT (env) points the whole read/write surface at another
+# study-space copy — the same override tools/mcp_second_arrow.py honors.
+# The e2e suite (tools/tests/e2e/) loads this module fresh with it set so
+# a scratch library serves; unset means this repo, exactly as before.
+_ROOT_OVERRIDE = os.environ.get("SECOND_ARROW_ROOT")
+REPO_ROOT = (
+    Path(_ROOT_OVERRIDE).resolve()
+    if _ROOT_OVERRIDE
+    else Path(__file__).resolve().parents[1]
+)
 LIBRARY = REPO_ROOT / "library"
 CHAT_DIR = LIBRARY / ".chat"  # private: covered by the library/ gitignore
 HISTORY_PATH = CHAT_DIR / "history.jsonl"  # pre-sessions thread (migrated)
@@ -190,7 +199,10 @@ ARTIFACT_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 HISTORY_LIMIT = 50  # turns served back to the panel on page load
-OLLAMA_URL = "http://localhost:11434"
+# OLLAMA_URL (env) exists for the same reason HERMES_URL's override does:
+# tests point it at a fake gateway on an ephemeral port. Default: the
+# standard local Ollama.
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
 # The hermes brain: the second-arrow profile's OpenAI-compatible gateway.
 # Env overrides exist for tests and odd setups; the defaults are the wired

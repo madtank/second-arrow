@@ -2237,3 +2237,46 @@ def test_load_prep_marker_reads_the_cron_setup_marker(tmp_path):
     }
     (tmp_path / ".prep-cron.json").write_text("not json")
     assert serve_shelf.load_prep_marker(tmp_path) is None
+
+
+# --- env overrides: the whole surface can point at a scratch copy ----------
+
+
+def _load_fresh_module(monkeypatch, **env):
+    """A fresh serve_shelf instance with env set BEFORE the module loads —
+    the constants under test are read at import time."""
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    spec = importlib.util.spec_from_file_location("serve_shelf_fresh", MODULE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_second_arrow_root_env_points_every_path_at_the_override(
+    tmp_path, monkeypatch
+):
+    module = _load_fresh_module(monkeypatch, SECOND_ARROW_ROOT=str(tmp_path))
+    root = tmp_path.resolve()
+    assert module.REPO_ROOT == root
+    assert module.LIBRARY == root / "library"
+    assert module.CHAT_DIR == root / "library" / ".chat"
+    assert module.SESSIONS_DIR == root / "library" / ".chat" / "sessions"
+    assert module.STATE_PATH == root / "library" / ".chat" / "state.json"
+    assert module.LISTENING_PATH == root / "library" / ".listening.jsonl"
+
+
+def test_without_the_root_env_the_repo_itself_is_the_root(monkeypatch):
+    monkeypatch.delenv("SECOND_ARROW_ROOT", raising=False)
+    module = _load_fresh_module(monkeypatch)
+    assert module.REPO_ROOT == MODULE_PATH.parents[1]
+    assert module.LIBRARY == MODULE_PATH.parents[1] / "library"
+
+
+def test_ollama_url_env_override_and_default(monkeypatch):
+    module = _load_fresh_module(monkeypatch, OLLAMA_URL="http://127.0.0.1:1")
+    assert module.OLLAMA_URL == "http://127.0.0.1:1"
+    monkeypatch.delenv("OLLAMA_URL")
+    module = _load_fresh_module(monkeypatch)
+    assert module.OLLAMA_URL == "http://localhost:11434"
