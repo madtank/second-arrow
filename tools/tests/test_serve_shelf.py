@@ -442,6 +442,53 @@ def test_resolve_brain_default_skips_the_availability_gate():
     assert serve_shelf.resolve_brain(None, "ollama", available) == "ollama"
 
 
+# --- resolve_default_brain (hermes is the home harness) ---------------------
+
+
+def test_resolve_default_brain_seats_hermes_when_wired():
+    # The home harness takes the default seat whenever the gate is open.
+    assert serve_shelf.resolve_default_brain("claude", True) == "hermes"
+    assert serve_shelf.resolve_default_brain("hermes", True) == "hermes"
+
+
+def test_resolve_default_brain_unwired_falls_back_to_claude():
+    assert serve_shelf.resolve_default_brain("claude", False) == "claude"
+    assert serve_shelf.resolve_default_brain("hermes", False) == "claude"
+
+
+def test_resolve_default_brain_an_explicit_ollama_choice_stands():
+    # --brain ollama is a deliberate local-only pick, never overridden.
+    assert serve_shelf.resolve_default_brain("ollama", True) == "ollama"
+    assert serve_shelf.resolve_default_brain("ollama", False) == "ollama"
+
+
+def test_health_payload_shape_carries_default_brain():
+    brains = {
+        "claude": True,
+        "ollama": False,
+        "hermes": {"wired": True, "model": "gpt-5.5", "routes": []},
+    }
+    payload = serve_shelf.health_payload("claude", brains, ax_ok=False, prep=None)
+    assert payload["ok"] is True
+    assert payload["brain"] == "claude"  # the configured default, unchanged
+    assert payload["default_brain"] == "hermes"  # the request-time truth
+    assert payload["brains"] is brains
+    assert payload["ax"] == {"wired": False}
+    assert payload["prep_cron"] is None
+
+
+def test_health_payload_default_brain_tracks_the_wired_gate():
+    unwired = {"claude": True, "ollama": True, "hermes": {"wired": False}}
+    payload = serve_shelf.health_payload(
+        "claude", unwired, ax_ok=True, prep={"installed_at": "x", "schedule": None}
+    )
+    assert payload["default_brain"] == "claude"
+    assert payload["ax"] == {"wired": True}
+    # A degenerate hermes entry (older probe shape) reads as not wired.
+    odd = {"claude": True, "ollama": True, "hermes": False}
+    assert serve_shelf.health_payload("claude", odd, False, None)["default_brain"] == "claude"
+
+
 # --- validate_tool_call (the ollama agency boundary) ------------------------
 
 
@@ -1863,9 +1910,11 @@ def _start_fake_gateway(config):
 
     config keys: toolsets (payload), toolsets_status, models (payload),
     sse (str body), chat_statuses (list, consumed one per POST until one
-    remains). captured["chat"] records each POST's parsed body + headers.
+    remains), jobs (the /api/jobs payload). captured["chat"] records each
+    chat POST's parsed body + headers; captured["runs"]/"patches" record
+    the narrow jobs-API writes the prep proxy is allowed to make.
     """
-    captured = {"chat": []}
+    captured = {"chat": [], "runs": [], "patches": []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # noqa: N802 — quiet test server
@@ -1890,10 +1939,16 @@ def _start_fake_gateway(config):
                 self._json(config.get("toolsets", []))
             elif self.path == "/v1/models":
                 self._json(config.get("models", {"data": []}))
+            elif self.path == "/api/jobs":
+                self._json(config.get("jobs", []))
             else:
                 self.send_error(404)
 
         def do_POST(self):  # noqa: N802
+            if self.path.startswith("/api/jobs/") and self.path.endswith("/run"):
+                captured["runs"].append(self.path.split("/")[3])
+                self._json({})
+                return
             if self.path != "/v1/chat/completions":
                 self.send_error(404)
                 return
@@ -1911,6 +1966,17 @@ def _start_fake_gateway(config):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        def do_PATCH(self):  # noqa: N802
+            if not self.path.startswith("/api/jobs/"):
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length)) if length else {}
+            captured["patches"].append(
+                {"id": self.path.rsplit("/", 1)[-1], "body": body}
+            )
+            self._json({})
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -2299,6 +2365,101 @@ def test_load_prep_marker_reads_the_cron_setup_marker(tmp_path):
     }
     (tmp_path / ".prep-cron.json").write_text("not json")
     assert serve_shelf.load_prep_marker(tmp_path) is None
+
+
+# --- the nightly-prep proxy: ONE named job, three narrow actions -----------
+
+
+PREP_JOB = {
+    "name": "nightly-prep",
+    "id": "j1",
+    "schedule": "23 3 * * *",
+    "model": "gpt-5.5",
+    "provider": "openai-codex",
+    "enabled": True,
+    "prompt": "the whole prompt never reaches the page",
+}
+
+
+def test_find_prep_job_tolerates_wrapper_shapes():
+    jobs = [{"name": "Nightly-Prep", "id": 7, "schedule": "23 3 * * *"}]
+    assert serve_shelf.find_prep_job(jobs)["id"] == "7"
+    assert serve_shelf.find_prep_job({"jobs": jobs})["id"] == "7"
+    assert serve_shelf.find_prep_job({"data": jobs})["id"] == "7"
+    assert serve_shelf.find_prep_job([{"name": "other", "id": 1}]) is None
+    assert serve_shelf.find_prep_job("garbage") is None
+
+
+def test_prep_job_view_is_a_narrow_slice():
+    # The page sees schedule/model/provider/enabled — never the prompt.
+    assert serve_shelf.prep_job_view(PREP_JOB) == {
+        "name": "nightly-prep",
+        "schedule": "23 3 * * *",
+        "model": "gpt-5.5",
+        "provider": "openai-codex",
+        "enabled": True,
+    }
+    assert serve_shelf.prep_job_view({"enabled": False})["enabled"] is False
+    assert serve_shelf.prep_job_view({})["enabled"] is True  # absent = on
+
+
+def test_prep_status_unwired_and_missing(fake_gateway):
+    assert serve_shelf.prep_status(False) == {"wired": False, "found": False}
+    base, _ = fake_gateway(jobs=[])
+    assert serve_shelf.prep_status(True, base=base, api_key="k") == {
+        "wired": True,
+        "found": False,
+    }
+
+
+def test_prep_status_reads_the_one_job(fake_gateway):
+    base, _ = fake_gateway(jobs=[PREP_JOB])
+    status = serve_shelf.prep_status(True, base=base, api_key="k")
+    assert status["wired"] and status["found"] and status["id"] == "j1"
+    assert status["job"]["model"] == "gpt-5.5"
+    assert "prompt" not in status["job"]
+
+
+def test_prep_actions_round_trip_against_the_gateway(fake_gateway):
+    base, captured = fake_gateway(jobs=[PREP_JOB])
+    result = serve_shelf.run_prep_action("run", True, base=base, api_key="k")
+    assert result == {"ok": True, "action": "run", "id": "j1"}
+    assert captured["runs"] == ["j1"]
+    pause = serve_shelf.run_prep_action("pause", True, base=base, api_key="k")
+    assert pause["enabled"] is False
+    resume = serve_shelf.run_prep_action("resume", True, base=base, api_key="k")
+    assert resume["enabled"] is True
+    assert captured["patches"] == [
+        {"id": "j1", "body": {"enabled": False}},
+        {"id": "j1", "body": {"enabled": True}},
+    ]
+
+
+def test_prep_action_unwired_is_a_503_unknown_a_400():
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.run_prep_action("run", False)
+    assert excinfo.value.status == 503
+    assert "wire" in excinfo.value.message
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.run_prep_action("erase-everything", True)
+    assert excinfo.value.status == 400
+
+
+def test_prep_action_missing_job_is_a_404_naming_the_setup(fake_gateway):
+    base, _ = fake_gateway(jobs=[])
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.run_prep_action("run", True, base=base, api_key="k")
+    assert excinfo.value.status == 404
+    assert "hermes_cron_setup" in excinfo.value.message
+
+
+def test_prep_action_without_a_key_is_a_clean_503(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+    monkeypatch.setattr(serve_shelf, "HERMES_PROFILE_DIR", tmp_path)  # no .env
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.run_prep_action("run", True, base="http://127.0.0.1:1")
+    assert excinfo.value.status == 503
+    assert "key" in excinfo.value.message.lower()
 
 
 # --- env overrides: the whole surface can point at a scratch copy ----------

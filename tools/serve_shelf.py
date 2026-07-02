@@ -11,16 +11,19 @@ so importing it is fast, in-process, and fails loudly if it breaks.
 
 Routes:
     GET  /          the shelf page (library/shelf.html, freshly rebuilt)
-    GET  /health    {"ok": true, "brain": <default>, "brains": {...}, "ax":
-                    {"wired": bool}, "prep_cron": {...}|null}. brains maps
+    GET  /health    {"ok": true, "brain": <configured>, "default_brain":
+                    <where a no-pick request lands right now — hermes when
+                    wired, else claude>, "brains": {...}, "ax": {"wired":
+                    bool}, "prep_cron": {...}|null}. brains maps
                     claude/ollama to availability booleans and hermes to
                     an object: {"wired", "reason", "profile", "model",
                     "routes": [{"alias", "model"}...]} — the begin-here
                     machinery card and the brain pills read this.
     POST /api/chat  {"messages": [...], "brain"?, "session"?, "view"?,
                     "model"?} -> streamed reply. "brain" is optional and
-                    per-request (the panel's toggle); it falls back to the
-                    server's --brain default, unknown names are a 400.
+                    per-request (the panel's toggle); with no pick the turn
+                    lands on default_brain (hermes is the home harness when
+                    the gate is open), unknown names are a 400.
                     "session" picks the episode ("new" starts fresh — new
                     claude thread too; default: the current one, which may
                     quietly ROLL OVER onto a fresh episode after
@@ -44,10 +47,18 @@ Routes:
                     the hour) and to the talk's notes.md under
                     "## Listening". Feeds the card's "listened ✓" state
                     and the ambient wrap-up bridge.
-    GET  /api/models  installed Ollama models for the panel's picker:
+    GET  /api/models  installed Ollama models for the settings picker:
                     {"models": [{name, tools, size_gb}...], "current": name}
                     (tools per /api/show capabilities; 503 when Ollama is
                     down).
+    GET  /api/prep  the ONE nightly-prep job, live from the gateway's jobs
+                    API behind the wired-gate: {"wired", "found", "id"?,
+                    "job"?: {name, schedule, model, provider, enabled}}.
+                    Narrow by design — no other job, never the prompt.
+    POST /api/prep/{run|pause|resume}  the same job's three controls,
+                    proxied with the server-side gateway key (the page
+                    never sees it). Unwired/missing job/refusal are clear
+                    JSON {"error"} answers (503/404/502).
     GET  /artifacts/{slug}/{name}  a guide-written interactive page
                     (library/<slug>/artifacts/<name>.html) behind the
                     no-network CSP wall (ARTIFACT_CSP + nosniff); the
@@ -995,6 +1006,40 @@ def resolve_brain(requested, default: str, available: dict) -> str:
             503, f"The {requested} brain is not available — {BRAIN_HINTS[requested]}."
         )
     return requested
+
+
+def resolve_default_brain(configured: str, hermes_wired: bool) -> str:
+    """The brain a no-explicit-pick request lands on, decided at request
+    time.
+
+    Hermes is the home harness: when the gate is open it takes the
+    default seat; when it isn't, claude does — /health's default_brain
+    tells the page whichever is true, so nothing switches silently. An
+    explicit --brain ollama is a deliberate local-only choice and always
+    stands.
+    """
+    if configured == "ollama":
+        return configured
+    return "hermes" if hermes_wired else "claude"
+
+
+def health_payload(configured: str, brains: dict, ax_ok: bool, prep) -> dict:
+    """The GET /health body — built in one place so the shape stays honest.
+
+    brains carries the claude/ollama booleans plus the hermes status
+    object; default_brain is the request-time truth (resolve_default_brain)
+    the page renders instead of guessing.
+    """
+    hermes = brains.get("hermes")
+    wired = bool(isinstance(hermes, dict) and hermes.get("wired"))
+    return {
+        "ok": True,
+        "brain": configured,
+        "default_brain": resolve_default_brain(configured, wired),
+        "brains": brains,
+        "ax": {"wired": ax_ok},
+        "prep_cron": prep,
+    }
 
 
 # --- ollama agency: validated tools + a bounded loop ----------------------
@@ -2131,6 +2176,139 @@ def load_prep_marker(library: Path) -> dict | None:
     }
 
 
+# --- nightly-prep controls: a narrow proxy to the gateway's jobs API -------
+#
+# Scope is ONE named job (nightly-prep, installed by tools/hermes_cron_setup)
+# and three actions: run now, pause, resume. The gateway key stays
+# server-side; nothing else from the jobs API is exposed to the page.
+
+PREP_JOB_NAME = "nightly-prep"
+PREP_ACTIONS = ("run", "pause", "resume")
+
+
+def _hermes_request(
+    method: str, path: str, api_key: str, body: dict | None = None, base: str | None = None
+):
+    """One authenticated gateway call (the jobs API uses more verbs than
+    _hermes_get's plain GET). Empty answers read as {}."""
+    request = urllib.request.Request(
+        (base or HERMES_URL).rstrip("/") + path,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={
+            **({"Authorization": f"Bearer {api_key}"} if api_key else {}),
+            **({"Content-Type": "application/json"} if body is not None else {}),
+        },
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=HERMES_TIMEOUT) as response:
+        raw = response.read()
+    return json.loads(raw) if raw.strip() else {}
+
+
+def find_prep_job(payload, name: str = PREP_JOB_NAME):
+    """The stored job matching `name`, or None — the same tolerant read as
+    tools/hermes_cron_setup.find_job (bare list or {"jobs"|"data"} wrapper,
+    id from "id"/"job_id"; anything unrecognizable is not a match)."""
+    if isinstance(payload, dict):
+        items = payload.get("jobs", payload.get("data", []))
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        items = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name") or "").lower() == name.lower():
+            job_id = item.get("id") or item.get("job_id")
+            if isinstance(job_id, (str, int)) and str(job_id):
+                return {"id": str(job_id), "job": item}
+    return None
+
+
+def prep_job_view(job: dict) -> dict:
+    """The narrow slice the settings page may see — schedule, pinned
+    model/provider, enabled. Never the prompt, never other jobs."""
+    return {
+        "name": job.get("name") if isinstance(job.get("name"), str) else None,
+        "schedule": job.get("schedule") if isinstance(job.get("schedule"), str) else None,
+        "model": job.get("model") if isinstance(job.get("model"), str) else None,
+        "provider": job.get("provider") if isinstance(job.get("provider"), str) else None,
+        "enabled": job.get("enabled") is not False,  # absent = on
+    }
+
+
+def prep_status(wired: bool, base: str | None = None, api_key: str | None = None) -> dict:
+    """The GET /api/prep body: is the ONE nightly-prep job there, and how
+    does it stand? Unwired or unreachable is an honest not-found, not an
+    error page — the settings room renders the state either way."""
+    if not wired:
+        return {"wired": False, "found": False}
+    key = api_key if api_key is not None else hermes_api_key()
+    try:
+        found = find_prep_job(_hermes_request("GET", "/api/jobs", key, base=base))
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return {"wired": True, "found": False}
+    if not found:
+        return {"wired": True, "found": False}
+    return {
+        "wired": True,
+        "found": True,
+        "id": found["id"],
+        "job": prep_job_view(found["job"]),
+    }
+
+
+def run_prep_action(
+    action: str, wired: bool, base: str | None = None, api_key: str | None = None
+) -> dict:
+    """run / pause / resume on exactly the nightly-prep job.
+
+    Raises BrainError for everything that can't happen cleanly: unknown
+    action (400), unwired gateway (503), no key (503), job not installed
+    (404), gateway refusal (502). The id is looked up by name per call —
+    the page never holds or sends gateway job ids."""
+    if action not in PREP_ACTIONS:
+        names = ", ".join(PREP_ACTIONS)
+        raise BrainError(400, f"Unknown prep action {action!r} — use {names}.")
+    if not wired:
+        raise BrainError(
+            503, f"The nightly-prep job needs the gateway — {BRAIN_HINTS['hermes']}."
+        )
+    key = api_key if api_key is not None else hermes_api_key()
+    if not key:
+        raise BrainError(
+            503,
+            "No Hermes API key — export HERMES_API_KEY or wire the profile "
+            "(uv run tools/wire_hermes_profile.py).",
+        )
+    try:
+        found = find_prep_job(_hermes_request("GET", "/api/jobs", key, base=base))
+        if not found:
+            raise BrainError(
+                404,
+                "No nightly-prep job on the gateway — install it first: "
+                "uv run tools/hermes_cron_setup.py",
+            )
+        if action == "run":
+            _hermes_request(
+                "POST", f"/api/jobs/{found['id']}/run", key, body={}, base=base
+            )
+            return {"ok": True, "action": "run", "id": found["id"]}
+        enabled = action == "resume"
+        _hermes_request(
+            "PATCH", f"/api/jobs/{found['id']}", key, body={"enabled": enabled}, base=base
+        )
+        return {"ok": True, "action": action, "id": found["id"], "enabled": enabled}
+    except urllib.error.HTTPError as error:
+        raise BrainError(
+            502,
+            f"The gateway answered {error.code} — check it: "
+            "hermes -p second-arrow gateway status",
+        )
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        raise BrainError(503, "The gateway did not answer — is it running?")
+
+
 def iter_sse_events(lines):
     """SSE frames out of an iterable of raw lines: {"event", "data"} each.
 
@@ -2729,18 +2907,15 @@ def create_app(brain: str, ollama_model: str):
     @app.get("/health")
     def health() -> dict:
         # brains: claude/ollama stay booleans; hermes is an honest object
-        # (wired, reason, profile, model, routes). ax is presence only —
-        # a boolean, never the tokens. prep_cron is the nightly-prep
-        # marker (set by tools/hermes_cron_setup.py) or null.
+        # (wired, reason, profile, model, routes). default_brain is where
+        # a no-pick request lands RIGHT NOW (hermes when wired). ax is
+        # presence only — a boolean, never the tokens. prep_cron is the
+        # nightly-prep marker (set by tools/hermes_cron_setup.py) or null.
         brains = probe_brains()
         brains["hermes"] = hermes_status()
-        return {
-            "ok": True,
-            "brain": brain,
-            "brains": brains,
-            "ax": {"wired": ax_wired(LIBRARY)},
-            "prep_cron": load_prep_marker(LIBRARY),
-        }
+        return health_payload(
+            brain, brains, ax_wired(LIBRARY), load_prep_marker(LIBRARY)
+        )
 
     @app.get("/api/sessions")
     def api_sessions() -> dict:
@@ -2789,6 +2964,22 @@ def create_app(brain: str, ollama_model: str):
     def api_version() -> dict:
         # The page polls this to learn the shelf grew new content.
         return {"shelf_mtime": shelf_mtime(LIBRARY)}
+
+    @app.get("/api/prep")
+    def api_prep() -> dict:
+        # The ONE nightly-prep job, read live from the gateway behind the
+        # wired-gate — the settings room renders schedule / pinned model /
+        # enabled from this. Narrow by design: no other job, no prompt.
+        return prep_status(hermes_status()["wired"])
+
+    @app.post("/api/prep/{action}")
+    def api_prep_action(action: str):
+        # run / pause / resume on exactly that job. The gateway key stays
+        # server-side; unwired or missing job answers a clear JSON error.
+        try:
+            return run_prep_action(action, hermes_status()["wired"])
+        except BrainError as error:
+            return JSONResponse({"error": error.message}, status_code=error.status)
 
     @app.post("/api/listened")
     def api_listened(body: dict):
@@ -2854,12 +3045,16 @@ def create_app(brain: str, ollama_model: str):
                 body.get("session"), current["sid"], SESSIONS_DIR
             )
             available = probe_brains()
-            if body.get("brain") == "hermes":
-                # The wired-gate (cached): an unreachable or
-                # over-provisioned gateway means NOT wired — refuse with
-                # the wiring ritual in the error, never talk to it.
-                available["hermes"] = hermes_status()["wired"]
-            chosen = resolve_brain(body.get("brain"), brain, available)
+            # The wired-gate (cached): an unreachable or over-provisioned
+            # gateway means NOT wired — an explicit hermes ask is refused
+            # with the wiring ritual in the error, and a no-pick request
+            # only defaults to hermes while the gate is open.
+            available["hermes"] = hermes_status()["wired"]
+            chosen = resolve_brain(
+                body.get("brain"),
+                resolve_default_brain(brain, available["hermes"]),
+                available,
+            )
             model = ollama_model
             if chosen == "ollama":
                 requested_model = body.get("model")
