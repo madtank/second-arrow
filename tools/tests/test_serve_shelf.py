@@ -315,14 +315,28 @@ def test_parse_ollama_stream_line_content_chunk():
     line = json.dumps(
         {"model": "qwen3", "message": {"role": "assistant", "content": "gro"}, "done": False}
     )
-    assert serve_shelf.parse_ollama_stream_line(line) == {"text": "gro", "done": False}
+    assert serve_shelf.parse_ollama_stream_line(line) == {
+        "text": "gro", "done": False, "tool_calls": [],
+    }
 
 
 def test_parse_ollama_stream_line_final_chunk_is_done():
     line = json.dumps(
         {"model": "qwen3", "message": {"role": "assistant", "content": ""}, "done": True}
     )
-    assert serve_shelf.parse_ollama_stream_line(line) == {"text": None, "done": True}
+    assert serve_shelf.parse_ollama_stream_line(line) == {
+        "text": None, "done": True, "tool_calls": [],
+    }
+
+
+def test_parse_ollama_stream_line_carries_tool_calls():
+    # Shape captured from a real streamed gemma4:12b round: the tool call
+    # arrives whole in one chunk, content empty.
+    calls = [{"id": "call_adu330iq", "function": {"index": 0, "name": "rebuild_shelf", "arguments": {}}}]
+    line = json.dumps({"message": {"role": "assistant", "content": "", "tool_calls": calls}, "done": False})
+    assert serve_shelf.parse_ollama_stream_line(line) == {
+        "text": None, "done": False, "tool_calls": calls,
+    }
 
 
 def test_parse_ollama_stream_line_error_raises():
@@ -331,7 +345,9 @@ def test_parse_ollama_stream_line_error_raises():
 
 
 def test_parse_ollama_stream_line_blank_is_inert():
-    assert serve_shelf.parse_ollama_stream_line("\n") == {"text": None, "done": False}
+    assert serve_shelf.parse_ollama_stream_line("\n") == {
+        "text": None, "done": False, "tool_calls": [],
+    }
 
 
 # --- ThinkFilter (streaming strip_think) ----------------------------------
@@ -408,6 +424,343 @@ def test_resolve_brain_default_skips_the_availability_gate():
     # the brain itself reports a proper error if it is really down.
     available = {"claude": True, "ollama": False}
     assert serve_shelf.resolve_brain(None, "ollama", available) == "ollama"
+
+
+# --- validate_tool_call (the ollama agency boundary) ------------------------
+
+
+def test_validate_tool_call_fetch_talk_happy_path():
+    argv = serve_shelf.validate_tool_call(
+        "fetch_talk",
+        {
+            "url": "https://www.youtube.com/watch?v=abc123",
+            "title": "Some Talk",
+            "teacher": "Ajahn Brahm",
+            "themes": "anger, patience",
+        },
+    )
+    assert argv == [
+        "uv", "run", "tools/fetch_talk.py", "https://www.youtube.com/watch?v=abc123",
+        "--title", "Some Talk", "--teacher", "Ajahn Brahm", "--themes", "anger, patience",
+    ]
+
+
+def test_validate_tool_call_fetch_talk_url_only():
+    argv = serve_shelf.validate_tool_call("fetch_talk", {"url": "http://example.org/t"})
+    assert argv == ["uv", "run", "tools/fetch_talk.py", "http://example.org/t"]
+
+
+def test_validate_tool_call_rejects_bad_urls():
+    for url in (
+        "file:///etc/passwd",
+        "ftp://example.org/x",
+        "notaurl",
+        "https://",  # no hostname
+        "--library",  # flag smuggled as url
+        None,
+        42,
+    ):
+        with pytest.raises(ValueError):
+            serve_shelf.validate_tool_call("fetch_talk", {"url": url})
+
+
+def test_validate_tool_call_rejects_flag_smuggling_in_text_fields():
+    base = {"url": "https://example.org/t"}
+    for field in ("title", "teacher", "themes"):
+        with pytest.raises(ValueError):
+            serve_shelf.validate_tool_call("fetch_talk", {**base, field: "--library /tmp"})
+        with pytest.raises(ValueError):
+            serve_shelf.validate_tool_call("fetch_talk", {**base, field: "  -x"})
+        with pytest.raises(ValueError):
+            serve_shelf.validate_tool_call("fetch_talk", {**base, field: ["a", "list"]})
+    # Empty or absent optional fields are simply skipped.
+    argv = serve_shelf.validate_tool_call("fetch_talk", {**base, "title": ""})
+    assert "--title" not in argv
+
+
+def test_validate_tool_call_rebuild_shelf():
+    assert serve_shelf.validate_tool_call("rebuild_shelf", {}) == [
+        "uv", "run", "tools/build_shelf.py",
+    ]
+
+
+def test_validate_tool_call_speak_sanitizes_out_name():
+    argv = serve_shelf.validate_tool_call(
+        "speak", {"text": "Breathe out slowly.", "out_name": "Morning Reflection"}
+    )
+    assert argv == [
+        "uv", "run", "tools/speak.py", "--text", "Breathe out slowly.",
+        "-o", "library/morning-reflection.mp3",
+    ]
+    # Path traversal and dots collapse to a bare slug pinned under library/.
+    argv = serve_shelf.validate_tool_call(
+        "speak", {"text": "hi", "out_name": "../../etc/x"}
+    )
+    assert argv[-1] == "library/etc-x.mp3"
+    assert ".." not in argv[-1]
+    argv = serve_shelf.validate_tool_call("speak", {"text": "hi", "out_name": "a.b.mp3"})
+    assert argv[-1] == "library/a-b-mp3.mp3"
+
+
+def test_validate_tool_call_speak_rejects_bad_args():
+    with pytest.raises(ValueError):  # nothing left after sanitizing
+        serve_shelf.validate_tool_call("speak", {"text": "hi", "out_name": "###"})
+    with pytest.raises(ValueError):  # dash-led text could smuggle a flag
+        serve_shelf.validate_tool_call("speak", {"text": "--engine say", "out_name": "x"})
+    with pytest.raises(ValueError):
+        serve_shelf.validate_tool_call("speak", {"text": "", "out_name": "x"})
+    with pytest.raises(ValueError):
+        serve_shelf.validate_tool_call("speak", {"text": "hi", "out_name": 7})
+
+
+def test_validate_tool_call_rejects_unknown_tools_and_non_dict_args():
+    with pytest.raises(ValueError):
+        serve_shelf.validate_tool_call("run_bash", {"cmd": "ls"})
+    with pytest.raises(ValueError):
+        serve_shelf.validate_tool_call("", {})
+    for args in ("{}", None, ["url"], 3):
+        with pytest.raises(ValueError):
+            serve_shelf.validate_tool_call("rebuild_shelf", args)
+
+
+# --- parse_tool_calls -------------------------------------------------------
+
+
+def test_parse_tool_calls_reads_ollama_shape():
+    message = {
+        "tool_calls": [
+            {"id": "call_1", "function": {"index": 0, "name": "rebuild_shelf", "arguments": {}}},
+            {"function": {"name": "fetch_talk", "arguments": {"url": "https://e.org"}}},
+        ]
+    }
+    assert serve_shelf.parse_tool_calls(message) == [
+        ("rebuild_shelf", {}),
+        ("fetch_talk", {"url": "https://e.org"}),
+    ]
+
+
+def test_parse_tool_calls_decodes_json_string_arguments():
+    message = {
+        "tool_calls": [
+            {"function": {"name": "fetch_talk", "arguments": '{"url": "https://e.org"}'}}
+        ]
+    }
+    assert serve_shelf.parse_tool_calls(message) == [
+        ("fetch_talk", {"url": "https://e.org"})
+    ]
+
+
+def test_parse_tool_calls_tolerates_junk():
+    assert serve_shelf.parse_tool_calls({}) == []
+    assert serve_shelf.parse_tool_calls({"tool_calls": None}) == []
+    junk = {"tool_calls": [{"function": {"arguments": "not json"}}, {}]}
+    # Junk calls survive as ("", {}) so validate_tool_call can reject them.
+    assert serve_shelf.parse_tool_calls(junk) == [("", {}), ("", {})]
+
+
+# --- resolve_agent_model ----------------------------------------------------
+
+
+def test_resolve_agent_model_keeps_a_configured_match_even_without_tools():
+    model, has_tools = serve_shelf.resolve_agent_model(
+        "gemma-plain", ["gemma-plain:latest", "qwen3:latest"], ["qwen3:latest"]
+    )
+    assert model == "gemma-plain:latest"
+    assert has_tools is False
+
+
+def test_resolve_agent_model_fallback_prefers_tools_capable():
+    model, has_tools = serve_shelf.resolve_agent_model(
+        "missing", ["plain:latest", "capable:latest"], ["capable:latest"]
+    )
+    assert (model, has_tools) == ("capable:latest", True)
+
+
+def test_resolve_agent_model_no_capable_model_degrades():
+    model, has_tools = serve_shelf.resolve_agent_model(
+        "missing", ["plain:latest"], []
+    )
+    assert (model, has_tools) == ("plain:latest", False)
+    assert serve_shelf.resolve_agent_model("qwen3", [], []) == ("qwen3", False)
+
+
+# --- agency in the payload ---------------------------------------------------
+
+
+def test_build_ollama_payload_carries_tools_and_agency_note():
+    payload = serve_shelf.build_ollama_payload(
+        [{"role": "user", "content": "hi"}],
+        model="m",
+        stream=True,
+        tools=serve_shelf.OLLAMA_TOOLS,
+        agency="You can act through tools.",
+    )
+    assert payload["tools"] == serve_shelf.OLLAMA_TOOLS
+    assert "You can act through tools." in payload["messages"][0]["content"]
+    # Without tools, the key is absent entirely (some models choke on []).
+    plain = serve_shelf.build_ollama_payload([{"role": "user", "content": "hi"}], model="m")
+    assert "tools" not in plain
+
+
+# --- ollama_tool_loop (faked responses) --------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, objs):
+        self._lines = [json.dumps(o).encode() for o in objs]
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _no_opener(payload):
+    raise AssertionError("no further round expected")
+
+
+def _no_runner(argv):
+    raise AssertionError("no tool run expected")
+
+
+def test_ollama_tool_loop_plain_reply_streams_untouched():
+    response = _FakeResponse([
+        {"message": {"content": "It grows "}, "done": False},
+        {"message": {"content": "on anger."}, "done": True},
+    ])
+    transcript = [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}]
+    before = list(transcript)
+    chunks = list(
+        serve_shelf.ollama_tool_loop(
+            response, transcript, "m", _no_opener, _no_runner,
+            tools=serve_shelf.OLLAMA_TOOLS,
+        )
+    )
+    assert "".join(chunks) == "It grows on anger."
+    assert transcript == before  # nothing appended on a tool-free turn
+
+
+def test_ollama_tool_loop_runs_validated_tool_then_streams_answer():
+    first = _FakeResponse([
+        {"message": {"content": "", "tool_calls": [
+            {"function": {"name": "rebuild_shelf", "arguments": {}}}]}, "done": False},
+        {"message": {"content": ""}, "done": True},
+    ])
+    opened = []
+
+    def opener(payload):
+        opened.append(payload)
+        return _FakeResponse([
+            {"message": {"content": "Shelf rebuilt — refresh the page."}, "done": True},
+        ])
+
+    ran = []
+
+    def runner(argv):
+        ran.append(argv)
+        return True, "tools/build_shelf.py succeeded"
+
+    transcript = [{"role": "system", "content": "s"}, {"role": "user", "content": "rebuild please"}]
+    chunks = list(
+        serve_shelf.ollama_tool_loop(
+            first, transcript, "m", opener, runner, tools=serve_shelf.OLLAMA_TOOLS
+        )
+    )
+    text = "".join(chunks)
+    assert "rebuilding the shelf" in text  # progress marker kept the panel alive
+    assert text.endswith("Shelf rebuilt — refresh the page.")
+    assert ran == [["uv", "run", "tools/build_shelf.py"]]
+    assert opened[0]["tools"] == serve_shelf.OLLAMA_TOOLS  # budget not yet spent
+    assert [m["role"] for m in transcript] == ["system", "user", "assistant", "tool"]
+    assert "succeeded" in transcript[-1]["content"]
+
+
+def test_ollama_tool_loop_failure_feeds_back_once_without_tools():
+    first = _FakeResponse([
+        {"message": {"content": "", "tool_calls": [
+            {"function": {"name": "fetch_talk", "arguments": {"url": "https://e.org/t"}}}]},
+         "done": True},
+    ])
+    opened = []
+
+    def opener(payload):
+        opened.append(payload)
+        return _FakeResponse([
+            {"message": {"content": "The fetch failed: boom."}, "done": True},
+        ])
+
+    def runner(argv):
+        return False, "tools/fetch_talk.py failed (exit 1):\nboom"
+
+    transcript = [{"role": "system", "content": "s"}, {"role": "user", "content": "fetch it"}]
+    chunks = list(
+        serve_shelf.ollama_tool_loop(
+            first, transcript, "m", opener, runner, tools=serve_shelf.OLLAMA_TOOLS
+        )
+    )
+    assert "".join(chunks).endswith("The fetch failed: boom.")
+    # The explain round gets the error but no tools — it must finish in words.
+    assert len(opened) == 1
+    assert "tools" not in opened[0]
+    assert "failed" in transcript[-1]["content"]
+
+
+def test_ollama_tool_loop_rejected_call_never_reaches_the_runner():
+    first = _FakeResponse([
+        {"message": {"content": "", "tool_calls": [
+            {"function": {"name": "fetch_talk", "arguments": {"url": "file:///etc/passwd"}}}]},
+         "done": True},
+    ])
+    opened = []
+
+    def opener(payload):
+        opened.append(payload)
+        return _FakeResponse([
+            {"message": {"content": "I can't fetch that."}, "done": True},
+        ])
+
+    transcript = [{"role": "system", "content": "s"}, {"role": "user", "content": "fetch it"}]
+    chunks = list(
+        serve_shelf.ollama_tool_loop(
+            first, transcript, "m", opener, _no_runner, tools=serve_shelf.OLLAMA_TOOLS
+        )
+    )
+    assert "".join(chunks).endswith("I can't fetch that.")
+    assert "rejected" in transcript[-1]["content"]
+    assert "tools" not in opened[0]  # a rejection also ends the tool budget
+
+
+def test_ollama_tool_loop_respects_the_round_budget():
+    def calling_round():
+        return _FakeResponse([
+            {"message": {"content": "", "tool_calls": [
+                {"function": {"name": "rebuild_shelf", "arguments": {}}}]}, "done": True},
+        ])
+
+    opened = []
+    final = _FakeResponse([{"message": {"content": "Done at last."}, "done": True}])
+
+    def opener(payload):
+        opened.append(payload)
+        if len(opened) < 4:
+            return calling_round()
+        return final
+
+    transcript = [{"role": "system", "content": "s"}, {"role": "user", "content": "go"}]
+    chunks = list(
+        serve_shelf.ollama_tool_loop(
+            calling_round(), transcript, "m", opener,
+            lambda argv: (True, "ok"), tools=serve_shelf.OLLAMA_TOOLS, max_rounds=4,
+        )
+    )
+    assert "".join(chunks).endswith("Done at last.")
+    assert len(opened) == 4
+    assert all("tools" in p for p in opened[:3])
+    assert "tools" not in opened[3]  # budget spent: the last round must talk
 
 
 # --- persistent chat memory (library/.chat) --------------------------------

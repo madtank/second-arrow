@@ -162,12 +162,18 @@ phone), revisit with real usage behind the decision.
   talk, offering — never auto-running — the fetch), and the shelf shows
   a small "The path" strip (✓ studied, → queued) parsed from `STUDY.md`.
   A nightly prep cron stays optional, unscheduled.
-- **Iter 3 — Ollama tool loop:** offline agency for the local brain.
-  Honest constraint to design around: local models are weaker discussion
-  partners, so the offline guide should lean on retrieval (quote the
-  transcript, surface notes) more than free-form teaching. Everything
-  else is already local: Whisper transcription, Kokoro TTS, the library
-  and journal on disk.
+- **Iter 3 — DONE: Ollama tool loop.** The local brain gets the same
+  three reviewed tools as the claude brain (fetch_talk, rebuild_shelf,
+  speak) through a bounded loop (max 4 rounds): every call is validated
+  into an argv list (no shell, http(s)-only URLs, no flag smuggling,
+  outputs pinned under library/), progress lines keep the panel alive
+  during long fetches, and models without tool support (per /api/show
+  capabilities) degrade gracefully — they're told they have no hands.
+  Honest constraint to design around: the offline brain now has tools
+  but remains the weaker discussion partner, so it should still lean on
+  retrieval (quote the transcript, surface notes) more than free-form
+  teaching. Everything else is already local: Whisper transcription,
+  Kokoro TTS, the library and journal on disk.
 
 ## Boundaries
 

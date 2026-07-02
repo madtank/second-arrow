@@ -45,11 +45,17 @@ Two brains:
         Conversation continuity via `--resume <session_id>`, falling back
         to folding trimmed history into the prompt.
     --brain ollama  talks to a local Ollama (http://localhost:11434) with
-        "stream": true, read-only. Local models are weak rememberers, so the
-        server does the remembering: a condensed guide persona + STUDY.md +
+        "stream": true. Local models are weak rememberers, so the server
+        does the remembering: a condensed guide persona + STUDY.md +
         library/INDEX.md + the top keyword-matched transcript chunks are
         packed into the system prompt. <think> blocks are filtered out of
-        the stream (ThinkFilter).
+        the stream (ThinkFilter). If the model supports tool calling
+        (/api/show capabilities), it gets a bounded agency loop
+        (ollama_tool_loop) over the same three reviewed tools the claude
+        brain has — fetch_talk, rebuild_shelf, speak — every call passed
+        through validate_tool_call (argv only, no shell). Models without
+        tool support degrade gracefully: they are told they have no hands
+        and answer normally.
 
 Run with:
     uv run tools/serve_shelf.py                # then open http://localhost:8765
@@ -67,6 +73,7 @@ import shutil
 import subprocess
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +86,8 @@ STATE_PATH = CHAT_DIR / "state.json"
 HISTORY_LIMIT = 50  # turns served back to the panel on page load
 OLLAMA_URL = "http://localhost:11434"
 CLAUDE_TIMEOUT = 600  # seconds — tool turns (ingest, TTS) take a while
+TOOL_TIMEOUT = 600  # seconds per ollama tool subprocess
+MAX_TOOL_ROUNDS = 4  # ollama tool-calling rounds per chat turn
 CHUNK_SIZE = 1200
 MAX_HISTORY_MESSAGES = 12
 
@@ -168,9 +177,11 @@ def pick_chunks(
 
 
 def build_system_prompt(
-    study: str, index: str, chunks: list[tuple[str, str]]
+    study: str, index: str, chunks: list[tuple[str, str]], agency: str = ""
 ) -> str:
     parts = [GUIDE_PERSONA]
+    if agency.strip():
+        parts.append("## Acting in the world\n\n" + agency.strip())
     if study.strip():
         parts.append("## Study memory (STUDY.md)\n\n" + study.strip())
     if index.strip():
@@ -190,13 +201,18 @@ def build_ollama_payload(
     index: str = "",
     chunks: list[tuple[str, str]] = (),
     stream: bool = False,
+    tools: list | None = None,
+    agency: str = "",
 ) -> dict:
-    system = build_system_prompt(study, index, list(chunks))
-    return {
+    system = build_system_prompt(study, index, list(chunks), agency)
+    payload = {
         "model": model,
         "messages": [{"role": "system", "content": system}, *messages],
         "stream": stream,
     }
+    if tools:  # absent entirely when unused — some models choke on []
+        payload["tools"] = list(tools)
+    return payload
 
 
 # The chat guide's durable memory: the ONLY paths it may write from chat.
@@ -331,17 +347,23 @@ def parse_stream_line(line: str) -> dict:
 def parse_ollama_stream_line(line: str) -> dict:
     """Parse one NDJSON line from Ollama /api/chat with "stream": true.
 
-    Returns {"text": str|None, "done": bool}. Raises json.JSONDecodeError
-    on a garbled line and ValueError when Ollama reports an error.
+    Returns {"text": str|None, "done": bool, "tool_calls": list}. Tool
+    calls arrive whole in a single chunk (verified live). Raises
+    json.JSONDecodeError on a garbled line and ValueError when Ollama
+    reports an error.
     """
     line = line.strip()
     if not line:
-        return {"text": None, "done": False}
+        return {"text": None, "done": False, "tool_calls": []}
     data = json.loads(line)
     if data.get("error"):
         raise ValueError(str(data["error"]))
-    text = data.get("message", {}).get("content") or None
-    return {"text": text, "done": bool(data.get("done"))}
+    message = data.get("message", {})
+    return {
+        "text": message.get("content") or None,
+        "done": bool(data.get("done")),
+        "tool_calls": message.get("tool_calls") or [],
+    }
 
 
 def strip_think(text: str) -> str:
@@ -446,6 +468,246 @@ def resolve_brain(requested, default: str, available: dict) -> str:
             503, f"The {requested} brain is not available — {BRAIN_HINTS[requested]}."
         )
     return requested
+
+
+# --- ollama agency: validated tools + a bounded loop ----------------------
+#
+# The ollama brain mirrors the claude brain's scope exactly, no more:
+# fetch_talk, rebuild_shelf, speak — three reviewed tools, argv-built,
+# never shell=True. validate_tool_call is the entire boundary between a
+# local model's output and subprocess.run.
+
+OLLAMA_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_talk",
+            "description": (
+                "Ingest ONE talk into the library from a URL the user "
+                "explicitly gave (captioned YouTube preferred). Never "
+                "invent or guess URLs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "http(s) URL of the talk"},
+                    "title": {"type": "string", "description": "talk title (optional)"},
+                    "teacher": {"type": "string", "description": "teacher name (optional)"},
+                    "themes": {"type": "string", "description": "comma-separated themes (optional)"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rebuild_shelf",
+            "description": (
+                "Regenerate the shelf page after any library change, "
+                "then tell the user to refresh."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "speak",
+            "description": "Record a short reflection as an mp3 on the shelf.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "the words to speak"},
+                    "out_name": {"type": "string", "description": "short name for the audio file"},
+                },
+                "required": ["text", "out_name"],
+            },
+        },
+    },
+]
+
+TOOL_PROGRESS = {
+    "fetch_talk": "— fetching the talk… —",
+    "rebuild_shelf": "— rebuilding the shelf… —",
+    "speak": "— recording the audio… —",
+}
+
+AGENCY_TOOLS_NOTE = """\
+You can act, sparingly, through three tools:
+- fetch_talk: ingest ONE talk from a URL the user explicitly gave
+  (captioned YouTube preferred). Never invent or guess URLs.
+- rebuild_shelf: regenerate the shelf page after any library change,
+  then tell the user to refresh.
+- speak: record a short reflection as audio on the shelf.
+Only use a tool when the user asks for the thing it does."""
+
+AGENCY_NO_TOOLS_NOTE = """\
+You cannot run tools in this setup — the local model serving you does
+not support tool calls. If the user asks you to fetch or ingest a talk,
+say so plainly and suggest switching to the claude brain or installing
+a tools-capable local model (for example: ollama pull qwen3)."""
+
+_FETCH_TEXT_FIELDS = (("title", "--title"), ("teacher", "--teacher"), ("themes", "--themes"))
+
+
+def validate_tool_call(name: str, args) -> list[str]:
+    """Turn a model's tool call into a safe argv list, or raise ValueError.
+
+    This is the entire safety boundary for ollama agency: exact tool
+    names only; fetch URLs must be http(s) with a hostname (no file://,
+    no flag-shaped strings); free-text fields must be plain strings that
+    don't open with a dash (no flag smuggling); speak output collapses
+    to a bare slug pinned under library/ (no path traversal). The argv
+    is executed directly — never shell=True, never string interpolation.
+    """
+    if not isinstance(args, dict):
+        raise ValueError("arguments must be an object")
+    if name == "rebuild_shelf":
+        return ["uv", "run", "tools/build_shelf.py"]
+    if name == "fetch_talk":
+        url = args.get("url")
+        if not isinstance(url, str):
+            raise ValueError("url must be a string")
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("url must be http(s) with a hostname")
+        argv = ["uv", "run", "tools/fetch_talk.py", url]
+        for key, flag in _FETCH_TEXT_FIELDS:
+            value = args.get(key)
+            if value in (None, ""):
+                continue
+            if not isinstance(value, str) or value.lstrip().startswith("-"):
+                raise ValueError(f"{key} must be plain text")
+            argv += [flag, value]
+        return argv
+    if name == "speak":
+        text = args.get("text")
+        if not isinstance(text, str) or not text.strip() or text.lstrip().startswith("-"):
+            raise ValueError("text must be plain, non-empty text")
+        out_name = args.get("out_name")
+        if not isinstance(out_name, str):
+            raise ValueError("out_name must be a string")
+        slug = re.sub(r"[^a-z0-9]+", "-", out_name.lower()).strip("-")
+        if not slug:
+            raise ValueError("out_name must contain letters or digits")
+        return ["uv", "run", "tools/speak.py", "--text", text, "-o", f"library/{slug}.mp3"]
+    raise ValueError(f"unknown tool {name!r}")
+
+
+def parse_tool_calls(message: dict) -> list[tuple[str, dict]]:
+    """(name, arguments) pairs from an Ollama assistant message.
+
+    Arguments usually arrive as a dict; some models send a JSON string.
+    Junk calls come through as ("", {}) so validate_tool_call can reject
+    them with a message the model gets to read.
+    """
+    calls: list[tuple[str, dict]] = []
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        name = function.get("name")
+        args = function.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = None
+        calls.append(
+            (name if isinstance(name, str) else "", args if isinstance(args, dict) else {})
+        )
+    return calls
+
+
+def resolve_agent_model(
+    configured: str, installed: list[str], capable: list[str]
+) -> tuple[str, bool]:
+    """(model, can_call_tools) for the ollama brain.
+
+    An explicitly configured, installed model is respected even without
+    tool support (agency then degrades gracefully). When we're falling
+    back anyway, prefer an installed tools-capable model over the plain
+    first-installed default.
+    """
+    model = resolve_ollama_model(configured, installed)
+    matches_configured = (
+        model == configured or model.split(":")[0] == configured.split(":")[0]
+    )
+    if model in capable or matches_configured:
+        return model, model in capable
+    for name in installed:
+        if name in capable:
+            return name, True
+    return model, False
+
+
+def ollama_tool_loop(
+    response,
+    transcript: list[dict],
+    model: str,
+    opener,
+    runner,
+    tools: list | None = None,
+    max_rounds: int = MAX_TOOL_ROUNDS,
+):
+    """Bounded tool-calling loop over streamed Ollama rounds (a generator).
+
+    `response` is the already-open first-round stream (NDJSON iterable +
+    context manager); `opener(payload)` opens each next round; `runner
+    (argv) -> (ok, summary)` executes a validated tool. Text deltas
+    stream straight through (so the final reply arrives incrementally,
+    and a plain turn never pays for the loop); a small progress line is
+    yielded while each tool runs. On a rejected or failed tool the error
+    is fed back for ONE tool-less round so the model can explain, then
+    the turn ends. `transcript` grows assistant/tool messages in place.
+
+    Note: the design brief said non-streamed tool rounds; live Ollama
+    delivers tool_calls whole inside a streamed round, so rounds stay
+    streamed — same bound, better panel feedback.
+    """
+    think = ThinkFilter()
+    allow_tools = bool(tools)
+    rounds = 0
+    while True:
+        content_parts: list[str] = []
+        raw_calls: list[dict] = []
+        with response:
+            for raw in response:
+                parsed = parse_ollama_stream_line(raw.decode("utf-8", "replace"))
+                raw_calls.extend(parsed["tool_calls"])
+                if parsed["text"]:
+                    content_parts.append(parsed["text"])
+                    visible = think.feed(parsed["text"])
+                    if visible:
+                        yield visible
+                if parsed["done"]:
+                    break
+        calls = parse_tool_calls({"tool_calls": raw_calls}) if allow_tools else []
+        if not calls:
+            break  # the text just streamed was the final reply
+        rounds += 1
+        failed = False
+        transcript.append(
+            {"role": "assistant", "content": "".join(content_parts), "tool_calls": raw_calls}
+        )
+        for name, args in calls:
+            yield "\n" + TOOL_PROGRESS.get(name, f"— running {name}… —") + "\n"
+            try:
+                argv = validate_tool_call(name, args)
+            except ValueError as error:
+                failed = True
+                result = f"Tool call rejected: {error}"
+            else:
+                ok, result = runner(argv)
+                failed = failed or not ok
+            transcript.append({"role": "tool", "tool_name": name, "content": result})
+        allow_tools = not failed and rounds < max_rounds
+        payload = {"model": model, "messages": transcript, "stream": True}
+        if allow_tools:
+            payload["tools"] = list(tools)
+        response = opener(payload)
+    tail = think.flush()
+    if tail:
+        yield tail
 
 
 # --- persistent chat memory (library/.chat/, private) --------------------
@@ -675,6 +937,57 @@ def _ollama_json(path: str, payload: dict | None = None, timeout: int = 240) -> 
         return json.loads(response.read())
 
 
+def _open_ollama_chat(payload: dict, timeout: int = 120):
+    """Open a streamed /api/chat POST; returns the live HTTP response."""
+    request = urllib.request.Request(
+        OLLAMA_URL + "/api/chat",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+_TOOLS_CAPABLE: dict[str, bool] = {}  # per-process cache, keyed by model name
+
+
+def model_supports_tools(model: str) -> bool:
+    """Does this installed model support tool calling? (/api/show, cached).
+
+    Ollama reports a "capabilities" list per model — cheap and reliable,
+    where merely sending a `tools` parameter is not (the API accepts it
+    silently even for models that will never emit a tool call).
+    """
+    if model not in _TOOLS_CAPABLE:
+        try:
+            data = _ollama_json("/api/show", {"model": model}, timeout=10)
+            capabilities = data.get("capabilities") or []
+        except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError):
+            capabilities = []
+        _TOOLS_CAPABLE[model] = "tools" in capabilities
+    return _TOOLS_CAPABLE[model]
+
+
+def run_tool(argv: list[str], timeout: int = TOOL_TIMEOUT) -> tuple[bool, str]:
+    """Execute a validated tool argv; (ok, short summary for the model)."""
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"{argv[2]} timed out after {timeout}s."
+    except OSError as error:
+        return False, f"{argv[2]} could not start: {error}"
+    tail = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[-1500:]
+    if proc.returncode != 0:
+        return False, f"{argv[2]} failed (exit {proc.returncode}):\n{tail}"
+    return True, f"{argv[2]} succeeded:\n{tail}"
+
+
 def stream_ollama(messages: list[dict], configured_model: str, library: Path):
     """Start an Ollama turn; return a generator of reply-text chunks.
 
@@ -682,6 +995,12 @@ def stream_ollama(messages: list[dict], configured_model: str, library: Path):
     raises BrainError so the endpoint can still answer with a proper JSON
     error; once streaming, failures keep what arrived plus one apology.
     <think> blocks are filtered out on the way through (ThinkFilter).
+
+    Agency: when the resolved model supports tool calling (/api/show
+    capabilities), the turn runs through ollama_tool_loop with the three
+    validated tools; otherwise the model is told it has no hands and the
+    turn is a plain retrieval-grounded reply. Retrieval is identical in
+    both modes.
     """
     try:
         tags = _ollama_json("/api/tags", timeout=5)
@@ -698,24 +1017,30 @@ def stream_ollama(messages: list[dict], configured_model: str, library: Path):
             "Ollama is running but has no models — "
             f"try `ollama pull {configured_model}`.",
         )
-    model = resolve_ollama_model(configured_model, installed)
+    capable = [name for name in installed if model_supports_tools(name)]
+    model, has_tools = resolve_agent_model(configured_model, installed, capable)
     if model.split(":")[0] != configured_model.split(":")[0]:
-        print(f"[serve_shelf] {configured_model!r} not installed; using {model!r}")
+        print(
+            f"[serve_shelf] {configured_model!r} not installed; using {model!r}"
+            f" (tools: {'yes' if has_tools else 'no'})"
+        )
 
     study_path = library.parent / "STUDY.md"
     study = study_path.read_text() if study_path.exists() else ""
     index = (library / "INDEX.md").read_text()
     chunks = pick_chunks(messages[-1]["content"], load_transcripts(library), k=4)
     payload = build_ollama_payload(
-        trim_history(messages), model, study, index, chunks, stream=True
-    )
-    request = urllib.request.Request(
-        OLLAMA_URL + "/api/chat",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        trim_history(messages),
+        model,
+        study,
+        index,
+        chunks,
+        stream=True,
+        tools=OLLAMA_TOOLS if has_tools else None,
+        agency=AGENCY_TOOLS_NOTE if has_tools else AGENCY_NO_TOOLS_NOTE,
     )
     try:  # urlopen returns once headers arrive; the body then streams NDJSON
-        response = urllib.request.urlopen(request, timeout=120)
+        response = _open_ollama_chat(payload)
     except (urllib.error.URLError, OSError, TimeoutError):
         raise BrainError(
             503,
@@ -724,23 +1049,18 @@ def stream_ollama(messages: list[dict], configured_model: str, library: Path):
         )
 
     def generate():
-        think = ThinkFilter()
         emitted = False
         try:
-            with response:
-                for raw in response:  # one NDJSON object per line
-                    parsed = parse_ollama_stream_line(raw.decode("utf-8", "replace"))
-                    if parsed["text"]:
-                        visible = think.feed(parsed["text"])
-                        if visible:
-                            emitted = True
-                            yield visible
-                    if parsed["done"]:
-                        break
-            tail = think.flush()
-            if tail:
+            for chunk in ollama_tool_loop(
+                response,
+                payload["messages"],
+                model,
+                _open_ollama_chat,
+                run_tool,
+                tools=OLLAMA_TOOLS if has_tools else None,
+            ):
                 emitted = True
-                yield tail
+                yield chunk
             if not emitted:
                 yield f"Ollama ({model}) returned an empty reply — try again."
         except (json.JSONDecodeError, ValueError, urllib.error.URLError, OSError, TimeoutError):
