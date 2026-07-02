@@ -838,12 +838,18 @@ def test_curriculum_room_absent_without_files(tmp_path):
     assert 'href="#curriculum"' not in html
 
 
-def test_chat_input_is_anchored_to_the_viewport_bottom(tmp_path):
+def test_chat_tray_is_one_immutable_fixture(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    # The guide panel sticks to the bottom of the main pane: the input
-    # row can never be pushed off-screen; the message list scrolls above.
-    assert "#guide-chat { position: sticky; bottom: 0;" in html
-    assert re.search(r"#chat-messages \{[^}]*max-height", html)
+    # ONE tray node, fixed to the viewport bottom of the main pane, the
+    # same in every state and room — conversation stretches the SAME
+    # layer upward; the bar itself never moves.
+    assert html.count('id="guide-chat"') == 1
+    assert "#guide-chat { position: fixed; left: 260px; right: 0; bottom: 0;" in html
+    assert "#guide-chat.chat-conversation { top: 0;" in html
+    # Content scrolls beneath with room to spare — never occluded.
+    assert re.search(r"main \{[^}]*11rem", html)
+    # Click-through outside the bar: the layer itself takes no events.
+    assert "pointer-events: none" in html and "pointer-events: auto" in html
 
 
 def test_chat_focus_typing_is_intent_never_steal(tmp_path):
@@ -944,10 +950,11 @@ def test_chat_panel_is_binary_docked_or_conversation(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # Docked is the calm default, set in the static markup itself: either
     # you are talking or you are looking at the page — nothing in between.
-    assert re.search(r'<section class="card chat-docked" id="guide-chat" hidden>', html)
-    assert 'id="chat-toggle"' in html
+    assert re.search(r'<section class="chat-docked" id="guide-chat" hidden>', html)
+    assert "chat-toggle" not in html  # the unintuitive bar toggle is gone
     assert "chat-expand" not in html  # no middle state, no second control
-    assert "chat-open" not in html and "chat-full" not in html
+    assert "chat-full" not in html  # (chat-open is now the opener BUTTON id)
+    assert 'panel.classList.remove("chat-docked", "chat-conversation");' in html
     # One state function; sending from docked opens the conversation.
     assert "function setChatState(next)" in html
     assert 'if (chatState === "docked") setChatState("conversation");' in html
@@ -1078,4 +1085,45 @@ def test_conversation_overlay_has_a_visible_way_down(tmp_path):
     # The now-playing capsule steps down in conversation mode so both the
     # way down and the way to the talk stay visible, never overlapping.
     assert ".chat-conversation-mode #now-playing" in html
+
+
+def test_chat_bar_is_a_modern_capsule(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Send is an accent-filled circular button with an inline-SVG arrow,
+    # labeled for a11y, and disabled until there is something to send.
+    send = re.search(r'<button type="submit" id="chat-send"[^>]*>', html)
+    assert send, "send button missing"
+    assert 'title="Send"' in send.group(0)
+    assert 'aria-label="Send"' in send.group(0)
+    assert "disabled" in send.group(0)
+    assert re.search(r'id="chat-send"[^>]*>\s*<svg', html)
+    assert "function updateSendState()" in html  # empty input keeps it dim
+    # Opening without sending: a quiet chat-bubble icon-button on the bar.
+    opener = re.search(r'<button type="button" id="chat-open"[^>]*>', html)
+    assert opener and 'title="open the conversation"' in opener.group(0)
+    assert re.search(r'id="chat-open"[^>]*>\s*<svg', html)
+    # The input: soft rounding, gentle accent focus ring, muted italic
+    # placeholder, auto-grow to a few lines.
+    assert "border-radius: 14px" in html
+    assert "#chat-form textarea:focus" in html
+    assert "::placeholder" in html
+    assert "function autoGrow()" in html
+    # Sending busy-ness is tracked apart from the empty-input dimming, so
+    # the reflection chip can still hand text over with an empty input.
+    assert "var busy = false;" in html
+
+
+def test_sidebar_collapser_persists_and_spares_mobile(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # A chevron on the sidebar edge; a floating one to reopen; the choice
+    # persists in localStorage; the tray follows the new left edge.
+    assert 'id="sidebar-collapse"' in html
+    assert 'id="sidebar-reopen"' in html
+    assert '"sa-sidebar"' in html
+    assert "body.sidebar-collapsed #sidebar" in html
+    assert "body.sidebar-collapsed #guide-chat { left: 0; }" in html
+    # Desktop-only: the collapse rules live behind min-width, and the
+    # mobile drawer (☰) keeps its own behavior untouched.
+    assert "@media (min-width: 721px)" in html
+    assert re.search(r"@media \(max-width: 720px\) \{[^@]*#sidebar-collapse \{ display: none;", html, re.S)
 

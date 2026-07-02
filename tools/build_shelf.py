@@ -334,16 +334,34 @@ STYLE = """
                     border-radius: 8px; padding: 0.2rem 0.7rem;
                     cursor: pointer; }
   main { flex: 1; min-width: 0; max-width: 680px; margin: 0 auto;
-         padding: 2rem 1.5rem 4rem; }
+         padding: 2rem 1.5rem 11rem; } /* room for the fixed tray */
   .js .view { display: none; }
   .js .view.active { display: block; }
+  #sidebar-collapse { position: absolute; top: 0.9rem; right: 0.5rem;
+                      font: inherit; color: #a99e8e; background: none;
+                      border: none; border-radius: 8px;
+                      padding: 0.15rem 0.55rem; cursor: pointer; }
+  #sidebar-collapse:hover { background: #efe7d9; color: #5a4d3a; }
+  #sidebar-reopen { display: none; position: fixed; top: 0.9rem;
+                    left: 0.7rem; z-index: 3; font: inherit;
+                    color: #5a4d3a; background: #efe7d9;
+                    border: 1px solid #e8e0d3; border-radius: 8px;
+                    padding: 0.2rem 0.7rem; cursor: pointer; }
+  @media (min-width: 721px) {
+    #sidebar { transition: margin-left 0.25s ease; }
+    body.sidebar-collapsed #sidebar { margin-left: -260px;
+                                      visibility: hidden; }
+    body.sidebar-collapsed #guide-chat { left: 0; }
+    body.sidebar-collapsed #sidebar-reopen { display: block; }
+  }
   @media (max-width: 720px) {
     #sidebar-toggle { display: block; }
+    #sidebar-collapse { display: none; } /* mobile keeps its own drawer */
     #sidebar { position: fixed; z-index: 2; left: -290px;
                transition: left 0.2s ease; box-shadow: none; }
     #sidebar.open { left: 0; box-shadow: 0 0 24px rgba(60, 56, 51, 0.25); }
     main { padding-top: 3.5rem; }
-    #guide-chat.chat-conversation { left: 0; }
+    #guide-chat { left: 0; }
   }
   h1, h2, h3, h4, h5 { font-family: Georgia, "Times New Roman", serif;
                        font-weight: normal; color: #4a4038; }
@@ -441,8 +459,20 @@ STYLE = """
            border-top: 1px solid #e8e0d3; padding-top: 1rem; }
   code { background: #f2ece1; padding: 0.1em 0.35em; border-radius: 4px;
          font-size: 0.85em; }
-  #guide-chat { position: sticky; bottom: 0; z-index: 2; margin-bottom: 0;
-                box-shadow: 0 -8px 20px rgba(60, 56, 51, 0.07); }
+  /* The tray is ONE immutable fixture: same node, same fixed position,
+     same width in every state and every room — content scrolls beneath
+     it (main's bottom padding keeps everything reachable). Docked it is
+     just the floating bar; conversation stretches the SAME layer to the
+     top and fills in the stream above the unmoved bar. */
+  #guide-chat { position: fixed; left: 260px; right: 0; bottom: 0;
+                z-index: 4; margin: 0; border: none; border-radius: 0;
+                background: transparent; box-shadow: none;
+                display: flex; flex-direction: column;
+                justify-content: flex-end;
+                padding: 0 max(1.5rem, calc(50% - 340px)) 1rem;
+                transition: left 0.25s ease;
+                pointer-events: none; }
+  #guide-chat > * { pointer-events: auto; }
   #chat-messages { max-height: 38vh; min-height: 5rem; overflow-y: auto;
                    padding: 0.25rem 0; border-top: 1px solid #f0e9dd; }
   .chat-msg { white-space: pre-wrap; margin: 0.6rem 0; padding: 0.5rem 0.8rem;
@@ -482,9 +512,6 @@ STYLE = """
              border: none; border-radius: 999px; padding: 0.25rem 0.9rem;
              cursor: pointer; }
   .chat-go:hover { background: #e7dcc8; }
-  #chat-toggle { font: inherit; color: #8a7f70; background: none;
-                 border: 1px solid #e8e0d3; border-radius: 8px;
-                 padding: 0 0.6rem; cursor: pointer; }
   #chat-minimize { display: none; }
   .chat-conversation #chat-minimize { display: block; position: absolute;
                  top: 1rem; right: 1.2rem; font: inherit; font-size: 0.92rem;
@@ -493,15 +520,14 @@ STYLE = """
                  cursor: pointer; }
   .chat-conversation #chat-minimize:hover { background: #e7dcc8; }
   .chat-conversation-mode #now-playing { top: 4.4rem; }
-  #guide-chat.chat-docked h2, #guide-chat.chat-docked #chat-brain,
-  #guide-chat.chat-docked #chat-messages { display: none; }
-  #guide-chat.chat-docked { padding-top: 0.85rem; padding-bottom: 0.85rem; }
-  #guide-chat.chat-docked #chat-form { margin-top: 0; }
-  #guide-chat.chat-conversation { position: fixed; top: 0; right: 0;
-                          bottom: 0; left: 260px; z-index: 4; margin: 0;
-                          border-radius: 0; display: flex;
-                          flex-direction: column;
-                          padding: 2rem max(1.5rem, calc(50% - 330px)); }
+  #guide-chat.chat-docked h2,
+  .chat-docked #chat-messages { display: none; }
+  #guide-chat.chat-docked #chat-brain { opacity: 0.55; margin: 0 0.6rem 0.3rem;
+                justify-content: flex-end; }
+  #guide-chat.chat-docked #chat-brain:hover,
+  #guide-chat.chat-docked #chat-brain:focus-within { opacity: 1; }
+  #guide-chat.chat-conversation { top: 0; background: #fcf9f3;
+                pointer-events: auto; padding-top: 2rem; }
   #guide-chat.chat-conversation #chat-messages { flex: 1; max-height: none;
                                                  font-size: 1.02rem; }
   #reflection-chip { display: flex; align-items: center; gap: 0.3rem;
@@ -515,14 +541,35 @@ STYLE = """
   #reflection-dismiss { font: inherit; font-size: 0.8rem; color: #a99e8e;
                         background: none; border: none; cursor: pointer;
                         padding: 0.2rem 0.4rem; }
-  #chat-form { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
-  #chat-form textarea { flex: 1; font: inherit; color: inherit; resize: vertical;
-                        background: #fffdf9; border: 1px solid #e8e0d3;
-                        border-radius: 8px; padding: 0.5rem 0.75rem; }
-  #chat-form button { font: inherit; color: #5a4d3a; background: #efe7d9;
-                      border: none; border-radius: 8px; padding: 0 1.25rem;
-                      cursor: pointer; }
-  #chat-form button:disabled { opacity: 0.5; cursor: default; }
+  #chat-form { display: flex; gap: 0.45rem; margin: 0.6rem 0 0;
+               align-items: flex-end; background: #fffdf9;
+               border: 1px solid #e6ddcc; border-radius: 22px;
+               padding: 0.45rem;
+               box-shadow: 0 10px 30px rgba(60, 56, 51, 0.14); }
+  #chat-form textarea { flex: 1; font: inherit; color: inherit; resize: none;
+               background: #fbf8f2; border: 1px solid transparent;
+               border-radius: 14px; padding: 0.6rem 0.9rem;
+               line-height: 1.45; max-height: 6.4rem;
+               box-shadow: inset 0 1px 3px rgba(60, 56, 51, 0.05); }
+  #chat-form textarea::placeholder { color: #b3a893; font-style: italic; }
+  #chat-form textarea:focus { outline: none; border-color: #d3bd92;
+               box-shadow: inset 0 1px 3px rgba(60, 56, 51, 0.05),
+                           0 0 0 3px rgba(169, 133, 63, 0.14); }
+  #chat-send { width: 2.6rem; height: 2.6rem; flex-shrink: 0; display: flex;
+               align-items: center; justify-content: center;
+               color: #fdf9f0; background: #a9853f; border: none;
+               border-radius: 999px; cursor: pointer;
+               transition: background 0.15s ease, opacity 0.15s ease; }
+  #chat-send:hover:not(:disabled) { background: #8f6f33; }
+  #chat-send:disabled { opacity: 0.35; cursor: default; }
+  #chat-send svg { width: 1.15rem; height: 1.15rem; }
+  #chat-open { width: 2.6rem; height: 2.6rem; flex-shrink: 0; display: flex;
+               align-items: center; justify-content: center;
+               color: #8a7f70; background: none; border: none;
+               border-radius: 999px; cursor: pointer; }
+  #chat-open:hover { background: #efe7d9; color: #5a4d3a; }
+  #chat-open svg { width: 1.3rem; height: 1.3rem; }
+  .chat-conversation #chat-open { display: none; }
 """
 
 
@@ -533,7 +580,7 @@ STYLE = """
 # sent to (per-request "brain" field), driven by /health's availability
 # map. Replies are rendered with textContent (never innerHTML): model
 # output stays inert text.
-CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
+CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 <template id="avatar-guide">
 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4a8.6 8.6 0 1 0 7 3.6" fill="none" stroke="#a9853f" stroke-width="1.7" stroke-linecap="round"/></svg>
 </template>
@@ -553,9 +600,13 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
 <button type="button" id="reflection-dismiss" aria-label="dismiss">✕</button>
 </div>
 <form id="chat-form">
-<textarea id="chat-input" rows="2" placeholder="Where are you right now?"></textarea>
-<button type="submit" id="chat-send">Send</button>
-<button type="button" id="chat-toggle"></button>
+<button type="button" id="chat-open" title="open the conversation" aria-label="open the conversation">
+<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5.5h15v10.5h-9l-4 3.5v-3.5h-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+</button>
+<textarea id="chat-input" rows="1" placeholder="Where are you right now?"></textarea>
+<button type="submit" id="chat-send" title="Send" aria-label="Send" disabled>
+<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6M6.5 11.5 12 6l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+</button>
 </form>
 </section>
 
@@ -617,8 +668,23 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
   // conversation (talking — generous, most of the pane). The page under
   // a conversation is hidden, never unmounted: audio keeps playing and
   // every scroll position is exactly where you left it.
-  var chatToggle = document.getElementById("chat-toggle");
   var chatState = "docked"; // always start docked: the room owns the screen
+  var busy = false; // a reply in flight (independent of empty-input dimming)
+
+  function updateSendState() {
+    // Dim Send when there is nothing to send; busy dims it regardless.
+    send.disabled = busy || !input.value.trim();
+  }
+
+  function autoGrow() {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 100) + "px";
+  }
+
+  input.addEventListener("input", function () {
+    updateSendState();
+    autoGrow();
+  });
 
   function setChatState(next) {
     chatState = next;
@@ -627,14 +693,11 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
     // The capsule steps down under the minimize pill while talking.
     document.body.classList.toggle(
       "chat-conversation-mode", next === "conversation");
-    chatToggle.textContent = next === "docked" ? "▴" : "▾";
-    chatToggle.setAttribute("title",
-      next === "docked" ? "open the conversation" : "back to the page");
     if (next === "conversation") list.scrollTop = list.scrollHeight;
   }
 
-  chatToggle.addEventListener("click", function () {
-    setChatState(chatState === "docked" ? "conversation" : "docked");
+  document.getElementById("chat-open").addEventListener("click", function () {
+    setChatState("conversation"); // open without sending
   });
   document.getElementById("chat-minimize").addEventListener("click", function () {
     setChatState("docked"); // same as Escape: the page is exactly as left
@@ -775,7 +838,7 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
 
   chipSend.addEventListener("click", function () {
     var reflection = chipSlug && reflections[chipSlug];
-    if (!reflection || send.disabled) return;
+    if (!reflection || busy) return;
     var card = document.getElementById("talk-" + chipSlug);
     var heading = card && card.querySelector("h2");
     var title = heading ? heading.textContent : chipSlug;
@@ -883,13 +946,14 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
 
   function sendMessage(text) {
-    if (!text || send.disabled) return;
+    if (!text || busy) return;
     if (chatState === "docked") setChatState("conversation"); // replies land visibly
     add("user", text);
     history.push({ role: "user", content: text });
     var pending = add("guide", "thinking…");
     pending.classList.add("chat-thinking");
-    send.disabled = true;
+    busy = true;
+    updateSendState();
     fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -946,7 +1010,8 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
       pending.classList.remove("chat-thinking");
       pending.textContent = "The guide is out of reach — " + error.message;
     }).finally(function () {
-      send.disabled = false;
+      busy = false;
+      updateSendState();
       input.focus({ preventScroll: true });
     });
   }
@@ -954,8 +1019,10 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     var text = input.value.trim();
-    if (!text || send.disabled) return;
+    if (!text || busy) return;
     input.value = "";
+    updateSendState();
+    autoGrow();
     sendMessage(text);
   });
 
@@ -1035,6 +1102,26 @@ LAYOUT_SCRIPT = """<script>
   toggle.addEventListener("click", function () {
     sidebar.classList.toggle("open");
   });
+
+  // Desktop collapser: a slim chevron folds the sidebar away and a
+  // floating one brings it back; the choice persists. The tray never
+  // moves relative to the viewport bottom through any of it.
+  function setSidebarCollapsed(collapsed) {
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    try {
+      if (collapsed) localStorage.setItem("sa-sidebar", "collapsed");
+      else localStorage.removeItem("sa-sidebar");
+    } catch (e) { /* storage blocked: the choice just doesn't persist */ }
+  }
+  document.getElementById("sidebar-collapse").addEventListener(
+    "click", function () { setSidebarCollapsed(true); });
+  document.getElementById("sidebar-reopen").addEventListener(
+    "click", function () { setSidebarCollapsed(false); });
+  try {
+    if (localStorage.getItem("sa-sidebar") === "collapsed") {
+      setSidebarCollapsed(true);
+    }
+  } catch (e) { /* fresh page each time is fine */ }
   links.forEach(function (link) {
     link.addEventListener("click", function () {
       sidebar.classList.remove("open"); // narrow screens: picking closes it
@@ -1593,8 +1680,10 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 </head>
 <body>
 <button type="button" id="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
+<button type="button" id="sidebar-reopen" title="show the sidebar" aria-label="show the sidebar">›</button>
 <div id="layout">
 <nav id="sidebar">
+<button type="button" id="sidebar-collapse" title="hide the sidebar" aria-label="hide the sidebar">‹</button>
 <h1>Second Arrow</h1>
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
 <a class="begin-link" href="#home">begin here</a>{curriculum_link}
