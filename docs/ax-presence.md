@@ -77,6 +77,48 @@ the mapping so follow-ups continue the same thread. Note that an incoming
 aX message becomes the guide's *current* session, so the shelf panel's
 session list will show `ax-` conversations too.
 
+### Catch-up: mentions received while offline
+
+SSE doesn't replay, so `listen` starts with one `messages(action="check")`
+pass and answers mentions that arrived while the bridge was down — oldest
+first, capped at 10 per start (overflow is logged, not answered). A
+watermark in `library/.ax/state.json` (the newest mention already handled)
+keeps anything from being answered twice; replies second-arrow already
+sent also mark their parent mentions as answered. `--dry-run` covers
+catch-up too and leaves the watermark untouched.
+
+## Guide backends: shelf (default) or Hermes
+
+By default mentions go to the serve_shelf chat. `--guide hermes` routes
+them to the Hermes profile gateway instead (see `docs/hermes-bridge.md`
+for setting that profile up):
+
+```
+export HERMES_API_KEY=<the profile's API_SERVER_KEY>
+uv run tools/ax_presence.py listen --guide hermes   # --hermes-url http://127.0.0.1:8642
+```
+
+The bridge POSTs `/v1/responses` (bearer auth; `API_SERVER_KEY` works as
+an env fallback), non-streamed, and relies on the api-server's documented
+server-side `conversation` parameter for continuity — one named
+conversation per aX sender, no client-side history to maintain. `<think>`
+blocks are stripped from replies. If the gateway is down or rejects the
+key, the failure is logged locally and the mention simply stays
+unanswered — error text is never sent to aX.
+
+**Privacy in hermes mode:** the mention text goes to whatever model the
+Hermes profile is configured with — in phase 1 a *hosted* model
+(gpt-5.5). The rule is unchanged — replies only to explicit mentions,
+nothing proactive — but in this mode the question itself leaves the
+machine twice: once to aX, once to the profile's model provider.
+
+## aX scope
+
+The bridge's entire aX surface is the `messages` tool: receiving mentions
+(SSE + the catch-up `check`) and sending replies. It never calls
+`tasks`, `agents`, `spaces`, or `context` — by requirement, not accident;
+extending the surface needs an explicit decision here first.
+
 ## Troubleshooting
 
 - **401 / "no refresh_token stored"** — the refresh chain broke (tokens
@@ -89,6 +131,11 @@ session list will show `ax-` conversations too.
 - **"guide unreachable"** — `serve_shelf.py` isn't running on
   `http://127.0.0.1:8765`. Start it, or point the bridge elsewhere with
   `--guide-url`.
+- **"Hermes gateway unreachable" / "rejected the key (401)"** — in hermes
+  mode the profile's api-server isn't up on `--hermes-url`, or the key is
+  wrong. The mention stays unanswered (nothing is sent to aX). Check the
+  profile's `.env` (`API_SERVER_ENABLED=true`, `API_SERVER_KEY`) and gate
+  it with `HERMES_API_KEY=... uv run tools/hermes_probe.py`.
 - **"NO message-send tool found"** — aX changed its tool surface again;
   the log line lists what `tools/list` returned. Extend `pick_send_tool` /
   `build_send_args` in `tools/ax_presence.py` (both are pure and covered

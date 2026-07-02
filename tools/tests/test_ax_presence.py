@@ -155,7 +155,13 @@ def test_mention_nested_message_shape():
         "text": "@second-arrow ping",
         "message_id": "m2",
         "space_id": "s1",
+        "timestamp": None,
     }
+
+
+def test_mention_carries_a_timestamp_when_present():
+    data = {"sender": "alice", "content": "@second-arrow hi", "created_at": "2026-07-01T10:00:00Z"}
+    assert ax.extract_mention("mention", data, AGENT)["timestamp"] == "2026-07-01T10:00:00Z"
 
 
 def test_mention_via_mentioned_agent_field():
@@ -351,3 +357,163 @@ def test_build_send_args_no_content_field_raises():
 def test_build_send_args_omits_missing_mention_fields():
     schema = {"properties": {"message": {"type": "string"}, "reply_to": {}}}
     assert ax.build_send_args(schema, "r", {}) == {"message": "r"}
+
+
+# --- hermes guide backend ------------------------------------------------------
+
+
+def test_resolve_hermes_key_order():
+    assert ax.resolve_hermes_key({"HERMES_API_KEY": "a", "API_SERVER_KEY": "b"}) == "a"
+    assert ax.resolve_hermes_key({"API_SERVER_KEY": "b"}) == "b"
+    assert ax.resolve_hermes_key({"HERMES_API_KEY": ""}) is None
+    assert ax.resolve_hermes_key({}) is None
+
+
+def test_build_hermes_request_uses_conversation_continuity():
+    req = ax.build_hermes_request("[aX message from @alice] hi", "ax-alice")
+    assert req == {
+        "model": "hermes-agent",
+        "input": "[aX message from @alice] hi",
+        "conversation": "ax-alice",
+        "store": True,
+    }
+
+
+def test_strip_think():
+    assert ax.strip_think("<think>hmm\nmm</think>  Hello.") == "Hello."
+    assert ax.strip_think("plain") == "plain"
+
+
+def test_extract_hermes_reply_responses_shape_with_think():
+    payload = {
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "read_transcript", "call_id": "c1"},
+            {"type": "function_call_output", "call_id": "c1", "output": "..."},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "<think>plan</think>The second arrow "},
+                    {"type": "output_text", "text": "is the one we add."},
+                ],
+            },
+        ],
+    }
+    assert ax.extract_hermes_reply(payload) == "The second arrow is the one we add."
+
+
+def test_extract_hermes_reply_chat_completions_fallback():
+    payload = {"choices": [{"message": {"role": "assistant", "content": "<think>x</think> Hi."}}]}
+    assert ax.extract_hermes_reply(payload) == "Hi."
+
+
+def test_extract_hermes_reply_empty_raises():
+    with pytest.raises(ax.GuideError):
+        ax.extract_hermes_reply({})
+    with pytest.raises(ax.GuideError):
+        ax.extract_hermes_reply({"output": [{"type": "message", "content": "<think>only</think>"}]})
+
+
+def test_route_mention_selects_backend(monkeypatch):
+    from types import SimpleNamespace
+
+    mention = {"sender": "alice", "text": "hi"}
+    monkeypatch.setattr(ax, "guide_reply_for", lambda m, url, brain: f"shelf:{url}")
+    monkeypatch.setattr(ax, "hermes_reply_for", lambda m, url, key: f"hermes:{url}:{key}")
+    args = SimpleNamespace(guide="shelf", guide_url="G", brain=None, hermes_url="H")
+    assert ax.route_mention(args, mention) == "shelf:G"
+    args.guide = "hermes"
+    monkeypatch.setenv("HERMES_API_KEY", "k1")
+    assert ax.route_mention(args, mention) == "hermes:H:k1"
+    args.guide = "nope"
+    with pytest.raises(ax.GuideError):
+        ax.route_mention(args, mention)
+
+
+# --- catch-up: mentions missed while offline -------------------------------------
+
+
+def test_watermark_round_trip(tmp_path):
+    path = tmp_path / "state.json"
+    ax.save_tokens(path, {"watermark": "2026-07-01T10:00:00Z"})
+    assert ax.load_tokens(path)["watermark"] == "2026-07-01T10:00:00Z"
+
+
+def test_ts_newer():
+    assert ax.ts_newer("2026-07-01T10:00:01Z", "2026-07-01T10:00:00Z")
+    assert not ax.ts_newer("2026-07-01T10:00:00Z", "2026-07-01T10:00:00Z")
+    assert not ax.ts_newer("2026-06-30T23:59:59Z", "2026-07-01T10:00:00Z")
+    assert ax.ts_newer("anything", None)  # no watermark yet: everything is new
+    assert ax.ts_newer(None, "2026-07-01T10:00:00Z")  # unstamped: don't drop it
+    assert ax.ts_newer(200, 100) and not ax.ts_newer(100, 200)
+
+
+def test_newest_timestamp():
+    assert ax.newest_timestamp(None, "b") == "b"
+    assert ax.newest_timestamp("a", None) == "a"
+    assert ax.newest_timestamp("a", "b") == "b"
+    assert ax.newest_timestamp("b", "a") == "b"
+
+
+def test_build_check_args_from_real_schema():
+    args = ax.build_check_args(AX_V3_MESSAGES_SCHEMA, fetch=50)
+    assert args["action"] == "check"
+    assert args["reason"]  # required by the live schema
+    assert args["limit"] == 50
+    # AX_V3_MESSAGES_SCHEMA (trimmed) has no show_own_messages — not sprayed in
+    assert "show_own_messages" not in args
+
+
+def test_build_check_args_stays_read_only():
+    schema = {"properties": {"action": {}, "reason": {}, "mark_read": {}}}
+    # dedup is the watermark's job; the check must not consume the inbox
+    assert ax.build_check_args(schema)["mark_read"] is False
+
+
+def test_build_check_args_includes_own_messages_when_supported():
+    schema = {"properties": {"action": {}, "reason": {}, "show_own_messages": {}}}
+    args = ax.build_check_args(schema)
+    assert args["show_own_messages"] is True
+
+
+def test_parse_inbox_shapes():
+    msgs = [{"id": "1"}, {"id": "2"}]
+    assert ax.parse_inbox(msgs) == msgs
+    assert ax.parse_inbox({"messages": msgs}) == msgs
+    assert ax.parse_inbox({"posts": msgs}) == msgs
+    assert ax.parse_inbox({"count": 0}) == []
+    assert ax.parse_inbox("junk") == []
+    assert ax.parse_inbox({"messages": [{"id": "1"}, "junk"]}) == [{"id": "1"}]
+
+
+def _msg(mid, sender, ts, text="@second-arrow hello", **extra):
+    return {"id": mid, "sender": sender, "created_at": ts, "content": text, **extra}
+
+
+def test_select_catchup_excludes_watermarked_and_answered_and_caps():
+    inbox = [
+        _msg("m1", "alice", "2026-07-01T09:00:00Z"),  # before watermark: excluded
+        _msg("m2", "alice", "2026-07-01T11:00:00Z"),  # answered below: excluded
+        _msg("r2", "second-arrow", "2026-07-01T11:05:00Z", text="answer", reply_to="m2"),
+        _msg("m3", "bob", "2026-07-01T12:00:00Z"),  # to answer
+        _msg("m4", "carol", "2026-07-01T13:00:00Z"),  # to answer
+        {"id": "x", "sender": "dave", "created_at": "2026-07-01T14:00:00Z", "content": "no mention"},
+    ]
+    mentions, skipped = ax.select_catchup(inbox, AGENT, "2026-07-01T10:00:00Z")
+    assert [m["message_id"] for m in mentions] == ["m3", "m4"]  # oldest first
+    assert skipped == 0
+
+
+def test_select_catchup_cap_keeps_newest_and_counts_skipped():
+    inbox = [_msg(f"m{i}", "alice", f"2026-07-01T1{i}:00:00Z") for i in range(6)]
+    mentions, skipped = ax.select_catchup(inbox, AGENT, None, limit=4)
+    assert skipped == 2
+    assert [m["message_id"] for m in mentions] == ["m2", "m3", "m4", "m5"]
+
+
+def test_select_catchup_no_watermark_takes_everything():
+    inbox = [_msg("m1", "alice", "2026-07-01T09:00:00Z")]
+    mentions, skipped = ax.select_catchup(inbox, AGENT, None)
+    assert [m["message_id"] for m in mentions] == ["m1"] and skipped == 0
