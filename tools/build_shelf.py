@@ -121,6 +121,11 @@ STYLE = """
                  text-decoration: none; }
   details { margin-top: 1rem; border-top: 1px solid #f0e9dd; padding-top: 0.75rem; }
   summary { cursor: pointer; color: #8a7f70; font-size: 0.95rem; }
+  .raw-link { font-size: 0.85rem; margin: 0.5rem 0 0.3rem; }
+  .raw-link a { color: #a99e8e; }
+  .scroll-box { max-height: 24em; overflow-y: auto; background: #fbf8f2;
+                border: 1px solid #f0e9dd; border-radius: 8px;
+                padding: 0.25rem 1rem; font-size: 0.95rem; }
   details > *:not(summary) { margin-left: 0.25rem; }
   a { color: #7a6a50; }
   footer { color: #a99e8e; font-size: 0.85rem; margin-top: 3rem;
@@ -200,6 +205,39 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     });
   }
 
+  // Safe mini-markdown for COMPLETED guide bubbles: **bold**, *italic*,
+  // `code` become real elements, built with createElement + textContent
+  // only — the text is never parsed as HTML. Streaming stays plain text.
+  function renderRich(el, text) {
+    el.textContent = "";
+    var pattern = /\\*\\*([^*\\n]+)\\*\\*|\\*([^*\\n]+)\\*|`([^`\\n]+)`/;
+    var rest = text;
+    var m;
+    while ((m = rest.match(pattern))) {
+      if (m.index > 0) {
+        el.appendChild(document.createTextNode(rest.slice(0, m.index)));
+      }
+      var tag = m[1] !== undefined ? "strong" : (m[2] !== undefined ? "em" : "code");
+      var node = document.createElement(tag);
+      node.textContent = m[1] !== undefined ? m[1]
+        : (m[2] !== undefined ? m[2] : m[3]);
+      el.appendChild(node);
+      rest = rest.slice(m.index + m[0].length);
+    }
+    if (rest) el.appendChild(document.createTextNode(rest));
+  }
+
+  function restoreHistory() {
+    fetch("/api/history").then(function (r) { return r.json(); }).then(function (data) {
+      (data.turns || []).forEach(function (turn) {
+        if (turn.role !== "user" && turn.role !== "assistant") return;
+        var div = add(turn.role === "user" ? "user" : "guide", turn.content);
+        if (turn.role === "assistant") renderRich(div, turn.content);
+        history.push({ role: turn.role, content: turn.content });
+      });
+    }).catch(function () { /* an older server has no /api/history */ });
+  }
+
   fetch("/health").then(function (r) { return r.json(); }).then(function (h) {
     if (!h.ok) return;
     brain = h.brain;
@@ -221,6 +259,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     });
     markActive();
     panel.hidden = false;
+    restoreHistory(); // earlier turns come back after a reload or restart
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
 
   form.addEventListener("submit", function (event) {
@@ -270,11 +309,13 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       }
       return pump();
     }).then(function (reply) {
-      if (pending.classList.contains("chat-thinking")) {
-        pending.classList.remove("chat-thinking");
-        pending.textContent = reply || "The guide said nothing — try again.";
+      pending.classList.remove("chat-thinking");
+      if (!reply) {
+        pending.textContent = "The guide said nothing — try again.";
+        return;
       }
-      if (reply) history.push({ role: "assistant", content: reply });
+      renderRich(pending, reply); // bubble completed: dress the markdown
+      history.push({ role: "assistant", content: reply });
     }).catch(function (error) {
       pending.classList.remove("chat-thinking");
       pending.textContent = "The guide is out of reach — " + error.message;
@@ -336,9 +377,15 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
             notes = md_to_html((talk_dir / "notes.md").read_text())
             card.append(f"<details><summary>Notes</summary>\n{notes}\n</details>")
         if files["transcript_md"]:
+            # Rendered inline (escaped, formatted) — the raw .md link alone
+            # opened as one wall of unformatted text. Transcripts run long,
+            # so the rendered copy lives in a scrollable box, with the raw
+            # file still a click away.
+            transcript = md_to_html((talk_dir / "transcript.md").read_text())
             card.append(
                 "<details><summary>Transcript</summary>\n"
-                f'<p><a href="{slug}/transcript.md">{slug}/transcript.md</a></p>\n</details>'
+                f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
+                f'<div class="scroll-box">\n{transcript}\n</div>\n</details>'
             )
         card.append("</section>")
         cards.append("\n".join(card))

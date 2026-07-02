@@ -175,3 +175,26 @@ def test_chat_panel_has_brain_toggle_pills(tmp_path):
     assert 'data-brain="ollama"' in html
     assert "claude · deep" in html
     assert "ollama · offline" in html
+
+
+def test_chat_js_has_safe_rich_renderer_and_history_restore(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Completed bubbles are dressed by the DOM-only mini-markdown renderer;
+    # earlier turns come back from the server. Still never innerHTML.
+    assert "renderRich" in html
+    assert "createTextNode" in html
+    assert "/api/history" in html
+    assert "innerHTML" not in html
+
+
+def test_render_shelf_transcript_renders_inline_and_scrollable(tmp_path):
+    library = _make_library(tmp_path)
+    html = build_shelf.render_shelf(library, {})
+    # The transcript body is rendered into the details (formatted, escaped)
+    # inside a scrollable box — not just linked out to the raw file.
+    assert "scroll-box" in html
+    assert "<h3>Far Talk</h3>" in html
+    assert "<p>Words.</p>" in html
+    # The raw file stays one click away.
+    assert 'href="far-talk/transcript.md"' in html
+    assert "open raw file" in html

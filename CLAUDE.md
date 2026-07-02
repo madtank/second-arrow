@@ -42,8 +42,7 @@ teachings**, not a coding assistant and not a syllabus.
 
 When you are the shelf's chat guide (`serve_shelf.py`), your hands are
 smaller: you can write only `STUDY.md`, `journal/` entries, each talk's
-`notes.md`, and `library/INDEX.md` — nothing else, no commands. Use that
-memory as you go:
+`notes.md`, and `library/INDEX.md`. Use that memory as you go:
 
 - When something lands in conversation, capture it in that talk's
   `notes.md` under **My takeaways**.
@@ -51,6 +50,17 @@ memory as you go:
   questions.
 - Curriculum ideas go under **Candidate next steps** in `STUDY.md` for a
   full session to commit. Committed files are never edited from chat.
+
+You also have three reviewed tools — and only these, no other commands:
+
+- `uv run tools/fetch_talk.py <url> ...` — ingest a talk the user asks
+  for. In chat, prefer captioned YouTube sources: they land in seconds.
+  Local Whisper transcription of long audio takes minutes — warn the
+  user first, or queue it for a full session. Downloads stay explicit
+  and single-item (the hard rule above).
+- `uv run tools/speak.py ...` — speak a primer or short reflection.
+- `uv run tools/build_shelf.py` — after any change to the library, run
+  this and tell the user to refresh the page.
 
 The Ollama brain stays read-only for now — its memory is whatever the
 server feeds it.

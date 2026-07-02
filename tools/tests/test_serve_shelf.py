@@ -129,14 +129,23 @@ def test_build_claude_cmd_resume_turn():
     assert cmd[cmd.index("--output-format") + 1] == "stream-json"
 
 
-def test_chat_allowed_tools_covers_exactly_the_memory_scopes():
+def test_chat_allowed_tools_covers_memory_scopes_and_reviewed_tools_only():
     rules = serve_shelf.chat_allowed_tools().split(",")
-    scopes = ("STUDY.md", "journal/**", "library/**/notes.md", "library/INDEX.md")
-    expected = {f"{tool}({scope})" for scope in scopes for tool in ("Edit", "Write")}
+    write_scopes = ("STUDY.md", "journal/**", "library/**/notes.md", "library/INDEX.md")
+    expected = {f"{tool}({scope})" for scope in write_scopes for tool in ("Edit", "Write")}
+    expected |= {
+        "Bash(uv run tools/fetch_talk.py:*)",
+        "Bash(uv run tools/speak.py:*)",
+        "Bash(uv run tools/build_shelf.py:*)",
+    }
     assert set(rules) == expected
     assert len(rules) == len(expected)  # no stray rules
-    # Nothing grants Bash or unscoped tools.
-    assert all("(" in rule and rule.split("(")[0] in ("Edit", "Write") for rule in rules)
+    # No general Bash: every Bash rule is pinned to a reviewed tool command.
+    for rule in rules:
+        assert rule.split("(")[0] in ("Edit", "Write", "Bash")
+        if rule.startswith("Bash("):
+            assert rule.startswith("Bash(uv run tools/")
+            assert rule.endswith(":*)")
 
 
 # --- trim_history -------------------------------------------------------
@@ -399,6 +408,107 @@ def test_resolve_brain_default_skips_the_availability_gate():
     # the brain itself reports a proper error if it is really down.
     available = {"claude": True, "ollama": False}
     assert serve_shelf.resolve_brain(None, "ollama", available) == "ollama"
+
+
+# --- persistent chat memory (library/.chat) --------------------------------
+
+
+def test_append_turn_and_load_history_roundtrip(tmp_path):
+    path = tmp_path / ".chat" / "history.jsonl"  # parents are created
+    serve_shelf.append_turn(
+        path, "user", "hello", "claude", timestamp="2026-07-01T10:00:00+00:00"
+    )
+    serve_shelf.append_turn(
+        path, "assistant", "hi **friend**\nline two", "claude",
+        timestamp="2026-07-01T10:00:05+00:00",
+    )
+    turns = serve_shelf.load_history(path)
+    assert [t["role"] for t in turns] == ["user", "assistant"]
+    assert turns[0] == {
+        "role": "user", "content": "hello", "brain": "claude",
+        "ts": "2026-07-01T10:00:00+00:00",
+    }
+    assert turns[1]["content"] == "hi **friend**\nline two"  # newlines survive
+
+
+def test_append_turn_default_timestamp_is_parseable_iso(tmp_path):
+    from datetime import datetime
+
+    path = tmp_path / "history.jsonl"
+    serve_shelf.append_turn(path, "user", "hi", "ollama")
+    (turn,) = serve_shelf.load_history(path)
+    assert datetime.fromisoformat(turn["ts"]).tzinfo is not None
+
+
+def test_load_history_trims_to_limit(tmp_path):
+    path = tmp_path / "history.jsonl"
+    for i in range(60):
+        serve_shelf.append_turn(path, "user", f"turn {i}", "claude", timestamp="t")
+    turns = serve_shelf.load_history(path, limit=50)
+    assert len(turns) == 50
+    assert turns[0]["content"] == "turn 10"
+    assert turns[-1]["content"] == "turn 59"
+
+
+def test_load_history_tolerates_corrupt_and_alien_lines(tmp_path):
+    path = tmp_path / "history.jsonl"
+    serve_shelf.append_turn(path, "user", "before", "claude", timestamp="t")
+    with path.open("a") as handle:
+        handle.write("{torn write\n")  # crash mid-append
+        handle.write('"just a string"\n')  # valid JSON, wrong shape
+        handle.write('{"role": 5, "content": "bad types"}\n')
+        handle.write("\n")
+    serve_shelf.append_turn(path, "assistant", "after", "claude", timestamp="t")
+    turns = serve_shelf.load_history(path)
+    assert [t["content"] for t in turns] == ["before", "after"]
+
+
+def test_load_history_missing_file_is_empty(tmp_path):
+    assert serve_shelf.load_history(tmp_path / "nope.jsonl") == []
+
+
+def test_chat_state_roundtrip_and_tolerance(tmp_path):
+    path = tmp_path / ".chat" / "state.json"
+    assert serve_shelf.load_chat_state(path) == {}  # missing file
+    serve_shelf.save_chat_state(path, {"session_id": "s-42"})
+    assert serve_shelf.load_chat_state(path) == {"session_id": "s-42"}
+    path.write_text("{corrupt")
+    assert serve_shelf.load_chat_state(path) == {}
+
+
+def test_record_stream_persists_completed_turn_and_state(tmp_path):
+    history = tmp_path / "history.jsonl"
+    state_file = tmp_path / "state.json"
+    state = {"session_id": "s-live"}
+    chunks = list(
+        serve_shelf.record_stream(
+            iter(["The demon ", "grows on anger."]),
+            "what does it grow on?",
+            "claude",
+            state,
+            history_path=history,
+            state_path=state_file,
+        )
+    )
+    assert chunks == ["The demon ", "grows on anger."]  # passthrough intact
+    turns = serve_shelf.load_history(history)
+    assert [t["role"] for t in turns] == ["user", "assistant"]
+    assert turns[1]["content"] == "The demon grows on anger."
+    assert turns[1]["brain"] == "claude"
+    assert serve_shelf.load_chat_state(state_file) == {"session_id": "s-live"}
+
+
+def test_record_stream_skips_recording_empty_replies(tmp_path):
+    history = tmp_path / "history.jsonl"
+    state_file = tmp_path / "state.json"
+    list(
+        serve_shelf.record_stream(
+            iter([]), "hello?", "claude", {"session_id": None},
+            history_path=history, state_path=state_file,
+        )
+    )
+    assert serve_shelf.load_history(history) == []
+    assert serve_shelf.load_chat_state(state_file) == {"session_id": None}
 
 
 def test_resolve_ollama_model_prefers_configured_then_falls_back():

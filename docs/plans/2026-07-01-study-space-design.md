@@ -148,20 +148,23 @@ phone), revisit with real usage behind the decision.
    generate a spoken primer, run a full study session, write the first real
    journal entry.
 
-## Future lanes (decided 2026-07-01, not yet scheduled)
+## Roadmap (iterating)
 
-- **Study shelf page** — DONE: `tools/build_shelf.py` renders a private,
-  clickable `library/shelf.html` (talk cards, primer players, notes) so the
-  library is browsable outside a terminal.
-- **Offline guide via local models (Ollama)** — in progress:
-  `tools/serve_shelf.py` serves the shelf with a guide chat panel and has the
-  Ollama plug (`--brain ollama`), grounded by retrieval — the server packs the
-  persona, `STUDY.md`, the index, and the top keyword-matched transcript
-  chunks into the system prompt. Honest constraint to design around: local models
-  are weaker discussion partners, so the offline guide should lean on
-  retrieval (quote the transcript, surface notes) more than free-form
-  teaching. Everything else is already local: Whisper transcription, Kokoro
-  TTS, the library and journal on disk.
+- **Iter 1 — DONE: chat agency, persistence, rich bubbles.** The chat
+  guide streams replies, remembers (scoped writes to `STUDY.md`,
+  `journal/`, notes, the index; history and session survive restarts
+  under `library/.chat/`), and acts through the reviewed tools only
+  (fetch_talk, speak, build_shelf — no general Bash). Brain toggle in
+  the panel; bubbles render safe mini-markdown.
+- **Iter 2 — path-flow:** the guide advances the curriculum queue itself
+  (suggest → ingest → primer → discuss → notes), optionally with a
+  nightly prep cron.
+- **Iter 3 — Ollama tool loop:** offline agency for the local brain.
+  Honest constraint to design around: local models are weaker discussion
+  partners, so the offline guide should lean on retrieval (quote the
+  transcript, surface notes) more than free-form teaching. Everything
+  else is already local: Whisper transcription, Kokoro TTS, the library
+  and journal on disk.
 
 ## Boundaries
 

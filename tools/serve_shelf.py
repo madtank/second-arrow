@@ -17,7 +17,13 @@ Routes:
                     toggle); it falls back to the server's --brain default,
                     unknown names are a 400. Claude session continuity is
                     kept across switches (ollama turns don't touch it).
+    GET  /api/history  last 50 completed turns (library/.chat/history.jsonl)
     /<talk>/...     library/ served statically (Range supported, audio seeks)
+
+Chat memory persists under library/.chat/ (private, gitignored with the
+rest of library/): every completed turn is appended to history.jsonl and
+the claude session_id is saved to state.json, so both the transcript and
+the conversation thread survive page closes and server restarts.
 
 Chat replies stream as chunked plain text (`text/plain; charset=utf-8`,
 one raw text fragment per chunk — no SSE framing; the panel just appends
@@ -30,10 +36,12 @@ Two brains:
     --brain claude (default)  runs the authenticated Claude CLI headless in
         this repo (`--output-format stream-json --include-partial-messages`),
         so it inherits the CLAUDE.md guide persona and can read library/
-        itself. Writes are scoped: `--permission-mode default` plus an
+        itself. Agency is scoped: `--permission-mode default` plus an
         --allowedTools allowlist grant Edit/Write ONLY on STUDY.md,
-        journal/**, library/**/notes.md, and library/INDEX.md — no Bash,
-        nothing else. That is the safety boundary (see chat_allowed_tools).
+        journal/**, library/**/notes.md, and library/INDEX.md, and Bash
+        ONLY for our reviewed tools (fetch_talk.py, speak.py,
+        build_shelf.py) — no general Bash, nothing else. That is the
+        safety boundary (see chat_allowed_tools).
         Conversation continuity via `--resume <session_id>`, falling back
         to folding trimmed history into the prompt.
     --brain ollama  talks to a local Ollama (http://localhost:11434) with
@@ -60,12 +68,17 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIBRARY = REPO_ROOT / "library"
+CHAT_DIR = LIBRARY / ".chat"  # private: covered by the library/ gitignore
+HISTORY_PATH = CHAT_DIR / "history.jsonl"
+STATE_PATH = CHAT_DIR / "state.json"
+HISTORY_LIMIT = 50  # turns served back to the panel on page load
 OLLAMA_URL = "http://localhost:11434"
-CLAUDE_TIMEOUT = 240  # seconds — guide turns can take a while
+CLAUDE_TIMEOUT = 600  # seconds — tool turns (ingest, TTS) take a while
 CHUNK_SIZE = 1200
 MAX_HISTORY_MESSAGES = 12
 
@@ -195,18 +208,32 @@ CHAT_WRITE_SCOPES = (
     "library/INDEX.md",
 )
 
+# The chat guide's hands: OUR reviewed tools, as exact command prefixes.
+# `Bash(<prefix>:*)` allows `<prefix> <anything>` and nothing else — no
+# general Bash (verified empirically: `Bash(echo hi:*)` lets `echo hi there`
+# run while `ls /` stays blocked under --permission-mode default).
+CHAT_BASH_SCOPES = (
+    "uv run tools/fetch_talk.py",
+    "uv run tools/speak.py",
+    "uv run tools/build_shelf.py",
+)
 
-def chat_allowed_tools(scopes: tuple[str, ...] = CHAT_WRITE_SCOPES) -> str:
-    """Comma-joined --allowedTools rules: Edit+Write per scope, nothing else.
+
+def chat_allowed_tools(
+    scopes: tuple[str, ...] = CHAT_WRITE_SCOPES,
+    bash_scopes: tuple[str, ...] = CHAT_BASH_SCOPES,
+) -> str:
+    """Comma-joined --allowedTools rules: Edit+Write per memory scope plus
+    Bash pinned to the reviewed tool commands — nothing else.
 
     Verified against the real CLI: `--allowedTools "Edit(STUDY.md),..."`
-    with `--permission-mode default` lets those edits through and leaves
-    every other write pending-denied in headless mode. (This CLI version
+    with `--permission-mode default` lets those through and leaves every
+    other write/command pending-denied in headless mode. (This CLI version
     has no separate MultiEdit tool — Edit covers multi-edits.)
     """
-    return ",".join(
-        f"{tool}({scope})" for scope in scopes for tool in ("Edit", "Write")
-    )
+    rules = [f"{tool}({scope})" for scope in scopes for tool in ("Edit", "Write")]
+    rules += [f"Bash({command}:*)" for command in bash_scopes]
+    return ",".join(rules)
 
 
 def build_claude_cmd(prompt: str, session_id: str | None = None) -> list[str]:
@@ -419,6 +446,87 @@ def resolve_brain(requested, default: str, available: dict) -> str:
             503, f"The {requested} brain is not available — {BRAIN_HINTS[requested]}."
         )
     return requested
+
+
+# --- persistent chat memory (library/.chat/, private) --------------------
+
+
+def append_turn(
+    path: Path, role: str, content: str, brain: str, timestamp: str | None = None
+) -> None:
+    """Append one completed chat turn to the JSONL history file."""
+    record = {
+        "role": role,
+        "content": content,
+        "brain": brain,
+        "ts": timestamp
+        or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def load_history(path: Path, limit: int = HISTORY_LIMIT) -> list[dict]:
+    """Last `limit` turns from the JSONL history. Corrupt lines are skipped
+    (a torn write must never take the whole panel down)."""
+    if not path.exists():
+        return []
+    turns: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(record, dict)
+            and isinstance(record.get("role"), str)
+            and isinstance(record.get("content"), str)
+        ):
+            turns.append(record)
+    return turns[-limit:]
+
+
+def load_chat_state(path: Path) -> dict:
+    """Chat state (the claude session_id) so continuity survives restarts."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_chat_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def record_stream(
+    stream,
+    user_content: str,
+    chosen: str,
+    state: dict,
+    history_path: Path = HISTORY_PATH,
+    state_path: Path = STATE_PATH,
+):
+    """Pass a reply stream through while persisting the completed turn.
+
+    Once the stream finishes, the user message and the full reply are
+    appended to the history and the (possibly refreshed) claude session_id
+    is saved — so both survive page closes and server restarts.
+    """
+    parts: list[str] = []
+    for chunk in stream:
+        parts.append(chunk)
+        yield chunk
+    reply = "".join(parts)
+    if reply.strip():
+        append_turn(history_path, "user", user_content, chosen)
+        append_turn(history_path, "assistant", reply, chosen)
+    save_chat_state(state_path, {"session_id": state.get("session_id")})
 
 
 # --- shelf + library ----------------------------------------------------
@@ -653,7 +761,11 @@ def create_app(brain: str, ollama_model: str):
     print(f"[serve_shelf] rebuilt {shelf}")
 
     app = FastAPI(title="Second Arrow — Study Shelf")
-    state: dict = {"session_id": None}
+    # The claude session survives restarts: state is loaded from disk here
+    # and saved after every completed turn (record_stream).
+    state: dict = {"session_id": load_chat_state(STATE_PATH).get("session_id")}
+    if state["session_id"]:
+        print(f"[serve_shelf] resuming claude session {state['session_id']}")
 
     @app.get("/")
     def index() -> FileResponse:
@@ -662,6 +774,10 @@ def create_app(brain: str, ollama_model: str):
     @app.get("/health")
     def health() -> dict:
         return {"ok": True, "brain": brain, "brains": probe_brains()}
+
+    @app.get("/api/history")
+    def api_history() -> dict:
+        return {"turns": load_history(HISTORY_PATH, HISTORY_LIMIT)}
 
     @app.post("/api/chat")
     def chat(body: dict):
@@ -693,7 +809,7 @@ def create_app(brain: str, ollama_model: str):
             return JSONResponse({"error": error.message}, status_code=error.status)
         # Chunked plain text: each chunk is a raw reply fragment (no framing).
         return StreamingResponse(
-            stream,
+            record_stream(stream, messages[-1]["content"], chosen, state),
             media_type="text/plain; charset=utf-8",
             headers={"X-Brain": chosen},
         )
