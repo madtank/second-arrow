@@ -42,6 +42,12 @@ def test_build_job_is_pinned_scoped_and_silent():
     assert "No games, no artifacts" in prompt
     assert "ONLY the Queued" in prompt
     assert prompt.rstrip().endswith("[SILENT].")
+    # A talk's basics are primer, notes, AND moments — the per-talk step
+    # names all three, with the grounding rule spelled out.
+    assert '"## Moments"' in prompt
+    assert "3-6 anchored moments" in prompt
+    assert '"- mm:ss — why"' in prompt
+    assert "grounded in transcript.json" in prompt
 
 
 def test_find_job_tolerates_the_open_body_shapes():

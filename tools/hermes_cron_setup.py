@@ -81,11 +81,14 @@ tools, quietly and within these walls:
 
 1. Read STUDY.md (get_path) and the library index (get_library_index).
 2. For each talk in STUDY.md's Queued section that is ALREADY in the
-   library: make sure it has notes and a primer. If a primer is missing,
-   read the transcript (read_transcript), write a short 60-90 second
-   primer — who the teacher is, what to listen for — into the talk's
-   notes via update_notes (under a "## Primer" heading), and speak it
-   with speak.
+   library: make sure it has notes, a primer, and a "## Moments"
+   section. If a primer is missing, read the transcript
+   (read_transcript), write a short 60-90 second primer — who the
+   teacher is, what to listen for — into the talk's notes via
+   update_notes (under a "## Primer" heading), and speak it with speak.
+   If "## Moments" is missing, mark 3-6 anchored moments in the notes,
+   one per line as "- mm:ss — why", every timestamp
+   grounded in transcript.json — never guessed.
 3. NEVER ingest anything that is not explicitly listed with a URL in the
    curriculum (get_curriculum) AND already queued in STUDY.md; downloads
    are single-item only. When in doubt, fetch nothing.
