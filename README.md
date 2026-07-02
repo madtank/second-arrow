@@ -35,12 +35,69 @@ picks up where the last one left off.
   calm, self-contained `library/shelf.html` — primers, players, and notes,
   clickable from the browser.
 - **A served chat shelf** (`tools/serve_shelf.py`) serves the same page at
-  `http://localhost:8765` with a guide chat panel — Claude by default, or a
-  local Ollama model (`--brain ollama`) for offline study.
+  `http://localhost:8765` with a guide chat panel — the Hermes harness by
+  default whenever its gateway is wired (see below), with the Claude CLI
+  and a local Ollama model as explicit fallbacks. A settings room on the
+  shelf (`#settings`) holds the model routes, the fallback picks, the
+  machinery status, and the nightly-prep controls in one calm place.
 - Study memory (`STUDY.md`) and the journal stay private and out of git.
 
 The web app described below still runs fine, but it's a dormant MVP — the
 center of gravity has moved to the study sessions.
+
+---
+
+## The guide's harness: Hermes
+
+The chat guide's home is **hermes-agent** (Nous Research) — one harness,
+many models. A dedicated Hermes profile named `second-arrow` runs an
+OpenAI-compatible gateway on localhost; the shelf treats it as the default
+brain whenever the gateway is up and correctly locked down, and says so
+honestly when it isn't (falling back to the Claude CLI — visibly, never
+silently).
+
+What makes it the home harness:
+
+- **One harness, many models.** Model choice is a *route*, not a code
+  change: `deep` targets a hosted frontier model (gpt-5.5), `local` runs
+  fully offline through Ollama (gemma4:12b). The shelf's settings room
+  picks a route per request; the profile's default model is Hermes
+  configuration (`hermes -p second-arrow config set model.default …`,
+  then a gateway restart) — the shelf reads that truth and never edits it.
+- **A locked-down profile.** The profile's only toolset is this repo's
+  own MCP server (`tools/mcp_second_arrow.py` — 14 reviewed tools:
+  reading the library, scoped writes to study notes and the path, one
+  explicit single-item fetch). The shelf refuses to talk to an
+  over-provisioned gateway: if extra toolsets are enabled, it counts as
+  not wired.
+- **The journal is write-only by design.** There is a tool to append a
+  reflection and deliberately no tool to read one back, so journal text
+  never rides into a hosted model's context.
+- **Nightly prep runs inside the gateway.** A single pinned cron job
+  (`nightly-prep`, 03:23) writes primers and notes for queued talks —
+  nothing is fetched that isn't already on the path. The shelf shows the
+  job and offers run-now / pause / resume through a narrow server-side
+  proxy scoped to that one job.
+
+Wiring ritual (each step is user-run, idempotent, and verifiable):
+
+```bash
+uv run tools/wire_hermes_profile.py       # restrict toolsets, register the MCP server
+hermes -p second-arrow gateway restart    # pick up the profile changes
+uv run tools/hermes_probe.py              # verify the gate is really open
+uv run tools/hermes_cron_setup.py         # install the nightly-prep job
+```
+
+The tools have two test suites — keep both green:
+
+```bash
+# unit
+uv run --with pytest --with fastapi --with mlx-whisper pytest tools/tests/ -q
+
+# browser e2e (Playwright driving a real served shelf on a scratch library)
+uv run --with pytest --with fastapi --with uvicorn --with playwright \
+  --with mlx-whisper pytest tools/tests -m e2e -v
+```
 
 ---
 
