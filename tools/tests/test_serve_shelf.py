@@ -1188,3 +1188,61 @@ def test_ollama_tools_cover_the_four_reviewed_hands():
     assert names == {"fetch_talk", "rebuild_shelf", "speak", "search_history"}
     assert "search_history" in serve_shelf.TOOL_PROGRESS
     assert "search_history" in serve_shelf.AGENCY_TOOLS_NOTE
+
+
+# --- the model picker (/api/models + per-request "model") --------------------
+
+
+def test_describe_models_maps_capability_and_size():
+    models = [
+        {"name": "gemma4:12b", "size": 7_556_508_396},
+        {"name": "qwen3.5:2b-mlx", "size": 3_117_471_137},
+        {"name": "tiny:latest"},  # no size reported
+        {"size": 42},  # nameless junk is skipped
+        {"name": ""},  # so is an empty name
+    ]
+    described = serve_shelf.describe_models(models, {"gemma4:12b"})
+    assert described == [
+        {"name": "gemma4:12b", "tools": True, "size_gb": 7.6},
+        {"name": "qwen3.5:2b-mlx", "tools": False, "size_gb": 3.1},
+        {"name": "tiny:latest", "tools": False, "size_gb": 0.0},
+    ]
+    assert serve_shelf.describe_models([], set()) == []
+
+
+def test_resolve_request_model_matches_installed_names():
+    installed = ["gemma4:12b", "gemma4:latest", "qwen3:latest"]
+    # No request: no override.
+    assert serve_shelf.resolve_request_model(None, installed) is None
+    assert serve_shelf.resolve_request_model("", installed) is None
+    # Exact and tag-insensitive matches resolve to the installed name.
+    assert serve_shelf.resolve_request_model("gemma4:12b", installed) == "gemma4:12b"
+    assert serve_shelf.resolve_request_model("qwen3", installed) == "qwen3:latest"
+
+
+def test_resolve_request_model_unknown_or_bad_is_a_400():
+    installed = ["gemma4:12b"]
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.resolve_request_model("mystery:7b", installed)
+    assert excinfo.value.status == 400
+    assert "mystery:7b" in excinfo.value.message
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.resolve_request_model(42, installed)
+    assert excinfo.value.status == 400
+
+
+def test_pick_ollama_model_remembers_the_choice():
+    state: dict = {}
+    installed = ["gemma4:12b", "qwen3:latest"]
+    # An explicit pick wins and is remembered in the state dict.
+    assert serve_shelf.pick_ollama_model("gemma4:12b", state, "qwen3", installed) == "gemma4:12b"
+    assert state["ollama_model"] == "gemma4:12b"
+    # Later unpicked turns keep using the remembered model...
+    assert serve_shelf.pick_ollama_model(None, state, "qwen3", installed) == "gemma4:12b"
+    # ...and an unset state falls back to the configured default (the
+    # existing tools-capable resolution then applies downstream).
+    assert serve_shelf.pick_ollama_model(None, {}, "qwen3", installed) == "qwen3"
+    # A bad pick raises and leaves the remembered model untouched.
+    with pytest.raises(serve_shelf.BrainError):
+        serve_shelf.pick_ollama_model("mystery", state, "qwen3", installed)
+    assert state["ollama_model"] == "gemma4:12b"

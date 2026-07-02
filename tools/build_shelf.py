@@ -277,6 +277,10 @@ STYLE = """
                 border-radius: 999px; padding: 0.15rem 0.7rem; cursor: pointer; }
   .brain-pill.brain-active { background: #efe7d9; border-color: #d8cbb4; }
   .brain-pill:disabled { opacity: 0.4; cursor: default; }
+  #chat-model { font: inherit; font-size: 0.8rem; color: #5a4d3a;
+                background: #fffdf9; border: 1px solid #e8e0d3;
+                border-radius: 8px; padding: 0.15rem 0.4rem;
+                max-width: 13rem; }
   #chat-form { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
   #chat-form textarea { flex: 1; font: inherit; color: inherit; resize: vertical;
                         background: #fffdf9; border: 1px solid #e8e0d3;
@@ -300,6 +304,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 <p class="meta" id="chat-brain">
 <button type="button" class="brain-pill" data-brain="claude">claude · deep</button>
 <button type="button" class="brain-pill" data-brain="ollama">ollama · offline</button>
+<select id="chat-model" hidden></select>
 <button type="button" class="brain-pill" id="chat-new">new conversation</button>
 </p>
 <div id="chat-messages"></div>
@@ -318,11 +323,13 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
   var send = document.getElementById("chat-send");
   var pills = document.querySelectorAll("#chat-brain .brain-pill[data-brain]");
   var newButton = document.getElementById("chat-new");
+  var modelSelect = document.getElementById("chat-model");
   var sessionsSection = document.getElementById("sessions-section");
   var sessionList = document.getElementById("session-list");
   var history = [];
   var brain = null; // which brain the next message goes to (/health default)
   var session = null; // which conversation the next message continues
+  var model = null; // which installed local model the ollama brain uses
 
   function add(role, text) {
     var div = document.createElement("div");
@@ -384,6 +391,38 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     }).catch(function () { /* an older server has no /api/sessions */ });
   }
 
+  // The local-model picker: visible only while the ollama pill is active
+  // and /api/models actually answered (claude mode and the static shelf
+  // never show it). Options are built with createElement + textContent.
+  function updateModelVisibility() {
+    modelSelect.hidden = brain !== "ollama" || modelSelect.options.length === 0;
+  }
+
+  function loadModels() {
+    fetch("/api/models").then(function (r) { return r.json(); }).then(function (data) {
+      (data.models || []).forEach(function (item) {
+        var option = document.createElement("option");
+        option.value = item.name;
+        option.textContent = item.name
+          + (item.tools ? " · tools" : "")
+          + " · " + item.size_gb + "GB";
+        modelSelect.appendChild(option);
+      });
+      if (data.current) {
+        modelSelect.value = data.current;
+        // Only adopt it when it is really one of the options — a default
+        // that is not installed must not ride along with requests.
+        if (modelSelect.value === data.current) model = data.current;
+      }
+      updateModelVisibility();
+    }).catch(function () { /* ollama down or older server: picker stays hidden */ });
+  }
+
+  modelSelect.addEventListener("change", function () {
+    model = modelSelect.value;
+    add("system", "— ollama model: " + model + " —");
+  });
+
   // Safe mini-markdown for COMPLETED guide bubbles: **bold**, *italic*,
   // `code` become real elements, built with createElement + textContent
   // only — the text is never parsed as HTML. Streaming stays plain text.
@@ -437,6 +476,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
         if (pill.disabled || name === brain) return;
         brain = name;
         markActive();
+        updateModelVisibility(); // the picker follows the ollama pill
         add("system", "— switched to " + name
           + (name === "ollama" ? " (offline)" : " (deep)") + " —");
       });
@@ -445,6 +485,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     panel.hidden = false;
     sessionsSection.hidden = false; // served mode: the sidebar list wakes up
     restoreHistory(); // the current session comes back after a reload
+    loadModels(); // fill the local-model picker (served mode only)
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
 
   newButton.addEventListener("click", function () {
@@ -470,7 +511,8 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         messages: history, brain: brain,
-        session: session, view: currentView()
+        session: session, view: currentView(),
+        model: brain === "ollama" ? model : null
       })
     }).then(function (r) {
       var sid = r.headers.get("X-Session");

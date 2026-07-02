@@ -424,6 +424,18 @@ def test_chat_panel_speaks_sessions_and_ambient_view(tmp_path):
     assert "currentView" in html
 
 
+def test_chat_panel_has_the_ollama_model_picker(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # A calm select next to the pills; empty in the HTML (populated by JS
+    # from /api/models in served mode) and hidden until the ollama pill
+    # is active and the model list actually loaded.
+    select = re.search(r'<select id="chat-model"[^>]*>\s*</select>', html)
+    assert select and "hidden" in select.group(0)
+    assert "/api/models" in html
+    # Picking a model announces itself with a quiet system line.
+    assert "ollama model:" in html
+
+
 def test_shelf_js_still_never_uses_innerhtml_for_iframe(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # The player iframe is built with createElement + setAttribute.

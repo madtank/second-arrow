@@ -202,6 +202,16 @@ phone), revisit with real usage behind the decision.
   read-only WebSearch/WebFetch for current-world questions. CLAUDE.md
   carries the tense-routing contract: ambient → the open transcript,
   past → search_history, new material → curriculum/fetch.
+- **Iter 6 — DONE: pick the offline model from the page.** `GET
+  /api/models` lists installed Ollama models with capability info
+  ({name, tools, size_gb}; 503 when Ollama is down), and `POST
+  /api/chat` accepts an optional `"model"` for the ollama brain —
+  validated against what is installed (unknown → 400), remembered in
+  state.json ("ollama_model") as the default thereafter, still falling
+  back to the tools-capable resolution when unset. The panel shows a
+  calm select next to the pills while the ollama pill is active
+  (`gemma4:12b · tools · 7.6GB`), announcing a pick with a quiet
+  system line; hidden in claude mode and on the static shelf.
 
 ## Boundaries
 

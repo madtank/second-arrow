@@ -12,17 +12,25 @@ so importing it is fast, in-process, and fails loudly if it breaks.
 Routes:
     GET  /          the shelf page (library/shelf.html, freshly rebuilt)
     GET  /health    {"ok": true, "brain": <default>, "brains": {name: available}}
-    POST /api/chat  {"messages": [...], "brain"?, "session"?, "view"?} ->
-                    streamed reply. "brain" is optional and per-request (the
-                    panel's toggle); it falls back to the server's --brain
-                    default, unknown names are a 400. "session" picks the
-                    conversation ("new" starts fresh — new claude thread
-                    too; default: the current/most-recent one). "view" is
-                    the talk slug open on the shelf, or null — it becomes
-                    ambient context (see below). The X-Session response
-                    header names the session that recorded the turn.
+    POST /api/chat  {"messages": [...], "brain"?, "session"?, "view"?,
+                    "model"?} -> streamed reply. "brain" is optional and
+                    per-request (the panel's toggle); it falls back to the
+                    server's --brain default, unknown names are a 400.
+                    "session" picks the conversation ("new" starts fresh —
+                    new claude thread too; default: the current/most-recent
+                    one). "view" is the talk slug open on the shelf, or
+                    null — it becomes ambient context (see below). "model"
+                    (ollama brain only) picks which installed local model
+                    answers — validated against /api/tags (unknown → 400),
+                    remembered in state.json as the default thereafter.
+                    The X-Session response header names the session that
+                    recorded the turn.
     GET  /api/sessions  {"sessions": [{id,title,summary,updated}...]}, newest
                     first, for the sidebar's Sessions list.
+    GET  /api/models  installed Ollama models for the panel's picker:
+                    {"models": [{name, tools, size_gb}...], "current": name}
+                    (tools per /api/show capabilities; 503 when Ollama is
+                    down).
     GET  /api/history?session=<id>  that session's last 50 completed turns
                     (default: the current/most-recent session) plus its id.
     /<talk>/...     library/ served statically (Range supported, audio seeks)
@@ -517,6 +525,65 @@ def resolve_ollama_model(configured: str, installed: list[str]) -> str:
         if name == configured or name.split(":")[0] == configured:
             return name
     return installed[0] if installed else configured
+
+
+# --- the model picker (which local model answers) ---------------------------
+
+
+def describe_models(models: list[dict], tools_capable) -> list[dict]:
+    """[{name, tools, size_gb}] from /api/tags model entries, for the panel.
+
+    tools_capable is the set of installed model names that can call tools
+    (per /api/show). Nameless junk entries are skipped; a missing size
+    reads as 0.0 GB.
+    """
+    described: list[dict] = []
+    for model in models:
+        name = model.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        size = model.get("size")
+        size = size if isinstance(size, (int, float)) else 0
+        described.append(
+            {
+                "name": name,
+                "tools": name in tools_capable,
+                "size_gb": round(size / 1e9, 1),
+            }
+        )
+    return described
+
+
+def resolve_request_model(requested, installed: list[str]) -> str | None:
+    """The installed model a request's "model" field names, or None.
+
+    None/"" means no override. A tag-less name matches its installed
+    tagged form (like resolve_ollama_model). Anything unknown is a 400 —
+    the panel's list came from /api/models, so a miss is a real error.
+    """
+    if requested in (None, ""):
+        return None
+    if not isinstance(requested, str):
+        raise BrainError(400, "model must be a string")
+    for name in installed:
+        if name == requested or name.split(":")[0] == requested:
+            return name
+    raise BrainError(400, f"model {requested!r} is not installed — see /api/models")
+
+
+def pick_ollama_model(requested, state: dict, configured: str, installed: list[str]) -> str:
+    """The model for this ollama turn, remembering an explicit pick.
+
+    Priority: this request's validated pick > the remembered pick
+    (state["ollama_model"]) > the server's configured default. The
+    remembered pick persists via state.json; when it (or the default)
+    is no longer installed, resolve_agent_model still falls back
+    downstream.
+    """
+    pick = resolve_request_model(requested, installed)
+    if pick:
+        state["ollama_model"] = pick
+    return pick or state.get("ollama_model") or configured
 
 
 BRAIN_HINTS = {
@@ -1553,9 +1620,21 @@ def create_app(brain: str, ollama_model: str):
     migrated = migrate_history(CHAT_DIR)
     if migrated:
         print(f"[serve_shelf] migrated legacy history into session {migrated!r}")
-    current: dict = {"sid": load_chat_state(STATE_PATH).get("current") or migrated}
+    persisted = load_chat_state(STATE_PATH)
+    current: dict = {"sid": persisted.get("current") or migrated}
+    # The last-picked local model survives restarts alongside the session.
+    model_state: dict = {}
+    if isinstance(persisted.get("ollama_model"), str) and persisted["ollama_model"]:
+        model_state["ollama_model"] = persisted["ollama_model"]
+
+    def save_state() -> None:
+        state = {"current": current["sid"]}
+        if model_state.get("ollama_model"):
+            state["ollama_model"] = model_state["ollama_model"]
+        save_chat_state(STATE_PATH, state)
+
     if current["sid"]:
-        save_chat_state(STATE_PATH, {"current": current["sid"]})
+        save_state()
         print(f"[serve_shelf] current session {current['sid']}")
 
     def leave_session(sid: str) -> None:
@@ -1577,6 +1656,29 @@ def create_app(brain: str, ollama_model: str):
     @app.get("/api/sessions")
     def api_sessions() -> dict:
         return {"sessions": list_sessions(SESSIONS_DIR), "current": current["sid"]}
+
+    @app.get("/api/models")
+    def api_models():
+        try:
+            tags = _ollama_json("/api/tags", timeout=5)
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return JSONResponse(
+                {
+                    "error": "Ollama is not reachable at localhost:11434 — "
+                    "run `ollama serve` and try again."
+                },
+                status_code=503,
+            )
+        models = tags.get("models", [])
+        capable = {
+            m["name"]
+            for m in models
+            if isinstance(m.get("name"), str) and model_supports_tools(m["name"])
+        }  # model_supports_tools caches per process
+        return {
+            "models": describe_models(models, capable),
+            "current": model_state.get("ollama_model") or ollama_model,
+        }
 
     @app.get("/api/history")
     def api_history(session: str | None = None):
@@ -1609,12 +1711,31 @@ def create_app(brain: str, ollama_model: str):
         try:
             sid = resolve_session(body.get("session"), current["sid"], SESSIONS_DIR)
             chosen = resolve_brain(body.get("brain"), brain, probe_brains())
+            model = ollama_model
+            if chosen == "ollama":
+                requested_model = body.get("model")
+                installed: list[str] = []
+                if requested_model not in (None, ""):
+                    # Validate an explicit pick against what is actually
+                    # installed (the panel's list came from /api/models).
+                    try:
+                        tags = _ollama_json("/api/tags", timeout=5)
+                    except (urllib.error.URLError, OSError, TimeoutError):
+                        raise BrainError(
+                            503,
+                            "Ollama is not reachable at localhost:11434 — "
+                            "run `ollama serve` and try again.",
+                        )
+                    installed = [m["name"] for m in tags.get("models", [])]
+                model = pick_ollama_model(
+                    requested_model, model_state, ollama_model, installed
+                )
         except BrainError as error:
             return JSONResponse({"error": error.message}, status_code=error.status)
         if current["sid"] and current["sid"] != sid:
             leave_session(current["sid"])  # its title+summary get written
         current["sid"] = sid
-        save_chat_state(STATE_PATH, {"current": sid})
+        save_state()  # remembers the session and any model pick
         # Each session carries its own claude thread in its sidecar, so
         # switching sessions switches threads; ollama turns never touch it.
         meta = load_session_meta(session_meta_path(SESSIONS_DIR, sid))
@@ -1624,7 +1745,7 @@ def create_app(brain: str, ollama_model: str):
                 prefix = ambient_prefix(view, load_talk_titles(LIBRARY))
                 stream = stream_claude(messages, state, prefix=prefix)
             else:
-                stream = stream_ollama(messages, ollama_model, LIBRARY, view=view)
+                stream = stream_ollama(messages, model, LIBRARY, view=view)
         except BrainError as error:
             return JSONResponse({"error": error.message}, status_code=error.status)
         # Chunked plain text: each chunk is a raw reply fragment (no framing).
