@@ -349,12 +349,13 @@ def test_sidebar_talks_list_is_the_path(tmp_path):
     demon = re.search(r'<li><a href="#talk/demon-story">.*?</a></li>', sidebar, re.S).group(0)
     assert '<span class="nav-state nav-done">✓</span>' in demon
     assert "nav-tag" not in sidebar
-    # A queued talk not yet in the library appears muted and unclickable.
-    # No curriculum in this fixture, so no URL is known anywhere for it.
+    # A queued talk not yet in the library appears muted but is a REAL
+    # link now — a room-in-waiting. No curriculum in this fixture, so
+    # its stub room can only ask the guide (never a fetch without a URL).
     unfetched = re.search(r'<li class="nav-unfetched">.*?</li>', sidebar, re.S).group(0)
     assert "Anger Issues (Thanissaro Bhikkhu, 2019)" in unfetched
-    assert "needs a URL — tell the guide" in unfetched
-    assert "<a " not in unfetched
+    assert "not fetched yet — ask the guide" in unfetched
+    assert '<a href="#talk/queued-anger-issues">' in unfetched
     # The separate sidebar path strip is gone — the list IS the path...
     assert 'class="path-strip"' not in sidebar
     assert "The path" not in sidebar
@@ -1294,7 +1295,13 @@ def test_card_done_for_now_is_the_primary_action(tmp_path):
         r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
     ).group(0)
     assert "done-for-now" not in quiet_card
-    assert "reopen — wrap it up again / talk about it" in quiet_card
+    reopen = re.search(
+        r'<button type="button" class="reopen-talk"[^>]*>([^<]*)</button>', quiet_card
+    )
+    assert reopen, "reopen door missing"
+    assert reopen.group(1) == "reopen — put it back on the path"
+    # Server-first: the click carries the slug for POST /api/reopen.
+    assert 'data-slug="quiet-mind"' in reopen.group(0)
 
 
 def test_card_status_line_names_the_three_states(tmp_path):
@@ -1334,12 +1341,16 @@ def test_done_click_answers_instantly_in_js(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # The optimistic receipt on the button itself...
     assert "✓ done — finding what's next…" in html
-    # ...the sidebar entry flips ✓ right away, with an undo kept for the
-    # failure path (the send outcome is awaited)...
-    assert "markSidebarDone" in html
+    # ...the sidebar entry flips right away (✓ for done, → for reopen),
+    # with an undo kept for the failure path...
+    assert "markSidebarState" in html
     assert "undoMark" in html
-    # ...and sendMessage reports that outcome to optimistic callers.
-    assert "return !failed;" in html
+    # ...and the mark is SERVER-first: the endpoint confirms it — only a
+    # network/500 error reverts, never a busy guide.
+    assert "serverFirstAction" in html
+    assert '"/api/done"' in html
+    assert '"/api/reopen"' in html
+    assert '"reopening…"' in html
 
 
 def test_card_heard_but_not_done_offers_the_wrap_up_door(tmp_path):
@@ -1365,18 +1376,19 @@ def test_done_for_now_and_wrap_up_js_wiring(tmp_path):
     # soft refresh flips the card in place — no reload (the page adopts
     # the rebuilt mtime so the version poll stays quiet).
     assert '".mark-heard"' in html
-    assert html.count('"/api/listened"') >= 3  # automatic + manual + done
+    assert html.count('"/api/listened"') >= 2  # automatic + manual
     assert "shelfVersion = data.shelf_mtime" in html
     assert '"heard ✓"' in html
-    # Done-for-now composes the canned ask through the ONE send path.
+    # Done-for-now is server-first (/api/done did the path move); the
+    # guide's follow-up goes through the queue-aware send.
     assert '".done-for-now"' in html
     assert "I'm done with " in html
-    assert (
-        " for now — mark it done on the path and line up what's next. " in html
-    )
-    assert (
-        "If nothing new is left in the queue, fetch the next talk from " in html
-    )
+    assert " for now — the shelf has already marked it done on the path. " in html
+    assert "this " in html and "click is my explicit request to fetch the next talk" in html
+    # Reopen follows the same shape: server move, then conversation.
+    assert '".reopen-talk"' in html
+    assert "I've reopened " in html
+    assert "pick it up with me when you're ready" in html
     # The wrap-up door sends its own message the same way.
     assert '".wrap-up-talk"' in html
     assert " to the end — let's wrap it up: ask me what landed, " in html
@@ -1573,12 +1585,12 @@ def test_unfetched_hint_depends_on_curriculum_urls(tmp_path):
     )
     html = build_shelf.render_shelf(library, {})
     sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
-    # The curriculum knows Anger Issues' URL: the guide can fetch it.
+    # The curriculum knows Anger Issues' URL: its stub room can fetch it.
     anger = re.search(r'<li class="nav-unfetched">[\s\S]*?Anger Issues[\s\S]*?</li>', sidebar)
-    assert anger and "not fetched yet — ask the guide" in anger.group(0)
-    # Nothing anywhere knows Mystery Talk's URL: say what is missing.
+    assert anger and "not fetched yet — open to fetch it" in anger.group(0)
+    # Nothing anywhere knows Mystery Talk's URL: its room only asks.
     mystery = re.search(r'<li class="nav-unfetched">[\s\S]*?Mystery Talk[\s\S]*?</li>', sidebar)
-    assert mystery and "needs a URL — tell the guide" in mystery.group(0)
+    assert mystery and "not fetched yet — ask the guide" in mystery.group(0)
 
 
 def test_generate_button_sends_the_composed_ask(tmp_path):
@@ -1865,3 +1877,290 @@ def test_sidebar_collapser_is_a_fletched_arrow(tmp_path):
     assert ">‹<" not in html and ">›<" not in html
     assert "#sidebar-reopen svg { width: 1.35rem; height: 1.35rem;" in html
     assert "transform: scaleX(-1);" in html
+
+
+# --- moments: the guide's curated "listen for" chips ----------------------------
+
+
+def test_parse_moments_reads_stamps_and_reasons():
+    notes = (
+        "# Notes\n\n## My takeaways\n- 13:23 — not a moment (wrong section)\n\n"
+        "## Moments\n\n"
+        "- 13:23 — how he lands the eggs story\n"
+        "- 1:02:05 – an hour-long stamp, en dash\n"
+        "- 0:45 - a spaced hyphen\n"
+        "junk line without a dash\n"
+        "- no stamp — just words\n"
+        "- 99 — not a clock\n\n"
+        "## Listening\n- 2:00 — also not a moment\n"
+    )
+    moments = build_shelf.parse_moments(notes)
+    assert moments == [
+        {"start": 803, "label": "how he lands the eggs story"},
+        {"start": 3725, "label": "an hour-long stamp, en dash"},
+        {"start": 45, "label": "a spaced hyphen"},
+    ]
+
+
+def test_parse_moments_cap_and_empty():
+    notes = "## Moments\n- 0:30 — early\n- 59:00 — past the end\n"
+    assert build_shelf.parse_moments(notes, cap=60) == [
+        {"start": 30, "label": "early"}
+    ]
+    assert build_shelf.parse_moments("", cap=60) == []
+    assert build_shelf.parse_moments("# Notes\n\nNo moments here.\n") == []
+
+
+def test_card_renders_moment_chips_grounded_in_the_transcript(tmp_path):
+    # The shared fixture's quiet-mind notes carry a ## Moments section:
+    # one valid moment (0:04) and one past the transcript's 9s range.
+    library = _make_library(tmp_path)
+    html = build_shelf.render_shelf(library, {})
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    # Its own details block, open by default — the moments invite.
+    listen_for = re.search(
+        r"<details open><summary>Listen for</summary>.*?</details>", quiet_card, re.S
+    )
+    assert listen_for, "Listen for block missing"
+    block = listen_for.group(0)
+    assert '<div class="moments" data-slug="quiet-mind">' in block
+    chip = re.search(
+        r'<button type="button" class="moment-chip" data-start="4">(.*?)</button>',
+        block,
+        re.S,
+    )
+    assert chip and "listen from 0:04" in chip.group(1)
+    assert "how it settles" in chip.group(1)
+    # 12:00 is past quiet-mind's transcript range (9s): silently invalid.
+    assert 'data-start="720"' not in block
+    # The chips seek through the ONE transcript-click path.
+    assert '".moments"' in html and ".moment-chip" in html
+    assert "seekTalk(box.getAttribute" in html
+
+
+def test_card_without_moments_offers_the_ask_button(tmp_path):
+    library = _make_library(tmp_path)
+    html = build_shelf.render_shelf(library, {})
+    # demon-story has transcript.json but no notes: the ✦ generator.
+    demon_card = re.search(
+        r'<section class="card view" id="talk-demon-story"[^>]*>.*?</section>',
+        html,
+        re.S,
+    ).group(0)
+    assert 'class="mark-moments" data-title="Demon Story"' in demon_card
+    assert "✦ ask the guide to mark the moments" in demon_card
+    # far-talk has no transcript.json: no grounded timestamps possible,
+    # so no Listen for section at all.
+    far_card = re.search(
+        r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
+    ).group(0)
+    assert "Listen for" not in far_card and "mark-moments" not in far_card
+    # The button's canned ask goes through the queue-aware send.
+    assert "mark 3-6 moments worth " in html
+    assert "'## Moments' in the notes as " in html
+    assert "timestamps grounded in transcript.json" in html
+
+
+# --- unheard: latest entry wins on the render side too --------------------------
+
+
+def test_load_listening_latest_entry_wins():
+    import tempfile
+
+    library = Path(tempfile.mkdtemp())
+    (library / ".listening.jsonl").write_text(
+        '{"slug": "a", "at": "2026-07-01T10:00:00+00:00"}\n'
+        '{"slug": "a", "at": "2026-07-02T10:00:00+00:00", "retract": true}\n'
+        '{"slug": "b", "at": "2026-07-01T10:00:00+00:00"}\n'
+        '{"slug": "b", "at": "2026-07-02T10:00:00+00:00", "retract": true}\n'
+        '{"slug": "b", "at": "2026-07-03T10:00:00+00:00"}\n'
+    )
+    summary = build_shelf.load_listening(library)
+    # a: retracted — reads as never heard. b: heard again after retracting.
+    assert "a" not in summary
+    assert summary["b"] == {"count": 2, "last": "2026-07-03T10:00:00+00:00"}
+
+
+def test_heard_card_offers_mark_unheard_but_done_cards_do_not(tmp_path):
+    library = _make_library(tmp_path)
+    html = build_shelf.render_shelf(library, {})
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    # Heard, not done: the quiet dotted step-back sits by the listen line.
+    line = re.search(r'<p class="listened-line">.*?</p>', quiet_card, re.S).group(0)
+    assert (
+        '<button type="button" class="mark-unheard" data-slug="quiet-mind">'
+        "mark unheard — come back to this</button>" in line
+    )
+    # Done talks keep their own reopen door instead — never both.
+    (tmp_path / "STUDY.md").write_text(
+        "## Studied\n- **Quiet Mind & <Friends>** — landed.\n"
+    )
+    html = build_shelf.render_shelf(library, {})
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    assert "mark-unheard" not in quiet_card
+    assert "reopen-talk" in quiet_card
+    # The click path posts the retraction and swaps the card in place.
+    assert '"/api/unheard"' in html
+    assert '".mark-unheard"' in html
+
+
+# --- busy, visibly: the working line, the stop control, the queue ---------------
+
+
+def test_chat_panel_carries_the_working_line_and_stop(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The persistent quiet line near the input, hidden until a turn runs.
+    assert '<div id="chat-working" hidden>' in html
+    assert '<span id="working-text">the guide is thinking…</span>' in html
+    assert re.search(r'<button type="button" id="chat-stop"[^>]*>▢ stop</button>', html)
+    # The stop posts the episode's session to the server-side kill switch.
+    assert '"/api/chat/stop"' in html
+    assert "session: session" in html
+    # The line shows for the whole turn and carries the latest progress.
+    assert 'setWorking("the guide is thinking…")' in html
+    assert "setWorking(flowing.progress[shownProgress - 1])" in html
+    assert "setWorking(null)" in html
+
+
+def test_send_while_busy_queues_visibly_never_drops(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # ONE visible queue slot: newest message wins, note near the input.
+    assert '<p id="chat-queued" hidden></p>' in html
+    assert "function sendOrQueue(text)" in html
+    assert "queued — the guide is finishing something" in html
+    # The queue empties the moment the turn ends.
+    assert "queuedMessage = null;" in html
+    assert "sendMessage(next);" in html
+    # Every composed ask rides the queue-aware door, not raw sendMessage:
+    # the form, done/reopen follow-ups, tools, wrap-up, reflections, stubs.
+    for marker in (
+        "sendOrQueue(text); // busy queues it visibly",
+        'sendOrQueue("Please create interactive tools for "',
+        'sendOrQueue("Read this talk\'s transcript and mark 3-6 moments',
+        'sendOrQueue("I\'ve listened to " + button.getAttribute("data-title")',
+        'sendOrQueue("From my practice in " + reflection.tool',
+        'sendOrQueue("Please fetch " + button.getAttribute("data-title")',
+        'sendOrQueue("Tell me about " + button.getAttribute("data-title")',
+    ):
+        assert marker in html, marker
+    # Send stays live while busy — a busy send queues instead of dimming.
+    assert "send.disabled = !input.value.trim();" in html
+    assert "innerHTML" not in html
+
+
+# --- stub rooms: queued-but-unfetched talks are rooms-in-waiting ----------------
+
+STUB_CURRICULUM = """# Cluster 1
+
+## The source teaching
+
+- **The Arrow (Sallatha Sutta, SN 36:6) — trans. Thanissaro Bhikkhu** — https://www.dhammatalks.org/suttas/SN/SN36_6.html
+  The original two-arrows text. Short. Read it once early, return often.
+
+## Talks
+
+- **Anger Issues — Thanissaro Bhikkhu (2019-05-31, morning talk)** — https://www.dhammatalks.org/audio/morning/2019/190531-anger-issues.html
+  A short, direct look at working with anger as it arises.
+  Reach for it when anger feels righteous.
+
+- **Bare Idea**
+  Just a thought so far — no link anywhere.
+"""
+
+
+def test_curriculum_entries_extraction():
+    import tempfile
+
+    curriculum = Path(tempfile.mkdtemp())
+    (curriculum / "01.md").write_text(STUB_CURRICULUM)
+    (curriculum / "README.md").write_text("- **Never Me** — https://x.example/no\n")
+    entries = build_shelf.curriculum_entries(curriculum)
+    by_title = {entry["title"]: entry for entry in entries}
+    assert "Never Me" not in by_title  # README skipped
+    anger = by_title["Anger Issues"]
+    assert anger["teacher"] == "Thanissaro Bhikkhu"
+    assert anger["url"].endswith("190531-anger-issues.html")
+    assert anger["fetchable"] is True
+    assert "A short, direct look" in anger["why"]
+    assert "Reach for it when anger feels righteous." in anger["why"]
+    # A sutta page is a READING: known URL, but not fetchable as a talk.
+    sutta = by_title["The Arrow (Sallatha Sutta, SN 36:6)"]
+    assert sutta["fetchable"] is False
+    assert "dhammatalks.org/suttas" in sutta["url"]
+    # No URL at all: honest empties.
+    bare = by_title["Bare Idea"]
+    assert bare["url"] == "" and bare["fetchable"] is False
+
+
+def test_curriculum_stub_matches_tolerantly():
+    entries = [
+        {
+            "title": "Anger Issues",
+            "teacher": "Thanissaro Bhikkhu",
+            "url": "https://x.example/anger.html",
+            "why": "Reach for it when testing.",
+            "fetchable": True,
+        }
+    ]
+    # The STUDY.md spelling (teacher parenthetical) meets the curriculum's.
+    stub = build_shelf.curriculum_stub(
+        "Anger Issues (Thanissaro Bhikkhu, 2019)", entries
+    )
+    assert stub["slug"] == "queued-anger-issues"
+    assert stub["fetchable"] is True and stub["url"].endswith("anger.html")
+    # No curriculum match: a bare stub — the room still exists.
+    bare = build_shelf.curriculum_stub("Mystery Talk", entries)
+    assert bare["slug"] == "queued-mystery-talk"
+    assert bare["fetchable"] is False and bare["url"] == ""
+
+
+def test_stub_room_renders_with_the_fetch_ritual(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(
+        "## Queued\n"
+        "- **Anger Issues (Thanissaro Bhikkhu, 2019)** — next.\n"
+        "- **The Arrow (Sallatha Sutta, SN 36:6)** — read alongside.\n"
+    )
+    curriculum = tmp_path / "curriculum"
+    curriculum.mkdir()
+    (curriculum / "01.md").write_text(STUB_CURRICULUM)
+    html = build_shelf.render_shelf(library, {})
+    # The fetchable stub: a real room with the one primary action.
+    stub = re.search(
+        r'<section class="card view talk-stub" id="talk-queued-anger-issues">.*?</section>',
+        html,
+        re.S,
+    )
+    assert stub, "stub room missing"
+    room = stub.group(0)
+    assert "Anger Issues" in room and "Thanissaro Bhikkhu" in room
+    assert "not fetched yet" in room
+    assert "on the path because: A short, direct look" in room
+    assert 'class="source-link" href="https://www.dhammatalks.org/audio' in room
+    fetch_button = re.search(r'<button type="button" class="fetch-stub"[^>]*>', room)
+    assert fetch_button and 'data-url="https://www.dhammatalks.org/audio' in fetch_button.group(0)
+    assert "✦ fetch this talk" in room
+    # The honesty line: explicit, single-item, slow transcription named.
+    assert "downloads are explicit — this fetches one talk" in room
+    assert "transcription can take a few minutes" in room
+    # The sidebar entry is now a real link into that room.
+    assert '<a href="#talk/queued-anger-issues">' in html
+    # The reading gets the ask-the-guide variant: never a fetch for a text.
+    sutta = re.search(
+        r'<section class="card view talk-stub" id="talk-queued-the-arrow[^"]*">.*?</section>',
+        html,
+        re.S,
+    )
+    assert sutta, "sutta stub missing"
+    assert "ask-stub" in sutta.group(0) and "fetch-stub" not in sutta.group(0)
+    assert "ask the guide about this" in sutta.group(0)
+    # Both buttons' canned messages ride the queue-aware send (JS side).
+    assert "Single explicit download I'm " in html
+    assert "full ritual: probe and say what you found" in html
+    assert " on my path — what is it, and how should we approach it?" in html

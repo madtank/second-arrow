@@ -62,7 +62,12 @@ def make_library(tmp_path):
     quiet.mkdir()
     (quiet / "primer.mp3").write_bytes(b"\x00")
     (quiet / "audio.mp3").write_bytes(b"\x00")
-    (quiet / "notes.md").write_text("# Notes\n\nWhat landed: **kindness** wins.\n")
+    (quiet / "notes.md").write_text(
+        "# Notes\n\nWhat landed: **kindness** wins.\n\n"
+        "## Moments\n\n"
+        "- 0:04 — how it settles\n"
+        "- 12:00 — past the end (dropped: outside the transcript range)\n"
+    )
     (quiet / "artifacts").mkdir()
     (quiet / "artifacts" / "breath-timer.html").write_text(
         "<!DOCTYPE html><html><body><h1>Breathe</h1></body></html>"

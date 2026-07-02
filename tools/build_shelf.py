@@ -82,13 +82,16 @@ def load_listening(library: Path) -> dict[str, dict]:
     """slug -> {"count", "last"} from library/.listening.jsonl (tolerant).
 
     The server writes it (POST /api/listened); the shelf renders it as a
-    quiet "listened ✓" line. Corrupt lines and a missing file read as
-    silence, never an error.
+    quiet "listened ✓" line. The log is append-only: "mark unheard"
+    appends {slug, at, retract: true} and the LATEST entry wins — a talk
+    whose newest entry is a retraction reads as not-heard (dropped from
+    the summary), and a listen after that counts again. Corrupt lines
+    and a missing file read as silence, never an error.
     """
     path = library / ".listening.jsonl"
     if not path.exists():
         return {}
-    summary: dict[str, dict] = {}
+    per_slug: dict[str, list] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -102,9 +105,14 @@ def load_listening(library: Path) -> dict[str, dict]:
         slug, at = record.get("slug"), record.get("at")
         if not isinstance(slug, str) or not isinstance(at, str):
             continue
-        entry = summary.setdefault(slug, {"count": 0, "last": ""})
-        entry["count"] += 1
-        entry["last"] = max(entry["last"], at)
+        per_slug.setdefault(slug, []).append((at, record.get("retract") is True))
+    summary: dict[str, dict] = {}
+    for slug, entries in per_slug.items():
+        if max(entries)[1]:
+            continue  # the latest word on this talk is a retraction
+        listens = [at for at, retracted in entries if not retracted]
+        if listens:
+            summary[slug] = {"count": len(listens), "last": max(listens)}
     return summary
 
 
@@ -134,6 +142,39 @@ def normalize_segments(data) -> list[dict]:
             {"start": float(start), "end": float(end), "text": text.strip()}
         )
     return segments
+
+
+def parse_moments(text: str, cap: float | None = None) -> list[dict]:
+    """The guide's curated jump-to moments out of a talk's notes.md.
+
+    A "## Moments" section holds machine-parseable lines —
+    `- 13:23 — how he lands the eggs story` (mm:ss or h:mm:ss; en dash
+    or a spaced hyphen tolerated) — and becomes the card's "Listen for"
+    chips. Tolerant by design: junk lines, other sections, and a missing
+    section all read as no moments. `cap` (seconds — the transcript.json
+    range) silently drops any moment past the end of the talk.
+
+    Returns [{"start": seconds, "label": text}] in file order.
+    """
+    moments: list[dict] = []
+    in_section = False
+    for line in (text or "").splitlines():
+        heading = re.match(r"#{1,6} (.+)", line)
+        if heading:
+            in_section = heading.group(1).strip().lower() == "moments"
+            continue
+        if not in_section or not line.startswith("- "):
+            continue
+        match = re.match(r"- ([\d:]+)\s*(?:—|–| - )\s*(\S.*)", line)
+        if not match:
+            continue
+        start = duration_to_seconds(match.group(1))
+        if start is None:
+            continue
+        if cap and start > cap:
+            continue  # past the end of the talk — never render a dead seek
+        moments.append({"start": start, "label": match.group(2).strip()})
+    return moments
 
 
 def parse_index(text: str) -> list[dict]:
@@ -296,25 +337,102 @@ def talk_states(path: dict, talks: list[dict]) -> tuple[dict[str, str], list[str
     return states, unfetched
 
 
-def curriculum_names(curriculum: Path) -> set[str]:
-    """Normalized names of curriculum entries that carry a URL.
+# URLs that are readings, not recordings — a sutta page can't be fetched
+# as a talk, so its stub room asks the guide instead of offering a fetch.
+# A "for now" heuristic, matching the curriculum's current shape.
+_READING_URL_RE = re.compile(r"dhammatalks\.org/suttas/|suttacentral\.net")
 
-    An unfetched queued talk whose name matches one of these can be
-    fetched by the guide; one that matches nothing needs a URL first —
-    the sidebar hint says which.
+
+def curriculum_entries(curriculum: Path) -> list[dict]:
+    """Everything the curriculum knows per entry, for the stub rooms.
+
+    [{title, teacher, url, why, fetchable}] from curriculum/*.md
+    (README skipped). An entry is its `- **Title — Teacher (meta)**`
+    line plus the contiguous description lines under it; the first URL
+    is its source. fetchable means a URL exists and looks like a
+    recording (reading pages — suttas — stay ask-the-guide). Tolerant:
+    junk entries simply contribute less.
     """
-    names: set[str] = set()
+    entries: list[dict] = []
     files = sorted(curriculum.glob("*.md")) if curriculum.is_dir() else []
     for path in files:
         if path.name.lower() == "readme.md":
             continue
-        for entry in re.split(r"\n(?=- \*\*)", path.read_text(encoding="utf-8")):
-            if not entry.startswith("- **"):
+        for block in re.split(r"\n(?=- \*\*)", path.read_text(encoding="utf-8")):
+            if not block.startswith("- **"):
                 continue
-            bold = re.match(r"- \*\*(.+?)\*\*", entry)
-            if bold and re.search(r"https?://", entry):
-                names.add(normalize_title(bold.group(1)))
-    return names
+            bold = re.match(r"- \*\*(.+?)\*\*", block)
+            if not bold:
+                continue
+            head = bold.group(1)
+            title, teacher = head, ""
+            if " — " in head:
+                title, teacher = head.split(" — ", 1)
+                teacher = re.sub(r"\([^)]*\)", "", teacher).strip()
+            first_line, _, rest = block.partition("\n")
+            why_lines = []
+            for line in rest.splitlines():
+                if not line.strip():
+                    break  # entries are blank-line separated
+                why_lines.append(line.strip())
+            url = re.search(r"https?://[^\s)]+", first_line) or re.search(
+                r"https?://[^\s)]+", block
+            )
+            url_text = url.group(0) if url else ""
+            entries.append(
+                {
+                    "title": title.strip(),
+                    "teacher": teacher,
+                    "url": url_text,
+                    "why": " ".join(why_lines),
+                    "fetchable": bool(url_text)
+                    and not _READING_URL_RE.search(url_text),
+                }
+            )
+    return entries
+
+
+def stub_slug(name: str) -> str:
+    """A rooms-in-waiting view id for an unfetched path item.
+
+    Prefixed "queued-" so it can never collide with a real talk folder
+    (fetch_talk picks the real slug later; the stub room simply gives
+    way to the real one on the next shelf swap).
+    """
+    flat = re.sub(r"[^a-z0-9]+", "-", normalize_title(name)).strip("-")
+    return f"queued-{flat or 'talk'}"
+
+
+def curriculum_stub(name: str, entries: list[dict]) -> dict:
+    """What the curriculum knows about one unfetched path item.
+
+    Matches `name` (a STUDY.md Queued line) against curriculum entries
+    with the same tolerance the sidebar hints use (normalize_title,
+    either-way containment). No match still returns a bare stub — the
+    room exists either way, its button just asks instead of fetching.
+    """
+    key = normalize_title(name)
+    stub = {
+        "name": name,
+        "slug": stub_slug(name),
+        "title": name,
+        "teacher": "",
+        "url": "",
+        "why": "",
+        "fetchable": False,
+    }
+    for entry in entries:
+        ekey = normalize_title(entry["title"])
+        if key == ekey or key in ekey or ekey in key:
+            stub.update(
+                title=entry["title"],
+                teacher=entry["teacher"],
+                url=entry["url"],
+                why=entry["why"],
+                fetchable=entry["fetchable"],
+            )
+            break
+    return stub
 
 
 def render_path_strip(path: dict) -> str:
@@ -386,8 +504,7 @@ STYLE = """
   .nav-next { color: #a99e8e; }
   .nav-legend { margin: 0.6rem 0 0; padding: 0 0.6rem; color: #a99e8e;
                 font-size: 0.75rem; }
-  .nav-unfetched { padding: 0.45rem 0.6rem; color: #a99e8e;
-                   font-size: 0.95rem; line-height: 1.35; cursor: default; }
+  .nav-unfetched a { color: #a99e8e; } /* a room-in-waiting: muted, real */
   .side-muted { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
   .begin-link { display: inline-block; margin: 1rem 0 0; color: #6d5f4b;
                 font-size: 0.92rem; text-decoration: none;
@@ -469,11 +586,13 @@ STYLE = """
   .listened-replay { font: inherit; font-size: 0.85rem; color: #7a6a50;
                      background: none; border: none; padding: 0;
                      cursor: pointer; text-decoration: underline; }
-  .mark-heard { font: inherit; font-size: 0.82rem; color: #a99e8e;
+  .mark-heard, .mark-unheard { font: inherit; font-size: 0.82rem;
+                color: #a99e8e;
                 background: none; border: none; padding: 0; cursor: pointer;
                 border-bottom: 1px dotted #d8cbb4; }
-  .mark-heard:hover { color: #7a6a50; }
-  .mark-heard:disabled { color: #c2b8a6; cursor: default;
+  .mark-heard:hover, .mark-unheard:hover { color: #7a6a50; }
+  .mark-heard:disabled, .mark-unheard:disabled { color: #c2b8a6;
+                         cursor: default;
                          border-bottom-color: transparent; }
   .card-status { margin: 0.7rem 0 0.2rem; display: flex; align-items: center;
                  flex-wrap: wrap; gap: 0.3rem 0.9rem; }
@@ -556,11 +675,25 @@ STYLE = """
   .artifact-name { color: #6d5f4b; font-size: 0.95rem; }
   .artifact-open { margin-left: 0.75rem; font-size: 0.85rem; color: #a99e8e; }
   .artifact-note { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
-  .make-interactive { font: inherit; font-size: 0.92rem; color: #5a4d3a;
+  .make-interactive, .mark-moments, .fetch-stub, .ask-stub {
+                      font: inherit; font-size: 0.92rem; color: #5a4d3a;
                       background: #f6f1e7; border: 1px dashed #d8cbb4;
                       border-radius: 999px; padding: 0.45rem 1.1rem;
                       cursor: pointer; }
-  .make-interactive:hover { background: #efe7d9; }
+  .make-interactive:hover, .mark-moments:hover, .fetch-stub:hover,
+  .ask-stub:hover { background: #efe7d9; }
+  .fetch-stub { background: #efe7d9; border-style: solid; } /* the primary */
+  .fetch-stub:hover { background: #e7dcc8; }
+  /* "Listen for": the guide's curated jump-to moments — anchored
+     listening chips, each one a transcript-click-shaped seek. */
+  .moments { display: flex; flex-direction: column; align-items: flex-start;
+             gap: 0.4rem; margin-top: 0.5rem; }
+  .moment-chip { font: inherit; font-size: 0.88rem; color: #5a4d3a;
+                 text-align: left; background: #f9f5ec;
+                 border: 1px solid #e8e0d3; border-radius: 12px;
+                 padding: 0.35rem 0.9rem; cursor: pointer; }
+  .moment-chip:hover { background: #efe7d9; }
+  .moment-time { color: #a9853f; font-variant-numeric: tabular-nums; }
   .artifact-frame { display: block; width: 100%; height: 480px;
                     margin-top: 0.5rem; border: 1px solid #e8e0d3;
                     border-radius: 8px; background: #fffdf9;
@@ -745,6 +878,24 @@ STYLE = """
   #reflection-dismiss { font: inherit; font-size: 0.8rem; color: #a99e8e;
                         background: none; border: none; cursor: pointer;
                         padding: 0.2rem 0.4rem; }
+  /* The quiet working line: always-on visibility while a turn streams —
+     the current tool-progress text (or "the guide is thinking…") plus
+     the ▢ stop control. Sits just above the input, in every chat state. */
+  #chat-working { display: flex; align-items: center; gap: 0.6rem;
+                  color: #a99e8e; font-size: 0.82rem; font-style: italic;
+                  margin: 0.15rem 0.6rem 0; }
+  #chat-working[hidden] { display: none; } /* flex must not defeat hidden */
+  #working-text { flex: 1; min-width: 0; white-space: nowrap;
+                  overflow: hidden; text-overflow: ellipsis; }
+  #chat-stop { font: inherit; font-size: 0.78rem; font-style: normal;
+               color: #7a6a50; background: none; flex-shrink: 0;
+               border: 1px solid #d8cbb4; border-radius: 999px;
+               padding: 0.05rem 0.6rem; cursor: pointer; }
+  #chat-stop:hover { background: #efe7d9; }
+  /* The queued note: a send while the guide is busy is never dropped —
+     it waits here, visibly, and goes the moment the turn ends. */
+  #chat-queued { color: #a99e8e; font-size: 0.82rem; font-style: italic;
+                 margin: 0.15rem 0.6rem 0; }
   #chat-form { display: flex; gap: 0.45rem; margin: 0.6rem 0 0;
                align-items: flex-end; background: #fffdf9;
                border: 1px solid #e6ddcc; border-radius: 22px;
@@ -811,6 +962,11 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 <button type="button" id="reflection-dismiss" aria-label="dismiss">✕</button>
 </div>
 <button type="button" id="fresh-chip" hidden>the shelf has new content — refresh</button>
+<div id="chat-working" hidden>
+<span id="working-text">the guide is thinking…</span>
+<button type="button" id="chat-stop" title="stop this reply — what arrived stays">▢ stop</button>
+</div>
+<p id="chat-queued" hidden></p>
 <form id="chat-form">
 <button type="button" id="chat-open" title="open the conversation" aria-label="open the conversation">
 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5.5h15v10.5h-9l-4 3.5v-3.5h-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
@@ -888,9 +1044,56 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   var busy = false; // a reply in flight (independent of empty-input dimming)
 
   function updateSendState() {
-    // Dim Send when there is nothing to send; busy dims it regardless.
-    send.disabled = busy || !input.value.trim();
+    // Dim Send only when there is nothing to send — while the guide is
+    // busy a send is still meaningful: it queues (sendOrQueue below).
+    send.disabled = !input.value.trim();
   }
+
+  // --- busy, visibly: the working line, the stop control, the queue ------
+  // While a turn streams, one quiet line near the input always says so —
+  // the current tool-progress text, or "the guide is thinking…" — with a
+  // small ▢ stop beside it. And no send is EVER silently dropped: while
+  // busy, the newest message waits in ONE visible queue slot and goes
+  // the moment the turn ends.
+  var workingLine = document.getElementById("chat-working");
+  var workingText = document.getElementById("working-text");
+  var queuedNote = document.getElementById("chat-queued");
+  var queuedMessage = null; // one slot; a newer message replaces it
+
+  function setWorking(text) {
+    if (!text) { workingLine.hidden = true; return; }
+    workingLine.hidden = false;
+    workingText.textContent = text;
+  }
+
+  function renderQueuedNote() {
+    if (!queuedMessage) { queuedNote.hidden = true; return; }
+    var brief = queuedMessage.length > 60
+      ? queuedMessage.slice(0, 60) + "…" : queuedMessage;
+    queuedNote.hidden = false;
+    queuedNote.textContent =
+      "queued — the guide is finishing something: “" + brief + "”";
+  }
+
+  function sendOrQueue(text) {
+    if (!text) return;
+    if (busy) {
+      queuedMessage = text; // the newest ask wins the one slot
+      renderQueuedNote();
+      return;
+    }
+    sendMessage(text);
+  }
+
+  document.getElementById("chat-stop").addEventListener("click", function () {
+    // Abort the in-flight turn server-side; the stream then ends with a
+    // quiet "— stopped —" line and whatever arrived stays.
+    fetch("/api/chat/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: session }),
+    }).catch(function () { /* nothing streaming: the line clears itself */ });
+  });
 
   function autoGrow() {
     input.style.height = "auto";
@@ -958,20 +1161,49 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".make-interactive");
     if (!button) return;
-    sendMessage("Please create interactive tools for "
+    sendOrQueue("Please create interactive tools for "
       + JSON.stringify(button.getAttribute("data-title"))
       + " from its transcript and notes — remember I prefer listening-first.");
   });
-  // The optimistic sidebar flip for "✓ Done with this talk": the entry
-  // shows ✓ immediately; returns an undo for the failure path. The soft
+  // "✦ ask the guide to mark the moments" — the empty Listen-for
+  // section's one calm generator, through the same queue-aware send.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".mark-moments");
+    if (!button) return;
+    sendOrQueue("Read this talk's transcript and mark 3-6 moments worth "
+      + "returning to — write them under '## Moments' in the notes as "
+      + "'- mm:ss — why', timestamps grounded in transcript.json, then "
+      + "rebuild the shelf.");
+  });
+  // The stub rooms' one primary action: an explicit single-item fetch
+  // (recording URL known) or a plain ask (reading/no URL) — both through
+  // the queue-aware send, never silently dropped.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".fetch-stub");
+    if (!button) return;
+    sendOrQueue("Please fetch " + button.getAttribute("data-title")
+      + " (" + button.getAttribute("data-teacher") + ") — curriculum URL "
+      + button.getAttribute("data-url") + ". Single explicit download I'm "
+      + "asking for; full ritual: probe and say what you found, verify the "
+      + "transcript, notes with a short primer, speak it, update the path, "
+      + "rebuild the shelf.");
+  });
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".ask-stub");
+    if (!button) return;
+    sendOrQueue("Tell me about " + button.getAttribute("data-title")
+      + " on my path — what is it, and how should we approach it?");
+  });
+  // The optimistic sidebar flip for done (✓) and reopen (→): the entry
+  // changes immediately; returns an undo for the failure path. The soft
   // refresh replaces the whole nav with the real state soon after.
-  function markSidebarDone(slug) {
+  function markSidebarState(slug, css, glyph) {
     var link = document.querySelector('#talk-nav a[href="#talk/' + slug + '"]');
-    if (!link || link.querySelector(".nav-state.nav-done")) return null;
+    if (!link || link.querySelector(".nav-state." + css)) return null;
     var old = link.querySelector(".nav-state");
     var mark = document.createElement("span");
-    mark.className = "nav-state nav-done";
-    mark.textContent = "✓";
+    mark.className = "nav-state " + css;
+    mark.textContent = glyph;
     if (old) link.replaceChild(mark, old);
     else link.insertBefore(mark, link.firstChild);
     return function () {
@@ -981,57 +1213,66 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     };
   }
 
-  // "✓ Done with this talk" — the card's one completion action: record
-  // the listen if the player never saw one (same endpoint as the
-  // automatic report; its response carries the rebuilt page's mtime,
-  // adopted so the version poll doesn't reload under the streaming
-  // reply), then hand the path work to the guide through the same ONE
-  // send path. The click answers INSTANTLY: the button becomes its own
-  // receipt and the sidebar flips ✓ — both revert only if the send fails.
+  // A server-first card action: optimistic UI confirmed by the endpoint
+  // (only a network/500 error reverts), the rebuilt page's mtime adopted
+  // (so the version poll doesn't double-refresh), the room swapped in
+  // place, and THEN the guide follow-up through the queue-aware send —
+  // conversation follows the action instead of performing it.
+  function serverFirstAction(button, api, workingLabel, followUp, undoMark) {
+    button.disabled = true;
+    var was = button.textContent;
+    button.textContent = workingLabel;
+    fetch(api, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: button.getAttribute("data-slug") }),
+    }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (data) {
+      if (typeof data.shelf_mtime === "number") shelfVersion = data.shelf_mtime;
+      softRefresh().catch(function () { /* the poll catches up */ });
+      sendOrQueue(followUp); // queued visibly when the guide is busy
+    }).catch(function () {
+      button.disabled = false; // network/500: quietly re-arm
+      button.textContent = was;
+      if (undoMark) undoMark();
+    });
+  }
+
+  // "✓ Done with this talk" — server-first: POST /api/done records the
+  // listen if absent, moves Queued → Studied on STUDY.md, and rebuilds —
+  // instant, idempotent, no guide involved. The guide only gets the
+  // what's-next conversation afterwards.
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".done-for-now");
     if (!button || button.disabled) return;
-    button.disabled = true;
-    var was = button.textContent;
-    button.textContent = "✓ done — finding what's next…";
-    var undoMark = markSidebarDone(button.getAttribute("data-slug"));
-    var room = button.closest(".view");
-    if (!(room && room.querySelector(".listened-line"))) {
-      fetch("/api/listened", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug: button.getAttribute("data-slug") }),
-      }).then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (data) {
-          if (data && typeof data.shelf_mtime === "number") {
-            shelfVersion = data.shelf_mtime;
-          }
-        }).catch(function () { /* the message still carries the intent */ });
-    }
-    var sent = sendMessage("I'm done with " + button.getAttribute("data-title")
-      + " for now — mark it done on the path and line up what's next. "
-      + "If nothing new is left in the queue, fetch the next talk from "
-      + "the curriculum and let me know when it's ready.");
-    if (sent && sent.then) {
-      sent.then(function (ok) {
-        if (ok) return; // the soft refresh brings the real state
-        button.disabled = false; // the send failed: quietly re-arm
-        button.textContent = was;
-        if (undoMark) undoMark();
-      });
-    } else {
-      // Busy or static shelf: nothing was sent — undo immediately.
-      button.disabled = false;
-      button.textContent = was;
-      if (undoMark) undoMark();
-    }
+    serverFirstAction(button, "/api/done", "✓ done — finding what's next…",
+      "I'm done with " + button.getAttribute("data-title")
+      + " for now — the shelf has already marked it done on the path. "
+      + "What's next? If nothing unheard is left in the library, this "
+      + "click is my explicit request to fetch the next talk from the "
+      + "curriculum — let me know when it's ready.",
+      markSidebarState(button.getAttribute("data-slug"), "nav-done", "✓"));
+  });
+  // "reopen — put it back on the path" — the exact inverse, same shape:
+  // POST /api/reopen moves Studied → Queued instantly; the guide picks
+  // the thread up in conversation.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".reopen-talk");
+    if (!button || button.disabled) return;
+    serverFirstAction(button, "/api/reopen", "reopening…",
+      "I've reopened " + button.getAttribute("data-title")
+      + " — pick it up with me when you're ready: what should we "
+      + "look at again?",
+      markSidebarState(button.getAttribute("data-slug"), "nav-next", "→"));
   });
   // "…or wrap it up together" — the heard card's quieter door into the
   // full wrap-up conversation, through the same send path.
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".wrap-up-talk");
     if (!button) return;
-    sendMessage("I've listened to " + button.getAttribute("data-title")
+    sendOrQueue("I've listened to " + button.getAttribute("data-title")
       + " to the end — let's wrap it up: ask me what landed, "
       + "then update the path.");
   });
@@ -1058,6 +1299,28 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     }).catch(function () {
       button.disabled = false; // static shelf or a hiccup: quietly re-arm
       button.textContent = "mark as heard";
+    });
+  });
+  // "mark unheard — come back to this" — the quiet inverse: an
+  // append-only retraction server-side (latest entry wins), then the
+  // card and sidebar flip back to not-heard in place. Done talks keep
+  // their own reopen door; this button never appears on them.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".mark-unheard");
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    fetch("/api/unheard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: button.getAttribute("data-slug") }),
+    }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (data) {
+      if (typeof data.shelf_mtime === "number") shelfVersion = data.shelf_mtime;
+      return softRefresh();
+    }).catch(function () {
+      button.disabled = false; // static shelf or a hiccup: quietly re-arm
     });
   });
   // The now-playing capsule (its own closure) asks the chat to step
@@ -1503,12 +1766,12 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 
   chipSend.addEventListener("click", function () {
     var reflection = chipSlug && reflections[chipSlug];
-    if (!reflection || busy) return;
+    if (!reflection) return;
     var card = document.getElementById("talk-" + chipSlug);
     var heading = card && card.querySelector("h2");
     var title = heading ? heading.textContent : chipSlug;
     // Its own message — a draft in the input is never clobbered.
-    sendMessage("From my practice in " + reflection.tool
+    sendOrQueue("From my practice in " + reflection.tool
       + ' on "' + title + '": ' + reflection.text);
     dismissChip(true);
   });
@@ -1823,6 +2086,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     while (peekAction.firstChild) peekAction.removeChild(peekAction.firstChild);
     if (chatState === "docked") peekUpdate("thinking…"); // stay in the room
     busy = true;
+    setWorking("the guide is thinking…"); // visible for the whole turn
     updateSendState();
     return fetch("/api/chat", {
       method: "POST",
@@ -1865,6 +2129,8 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
               addSystemBefore(pending, flowing.progress[shownProgress]);
               shownProgress += 1;
               pulseSidebar(reply);
+              // The working line carries the latest tool progress.
+              setWorking(flowing.progress[shownProgress - 1]);
             }
             pending.textContent = flowing.text;
             if (chatState === "docked") {
@@ -1907,9 +2173,17 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     }).finally(function () {
       busy = false;
       clearPulse();
+      setWorking(null);
       updateSendState();
       checkVersion(); // fresh content may have just landed
       input.focus({ preventScroll: true });
+      if (queuedMessage) {
+        // The queue empties the moment the turn ends — never dropped.
+        var next = queuedMessage;
+        queuedMessage = null;
+        renderQueuedNote();
+        sendMessage(next);
+      }
     }).then(function () {
       return !failed; // the outcome, for optimistic callers to settle on
     });
@@ -1918,11 +2192,11 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     var text = input.value.trim();
-    if (!text || busy) return;
+    if (!text) return;
     input.value = "";
     updateSendState();
     autoGrow();
-    sendMessage(text);
+    sendOrQueue(text); // busy queues it visibly, never a silent drop
   });
 
   input.addEventListener("keydown", function (event) {
@@ -2472,6 +2746,16 @@ LAYOUT_SCRIPT = """<script>
           parseFloat(seg.getAttribute("data-start")) || 0);
       });
     });
+    // "Listen for" chips: the guide's curated moments seek exactly like
+    // a transcript-line click — the same ONE seek path.
+    root.querySelectorAll(".moments").forEach(function (box) {
+      box.addEventListener("click", function (event) {
+        var chip = event.target.closest(".moment-chip");
+        if (!chip) return;
+        seekTalk(box.getAttribute("data-slug"),
+          parseFloat(chip.getAttribute("data-start")) || 0);
+      });
+    });
     root.querySelectorAll(".listened-replay").forEach(function (button) {
       button.addEventListener("click", function () {
         var slug = button.getAttribute("data-slug");
@@ -2509,6 +2793,96 @@ LAYOUT_SCRIPT = """<script>
 </script>"""
 
 
+def render_moments(
+    slug: str, title: str, moments: list[dict], has_transcript_json: bool
+) -> str:
+    """The card's "Listen for" block: anchored listening as the default
+    teaching pattern.
+
+    With moments, each becomes a chip — "listen from 13:23 — <why>" —
+    that seeks the talk player exactly like a transcript-line click
+    (bindRoom wires .moments through the ONE seek path). Open by
+    default: the moments are the invitation. Without moments, a quiet ✦
+    button asks the guide to mark some — only when transcript.json
+    exists, because the guide grounds every timestamp there. Returns ""
+    when there is nothing to offer.
+    """
+    if moments:
+        chips = "\n".join(
+            f'<button type="button" class="moment-chip" data-start="{m["start"]:g}">'
+            f'<span class="moment-time">listen from {format_time(m["start"])}</span>'
+            f" — {escape(m['label'])}</button>"
+            for m in moments
+        )
+        return (
+            "<details open><summary>Listen for</summary>\n"
+            f'<div class="moments" data-slug="{escape(slug)}">\n{chips}\n</div>\n'
+            "</details>"
+        )
+    if has_transcript_json:
+        return (
+            "<details><summary>Listen for</summary>\n"
+            '<p class="moments-empty">'
+            f'<button type="button" class="mark-moments" data-title="{escape(title)}">'
+            "✦ ask the guide to mark the moments</button></p>\n</details>"
+        )
+    return ""
+
+
+def render_stub_card(stub: dict) -> str:
+    """A room-in-waiting for a queued talk not yet in the library.
+
+    The sidebar's greyed dead-ends become real rooms: title, teacher,
+    why it's on the path (the curriculum's own line), the source link,
+    and ONE primary action. With a fetchable URL that's "✦ fetch this
+    talk" (an explicit single-item download, said plainly); a reading
+    or unknown source gets "ask the guide about this" instead — never a
+    fetch without a recording URL. Both go through the queue-aware chat
+    send; once the real talk lands, the next shelf swap replaces this
+    room with the real one.
+    """
+    parts = [
+        f'<section class="card view talk-stub" id="talk-{escape(stub["slug"])}">',
+        f"<h2>{escape(stub['title'])}</h2>",
+    ]
+    meta = " &middot; ".join(
+        bit for bit in (escape(stub.get("teacher", "")), "not fetched yet") if bit
+    )
+    parts.append(f'<p class="meta">{meta}</p>')
+    parts.append(
+        '<p class="card-status"><span class="status-mark status-next">'
+        "→ on the path — not in the library yet</span></p>"
+    )
+    if stub.get("why"):
+        parts.append(
+            f'<p class="reach"><em>on the path because: {escape(stub["why"])}</em></p>'
+        )
+    if stub.get("url"):
+        parts.append(
+            f'<a class="source-link" href="{escape(stub["url"])}" target="_blank" '
+            'rel="noopener">source &#8599;</a>'
+        )
+    if stub.get("fetchable"):
+        parts.append(
+            '<p class="stub-action"><button type="button" class="fetch-stub" '
+            f'data-title="{escape(stub["title"])}" '
+            f'data-teacher="{escape(stub.get("teacher", ""))}" '
+            f'data-url="{escape(stub["url"])}">✦ fetch this talk</button></p>'
+        )
+        parts.append(
+            '<p class="state-note">downloads are explicit — this fetches one '
+            "talk; transcription can take a few minutes.</p>"
+        )
+    else:
+        parts.append(
+            '<p class="stub-action"><button type="button" class="ask-stub" '
+            f'data-title="{escape(stub["title"])}">'
+            "ask the guide about this</button></p>"
+        )
+    parts.append("</section>")
+    return "\n".join(parts)
+
+
 def render_card(
     talk: dict,
     files: dict,
@@ -2540,11 +2914,13 @@ def render_card(
         status_bits.append(
             f'<span class="status-mark status-done">✓ done{date}</span>'
         )
-        # A closed talk still has a door — quiet, dotted, one line.
+        # A closed talk still has a door — quiet, dotted, one line. The
+        # click is server-first (POST /api/reopen: Studied → Queued,
+        # instantly), then the guide follows up in conversation.
         status_bits.append(
-            f'<button type="button" class="reopen-talk wrap-up-talk" '
-            f'data-title="{escape(title)}">'
-            "reopen — wrap it up again / talk about it</button>"
+            f'<button type="button" class="reopen-talk" '
+            f'data-slug="{escape(slug)}" data-title="{escape(title)}">'
+            "reopen — put it back on the path</button>"
         )
     else:
         if heard:
@@ -2630,10 +3006,18 @@ def render_card(
     if heard:
         # Finished at least once: say so quietly. Replay simply plays —
         # the resume position was cleared at the end, so it starts fresh.
+        # A not-yet-done talk can also step back to unheard ("come back
+        # to this"); done is a path state and keeps its own reopen door.
+        unheard = (
+            f' · <button type="button" class="mark-unheard" '
+            f'data-slug="{escape(slug)}">mark unheard — come back to this</button>'
+            if state != "studied"
+            else ""
+        )
         parts.append(
             f'<p class="listened-line">listened ✓ {escape(listened["last"][:10])}'
             f' · <button type="button" class="listened-replay" '
-            f'data-slug="{escape(slug)}">replay</button></p>'
+            f'data-slug="{escape(slug)}">replay</button>{unheard}</p>'
         )
     return "\n".join(parts)
 
@@ -2649,19 +3033,19 @@ _NAV_LEGEND = '<p class="nav-legend">✓ done · → current</p>'
 def render_nav(
     talks: list[dict],
     states: dict[str, str] | None = None,
-    unfetched: list[str] | tuple = (),
+    stubs: list[dict] | tuple = (),
 ) -> str:
     """The sidebar's Talks list — which IS the path.
 
     Three states only, so a glance answers "am I done with this one?":
     ✓ done, → current, or nothing (in the library, untouched). Parked
     talks read as done here — their nuance stays in STUDY.md and notes.
-    Queued talks not yet fetched appear last, muted and unclickable, so
-    the path ahead stays visible. One tiny legend line keeps the marks
-    self-explanatory.
+    Queued talks not yet fetched appear last as rooms-in-waiting: real
+    links into their stub rooms (render_stub_card), muted but no longer
+    dead ends. One tiny legend line keeps the marks self-explanatory.
     """
     states = states or {}
-    if not talks and not unfetched:
+    if not talks and not stubs:
         return '<p class="side-muted">The library is empty so far.</p>'
     items = []
     for talk in talks:
@@ -2672,17 +3056,16 @@ def render_nav(
             f'{mark}<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>'
             f'<span class="nav-teacher">{escape(talk.get("teacher", ""))}</span></a></li>'
         )
-    for entry in unfetched:
-        name, has_url = entry if isinstance(entry, tuple) else (entry, True)
+    for stub in stubs:
         hint = (
-            "not fetched yet — ask the guide"
-            if has_url
-            else "needs a URL — tell the guide"
+            "not fetched yet — open to fetch it"
+            if stub.get("fetchable")
+            else "not fetched yet — ask the guide"
         )
         items.append(
-            '<li class="nav-unfetched">'
-            f'{_NAV_MARKS["queued"]}<span class="nav-title">{escape(name)}</span>'
-            f'<span class="nav-teacher">{hint}</span></li>'
+            f'<li class="nav-unfetched"><a href="#talk/{escape(stub["slug"])}">'
+            f'{_NAV_MARKS["queued"]}<span class="nav-title">{escape(stub["name"])}</span>'
+            f'<span class="nav-teacher">{hint}</span></a></li>'
         )
     return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>\n" + _NAV_LEGEND
 
@@ -2810,19 +3193,10 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     path_strip = render_path_strip(path)  # the home view's small summary
     talks = parse_index((library / "INDEX.md").read_text())
     states, unfetched = talk_states(path, talks)
-    known = curriculum_names(library.parent / "curriculum")
-    unfetched = [
-        (
-            name,
-            any(
-                key == normalize_title(name)
-                or key in normalize_title(name)
-                or normalize_title(name) in key
-                for key in known
-            ),
-        )
-        for name in unfetched
-    ]
+    # Rooms-in-waiting: each queued-but-unfetched path item gets a stub
+    # room carrying what the curriculum knows about it.
+    entries = curriculum_entries(library.parent / "curriculum")
+    stubs = [curriculum_stub(name, entries) for name in unfetched]
     listening = load_listening(library)
     curriculum_view = render_curriculum(library.parent / "curriculum", talks)
     curriculum_link = (
@@ -2841,9 +3215,12 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
         if files["primer_md"]:
             primer = md_to_html((talk_dir / "primer.md").read_text())
             card.append(f"<details><summary>Primer text</summary>\n{primer}\n</details>")
+        notes_text = ""
         if files["notes_md"]:
-            notes = md_to_html((talk_dir / "notes.md").read_text())
-            card.append(f"<details><summary>Notes</summary>\n{notes}\n</details>")
+            notes_text = (talk_dir / "notes.md").read_text()
+            card.append(
+                f"<details><summary>Notes</summary>\n{md_to_html(notes_text)}\n</details>"
+            )
         segments = []
         if files["transcript_json"]:
             try:
@@ -2852,6 +3229,20 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 )
             except (OSError, json.JSONDecodeError):
                 segments = []  # a torn file falls back to the plain rendering
+        # The guide's curated "listen for" moments (notes.md ## Moments),
+        # validated against the transcript's own range — a moment past
+        # the end is silently invalid (same rule as the seek cues).
+        moment_cap = max((seg["end"] for seg in segments), default=0) or (
+            duration_to_seconds(talk.get("duration", "")) or 0
+        )
+        moments_block = render_moments(
+            talk["slug"],
+            talk.get("title", talk["slug"]),
+            parse_moments(notes_text, cap=moment_cap),
+            files["transcript_json"],
+        )
+        if moments_block:
+            card.append(moments_block)
         if segments:
             # The transcript as a player: each timed segment is clickable —
             # local-audio talks seek and play, YouTube talks reload the
@@ -2914,7 +3305,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
         )
         card.append("</section>")
         cards.append("\n".join(card))
-    talk_views = "\n\n".join(cards)
+    talk_views = "\n\n".join(cards + [render_stub_card(stub) for stub in stubs])
     empty_note = "" if cards else "\n<p>The library is empty so far.</p>"
     # One plain sentence next to the path summary, so "done" never needs
     # guessing at. Only when there is a path to explain — an empty study
@@ -2947,7 +3338,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
 <a class="begin-link" href="#home">begin here</a>{curriculum_link}
 <h2 id="talks-heading">Talks</h2>
-{render_nav(talks, states, unfetched)}
+{render_nav(talks, states, stubs)}
 <footer>
 Private — generated from your library.
 Rebuild: <code>uv run tools/build_shelf.py</code><br>
