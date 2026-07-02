@@ -675,13 +675,22 @@ STYLE = """
   .artifact-name { color: #6d5f4b; font-size: 0.95rem; }
   .artifact-open { margin-left: 0.75rem; font-size: 0.85rem; color: #a99e8e; }
   .artifact-note { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
-  .make-interactive, .mark-moments, .fetch-stub, .ask-stub {
+  .make-interactive, .mark-moments, .make-primer, .make-notes,
+  .more-moments, .fetch-stub, .ask-stub {
                       font: inherit; font-size: 0.92rem; color: #5a4d3a;
                       background: #f6f1e7; border: 1px dashed #d8cbb4;
                       border-radius: 999px; padding: 0.45rem 1.1rem;
                       cursor: pointer; }
-  .make-interactive:hover, .mark-moments:hover, .fetch-stub:hover,
+  .make-interactive:hover, .mark-moments:hover, .make-primer:hover,
+  .make-notes:hover, .more-moments:hover, .fetch-stub:hover,
   .ask-stub:hover { background: #efe7d9; }
+  /* The uniform ✦ pattern: an empty section still renders, holding its
+     generate button and one quiet line saying what it creates. */
+  .gen-empty { display: flex; flex-direction: column;
+               align-items: flex-start; gap: 0.3rem; }
+  .gen-desc { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
+  .gen-more { margin: 0.6rem 0 0; }
+  .more-moments { font-size: 0.85rem; padding: 0.3rem 0.9rem; }
   .fetch-stub { background: #efe7d9; border-style: solid; } /* the primary */
   .fetch-stub:hover { background: #e7dcc8; }
   /* "Listen for": the guide's curated jump-to moments — anchored
@@ -694,6 +703,22 @@ STYLE = """
                  padding: 0.35rem 0.9rem; cursor: pointer; }
   .moment-chip:hover { background: #efe7d9; }
   .moment-time { color: #a9853f; font-variant-numeric: tabular-nums; }
+  /* The full transcript: a quiet sub-expander behind the moments —
+     the front layer invites, the segments wait. */
+  details.full-transcript { margin-top: 0.9rem; border-top: none;
+                            padding-top: 0; }
+  details.full-transcript summary { font-size: 0.88rem; color: #a99e8e; }
+  /* Prompt chips: quiet one-tap suggestions over a focused, EMPTY input.
+     Same gentle rise as the peek — no layout shove, no stolen focus. */
+  #prompt-chips { display: flex; flex-wrap: wrap; gap: 0.4rem;
+                  margin: 0.15rem 0.6rem 0.1rem;
+                  animation: peek-rise 0.25s ease; }
+  #prompt-chips[hidden] { display: none; } /* flex must not defeat hidden */
+  .prompt-chip { font: inherit; font-size: 0.85rem; color: #5a4d3a;
+                 background: #f6f1e7; border: 1px dashed #d8cbb4;
+                 border-radius: 999px; padding: 0.3rem 0.9rem;
+                 cursor: pointer; }
+  .prompt-chip:hover { background: #efe7d9; }
   .artifact-frame { display: block; width: 100%; height: 480px;
                     margin-top: 0.5rem; border: 1px solid #e8e0d3;
                     border-radius: 8px; background: #fffdf9;
@@ -967,6 +992,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 <button type="button" id="chat-stop" title="stop this reply — what arrived stays">▢ stop</button>
 </div>
 <p id="chat-queued" hidden></p>
+<div id="prompt-chips" hidden></div>
 <form id="chat-form">
 <button type="button" id="chat-open" title="open the conversation" aria-label="open the conversation">
 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5.5h15v10.5h-9l-4 3.5v-3.5h-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
@@ -1103,6 +1129,70 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   input.addEventListener("input", function () {
     updateSendState();
     autoGrow();
+    // Typing is intent: the suggestion strip steps aside on the first
+    // keystroke and returns when the input is empty again.
+    if (input.value) hidePromptChips();
+    else showPromptChips();
+  });
+
+  // --- prompt chips: quiet suggestions over a focused, EMPTY input ------
+  // Context-aware one-tap asks, built with createElement + textContent.
+  // They never steal focus and never shove the layout (the strip rises
+  // gently, like the peek); a tap sends through the queue-aware door.
+  // Keyboard-friendly: Tab reaches the chips (focusout's relatedTarget
+  // keeps the strip open while focus stays in the tray), Enter sends.
+  var promptChips = document.getElementById("prompt-chips");
+
+  function chipSuggestions(view) {
+    if (view) {
+      return [
+        "mark the moments in this talk",
+        "make an interactive guide with jump-to links",
+        "what should I listen for?"
+      ];
+    }
+    return [
+      "where are we on the path?",
+      "what's next for me?",
+      "play me something short"
+    ];
+  }
+
+  function showPromptChips() {
+    if (busy || input.value.trim()) return;
+    while (promptChips.firstChild) promptChips.removeChild(promptChips.firstChild);
+    chipSuggestions(currentView()).forEach(function (text) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "prompt-chip";
+      chip.textContent = text;
+      promptChips.appendChild(chip);
+    });
+    promptChips.hidden = false;
+  }
+
+  function hidePromptChips() {
+    promptChips.hidden = true;
+  }
+
+  function chipFocusOut(event) {
+    var next = event.relatedTarget;
+    if (next === input || promptChips.contains(next)) return;
+    hidePromptChips();
+  }
+
+  input.addEventListener("focus", showPromptChips);
+  input.addEventListener("focusout", chipFocusOut);
+  promptChips.addEventListener("focusout", chipFocusOut);
+  promptChips.addEventListener("click", function (event) {
+    var chip = event.target.closest(".prompt-chip");
+    if (!chip) return;
+    hidePromptChips();
+    sendOrQueue(chip.textContent);
+  });
+  // A room change re-draws a visible strip in the new context.
+  window.addEventListener("hashchange", function () {
+    if (!promptChips.hidden) showPromptChips();
   });
 
   function setChatState(next) {
@@ -1165,14 +1255,43 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       + JSON.stringify(button.getAttribute("data-title"))
       + " from its transcript and notes — remember I prefer listening-first.");
   });
-  // "✦ ask the guide to mark the moments" — the empty Listen-for
-  // section's one calm generator, through the same queue-aware send.
+  // "✦ ask the guide to mark the moments" — the Transcript block's
+  // front layer when no moments exist yet, same queue-aware send.
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".mark-moments");
     if (!button) return;
     sendOrQueue("Read this talk's transcript and mark 3-6 moments worth "
       + "returning to — write them under '## Moments' in the notes as "
       + "'- mm:ss — why', timestamps grounded in transcript.json, then "
+      + "rebuild the shelf.");
+  });
+  // "✦ more like this" — with moments already marked, ask for a few
+  // more; the ask itself forbids duplicates and keeps the grounding.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".more-moments");
+    if (!button) return;
+    sendOrQueue("Mark 2-3 MORE moments in this talk beyond the ones "
+      + "already in '## Moments' — same format ('- mm:ss — why'), "
+      + "no duplicates, grounded in transcript.json, then rebuild "
+      + "the shelf.");
+  });
+  // "✦ ask the guide to write & speak a primer" — the empty Primer
+  // section's generator: transcript → '## Primer' in notes → primer.mp3.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".make-primer");
+    if (!button) return;
+    sendOrQueue("Read this talk's transcript and write a 60-90 second "
+      + "primer — who the teacher is, what to listen for — into the "
+      + "notes under '## Primer', speak it to primer.mp3 with the "
+      + "speak tool, then rebuild the shelf.");
+  });
+  // "✦ ask the guide to start notes for this talk" — the empty Notes
+  // section's generator, same uniform pattern.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".make-notes");
+    if (!button) return;
+    sendOrQueue("Please start notes for this talk — a few lines on "
+      + "what it covers and a '## My takeaways' section to grow, then "
       + "rebuild the shelf.");
   });
   // The stub rooms' one primary action: an explicit single-item fetch
@@ -2793,19 +2912,51 @@ LAYOUT_SCRIPT = """<script>
 </script>"""
 
 
-def render_moments(
-    slug: str, title: str, moments: list[dict], has_transcript_json: bool
-) -> str:
-    """The card's "Listen for" block: anchored listening as the default
-    teaching pattern.
+def has_primer_section(notes_text: str) -> bool:
+    """Does a '## Primer' heading live inside the notes?
+
+    Nightly prep writes primers there (any heading level, case folded)
+    — that counts as having one, even with no primer.mp3/primer.md.
+    """
+    return bool(re.search(r"(?mi)^#{1,6} primer\b", notes_text or ""))
+
+
+def notes_are_empty(text: str) -> bool:
+    """No notes, or notes that are all headings and blank lines —
+    'effectively empty': nothing anyone actually wrote down yet."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line and not re.fullmatch(r"#{1,6}( .*)?", line):
+            return False
+    return True
+
+
+def render_generator(css: str, title: str, label: str, desc: str) -> str:
+    """One empty section's uniform ✦ invitation.
+
+    Every main card section either has content or shows this exact
+    pattern: the generate button (a canned ask through the queue-aware
+    chat send — delegated JS, so swapped-in rooms keep working) plus one
+    quiet line saying what it creates.
+    """
+    return (
+        '<p class="gen-empty">'
+        f'<button type="button" class="{css}" data-title="{escape(title)}">'
+        f"✦ {escape(label)}</button>\n"
+        f'<span class="gen-desc">{escape(desc)}</span></p>'
+    )
+
+
+def render_moments(slug: str, title: str, moments: list[dict]) -> str:
+    """The Transcript block's front layer: anchored listening first.
 
     With moments, each becomes a chip — "listen from 13:23 — <why>" —
     that seeks the talk player exactly like a transcript-line click
-    (bindRoom wires .moments through the ONE seek path). Open by
-    default: the moments are the invitation. Without moments, a quiet ✦
-    button asks the guide to mark some — only when transcript.json
-    exists, because the guide grounds every timestamp there. Returns ""
-    when there is nothing to offer.
+    (bindRoom wires .moments through the ONE seek path), followed by a
+    small "✦ more like this" asking for a few more, no duplicates.
+    Without moments, the ✦ mark-the-moments generator sits in the front
+    layer instead. Either way the timestamps are grounded in
+    transcript.json — callers only render this layer when it exists.
     """
     if moments:
         chips = "\n".join(
@@ -2815,18 +2966,17 @@ def render_moments(
             for m in moments
         )
         return (
-            "<details open><summary>Listen for</summary>\n"
             f'<div class="moments" data-slug="{escape(slug)}">\n{chips}\n</div>\n'
-            "</details>"
+            '<p class="gen-more">'
+            f'<button type="button" class="more-moments" data-title="{escape(title)}">'
+            "✦ more like this</button></p>"
         )
-    if has_transcript_json:
-        return (
-            "<details><summary>Listen for</summary>\n"
-            '<p class="moments-empty">'
-            f'<button type="button" class="mark-moments" data-title="{escape(title)}">'
-            "✦ ask the guide to mark the moments</button></p>\n</details>"
-        )
-    return ""
+    return render_generator(
+        "mark-moments",
+        title,
+        "ask the guide to mark the moments",
+        "3–6 anchored jump-to moments, grounded in the transcript",
+    )
 
 
 def render_stub_card(stub: dict) -> str:
@@ -3172,8 +3322,9 @@ This page never edits Hermes config.</p>
 </section>
 <section class="set-group" id="set-prep" hidden>
 <h3>Nightly prep</h3>
-<p class="set-fine">A quiet job inside the Hermes gateway: primers and
-notes for queued talks, nothing fetched that isn't already on the path.</p>
+<p class="set-fine">A quiet job inside the Hermes gateway: primers, notes,
+and moments for queued talks, nothing fetched that isn't already on the
+path.</p>
 <p id="prep-line" class="set-state"></p>
 <p id="prep-controls" hidden>
 <button type="button" id="prep-run" class="prep-btn">run now</button>
@@ -3212,14 +3363,43 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                             listened=listening.get(talk["slug"]),
                             state=states.get(talk["slug"]))]
         slug = escape(talk["slug"])
+        title = talk.get("title", talk["slug"])
+        notes_text = (
+            (talk_dir / "notes.md").read_text() if files["notes_md"] else ""
+        )
+        # The completeness standard: Primer / Notes / Transcript·listen
+        # for / Interactive each has content or shows its ✦ generator in
+        # a details block that still RENDERS — sections never disappear.
         if files["primer_md"]:
             primer = md_to_html((talk_dir / "primer.md").read_text())
             card.append(f"<details><summary>Primer text</summary>\n{primer}\n</details>")
-        notes_text = ""
-        if files["notes_md"]:
-            notes_text = (talk_dir / "notes.md").read_text()
+        elif not (files["primer_mp3"] or has_primer_section(notes_text)):
+            card.append(
+                "<details open><summary>Primer</summary>\n"
+                + render_generator(
+                    "make-primer",
+                    title,
+                    "ask the guide to write & speak a primer",
+                    "a 60–90 second spoken introduction — who the teacher "
+                    "is, what to listen for",
+                )
+                + "\n</details>"
+            )
+        if not notes_are_empty(notes_text):
             card.append(
                 f"<details><summary>Notes</summary>\n{md_to_html(notes_text)}\n</details>"
+            )
+        else:
+            card.append(
+                "<details open><summary>Notes</summary>\n"
+                + render_generator(
+                    "make-notes",
+                    title,
+                    "ask the guide to start notes for this talk",
+                    "a living notes file — takeaways, quotes, the moments "
+                    "worth returning to",
+                )
+                + "\n</details>"
             )
         segments = []
         if files["transcript_json"]:
@@ -3235,18 +3415,18 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
         moment_cap = max((seg["end"] for seg in segments), default=0) or (
             duration_to_seconds(talk.get("duration", "")) or 0
         )
-        moments_block = render_moments(
-            talk["slug"],
-            talk.get("title", talk["slug"]),
-            parse_moments(notes_text, cap=moment_cap),
-            files["transcript_json"],
+        moments_front = (
+            render_moments(
+                talk["slug"], title, parse_moments(notes_text, cap=moment_cap)
+            )
+            if files["transcript_json"]
+            else ""  # no grounding possible: no moments layer at all
         )
-        if moments_block:
-            card.append(moments_block)
         if segments:
-            # The transcript as a player: each timed segment is clickable —
-            # local-audio talks seek and play, YouTube talks reload the
-            # embed at that moment. The raw file stays a click away.
+            # The transcript block opens onto the moments (chips or the
+            # ✦, one home for anchored listening); the segmented
+            # click-to-seek transcript waits behind a quiet sub-expander,
+            # with the raw file still a click away.
             rows = "\n".join(
                 f'<p class="seg" data-start="{seg["start"]:g}">'
                 f'<span class="seg-time">{format_time(seg["start"])}</span> '
@@ -3254,12 +3434,23 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 for seg in segments
             )
             card.append(
-                "<details><summary>Transcript</summary>\n"
+                "<details open><summary>Transcript · listen for</summary>\n"
+                f"{moments_front}\n"
+                '<details class="full-transcript">'
+                "<summary>full transcript ▸</summary>\n"
                 f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
                 f'<div class="scroll-box seg-transcript" data-slug="{slug}">\n'
-                f"{rows}\n</div>\n</details>"
+                f"{rows}\n</div>\n</details>\n</details>"
             )
-        elif files["transcript_md"]:
+        elif moments_front:
+            # transcript.json exists but yielded no segments (a torn
+            # file): the moments layer still gets its one home.
+            card.append(
+                "<details open><summary>Listen for</summary>\n"
+                + moments_front
+                + "\n</details>"
+            )
+        if not segments and files["transcript_md"]:
             # Rendered inline (escaped, formatted) — the raw .md link alone
             # opened as one wall of unformatted text. Transcripts run long,
             # so the rendered copy lives in a scrollable box, with the raw
@@ -3290,13 +3481,14 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 f'<ul class="artifact-list">\n{items}\n</ul>'
             )
         else:
-            # No tools yet: one calm generator. Clicking sends the ask
-            # through the normal chat path — the peek shows the build.
-            interactive_body = (
-                '<p class="interactive-empty">'
-                f'<button type="button" class="make-interactive" '
-                f'data-title="{escape(talk.get("title", talk["slug"]))}">'
-                "✦ create interactive tools from this talk</button></p>"
+            # No tools yet: one calm generator in the uniform ✦ pattern.
+            # Clicking sends the ask through the normal chat path — the
+            # peek shows the build.
+            interactive_body = render_generator(
+                "make-interactive",
+                title,
+                "create interactive tools from this talk",
+                "small practice pages with anchored listen-from links",
             )
         card.append(
             "<details open><summary>Interactive</summary>\n"

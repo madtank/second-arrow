@@ -1919,11 +1919,15 @@ def test_card_renders_moment_chips_grounded_in_the_transcript(tmp_path):
     quiet_card = re.search(
         r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
     ).group(0)
-    # Its own details block, open by default — the moments invite.
+    # The moments are the FRONT layer of the Transcript block now — one
+    # home, open by default: the moments stay the invitation.
     listen_for = re.search(
-        r"<details open><summary>Listen for</summary>.*?</details>", quiet_card, re.S
+        r"<details open><summary>Transcript · listen for</summary>.*?"
+        r"</details>\s*</details>",
+        quiet_card,
+        re.S,
     )
-    assert listen_for, "Listen for block missing"
+    assert listen_for, "Transcript · listen for block missing"
     block = listen_for.group(0)
     assert '<div class="moments" data-slug="quiet-mind">' in block
     chip = re.search(
@@ -1940,27 +1944,216 @@ def test_card_renders_moment_chips_grounded_in_the_transcript(tmp_path):
     assert "seekTalk(box.getAttribute" in html
 
 
+def test_transcript_block_layers_moments_before_the_full_transcript(tmp_path):
+    library = _make_library(tmp_path)
+    html = build_shelf.render_shelf(library, {})
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    # Moments first, then the quiet sub-expander with the segmented
+    # click-to-seek transcript behind it.
+    chips_at = quiet_card.index('<div class="moments"')
+    full_at = quiet_card.index(
+        '<details class="full-transcript"><summary>full transcript ▸</summary>'
+    )
+    assert chips_at < full_at
+    full_block = quiet_card[full_at:]
+    assert '<div class="scroll-box seg-transcript" data-slug="quiet-mind">' in full_block
+    assert 'href="quiet-mind/transcript.md"' in full_block
+    # One home, not two: no standalone Listen for block remains.
+    assert "<summary>Listen for</summary>" not in quiet_card
+    # With moments marked, "✦ more like this" follows the chips — and its
+    # canned ask never duplicates what's already in '## Moments'.
+    more = re.search(r'<button type="button" class="more-moments"[^>]*>', quiet_card)
+    assert more and chips_at < quiet_card.index(more.group(0)) < full_at
+    assert "✦ more like this" in quiet_card
+    assert "Mark 2-3 MORE moments in this talk beyond the ones " in html
+    assert "no duplicates, grounded in transcript.json" in html
+    assert 'event.target.closest(".more-moments")' in html
+
+
 def test_card_without_moments_offers_the_ask_button(tmp_path):
     library = _make_library(tmp_path)
     html = build_shelf.render_shelf(library, {})
-    # demon-story has transcript.json but no notes: the ✦ generator.
+    # demon-story has transcript.json but no notes: the ✦ generator sits
+    # in the Transcript block's front layer, where the chips would be.
     demon_card = re.search(
         r'<section class="card view" id="talk-demon-story"[^>]*>.*?</section>',
         html,
         re.S,
     ).group(0)
+    assert "<summary>Transcript · listen for</summary>" in demon_card
     assert 'class="mark-moments" data-title="Demon Story"' in demon_card
     assert "✦ ask the guide to mark the moments" in demon_card
+    # No moments yet, so nothing to ask "more like this" of.
+    assert "more-moments" not in demon_card
     # far-talk has no transcript.json: no grounded timestamps possible,
-    # so no Listen for section at all.
+    # so a plain Transcript block and no moments layer at all.
     far_card = re.search(
         r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
     ).group(0)
-    assert "Listen for" not in far_card and "mark-moments" not in far_card
+    assert "<summary>Transcript</summary>" in far_card
+    assert "Transcript · listen for" not in far_card
+    assert "mark-moments" not in far_card and "moment-chip" not in far_card
     # The button's canned ask goes through the queue-aware send.
     assert "mark 3-6 moments worth " in html
     assert "'## Moments' in the notes as " in html
     assert "timestamps grounded in transcript.json" in html
+
+
+# --- iteration 14: completeness as a standard — every section has content
+# --- or its ✦, canned asks for the gaps, prompt chips over the empty input
+
+
+def test_every_empty_section_renders_its_generator(tmp_path):
+    library = _make_library(tmp_path)
+    html = build_shelf.render_shelf(library, {})
+    # bare-yt has nothing: Primer and Notes still RENDER, each as a
+    # details block holding its ✦ invitation plus a one-line description.
+    bare_card = re.search(
+        r'<section class="card view" id="talk-bare-yt">.*?</section>', html, re.S
+    ).group(0)
+    primer = re.search(
+        r"<details open><summary>Primer</summary>.*?</details>", bare_card, re.S
+    )
+    assert primer, "empty Primer section missing"
+    assert 'class="make-primer" data-title="Bare YT"' in primer.group(0)
+    assert "✦ ask the guide to write &amp; speak a primer" in primer.group(0)
+    assert 'class="gen-desc"' in primer.group(0)
+    notes = re.search(
+        r"<details open><summary>Notes</summary>.*?</details>", bare_card, re.S
+    )
+    assert notes, "empty Notes section missing"
+    assert 'class="make-notes" data-title="Bare YT"' in notes.group(0)
+    assert "✦ ask the guide to start notes for this talk" in notes.group(0)
+    # Interactive keeps its generator, now in the same uniform pattern.
+    assert 'class="make-interactive" data-title="Bare YT"' in bare_card
+    assert bare_card.count('class="gen-empty"') == 3
+    # quiet-mind has a primer (mp3) and real notes: no generators there.
+    quiet_card = re.search(
+        r'<section class="card view" id="talk-quiet-mind">.*?</section>', html, re.S
+    ).group(0)
+    assert "make-primer" not in quiet_card and "make-notes" not in quiet_card
+    assert "<summary>Notes</summary>" in quiet_card
+
+
+def test_primer_lives_in_mp3_md_or_the_notes_primer_section(tmp_path):
+    library = _make_library(tmp_path)
+    # Nightly prep writes primers under "## Primer" IN the notes — that
+    # counts as having one (no ✦), even with no primer.mp3/primer.md.
+    demon = library / "demon-story"
+    (demon / "notes.md").write_text(
+        "## Primer\n\nAjahn Brahm tells the demon story — listen for the feeding.\n"
+    )
+    html = build_shelf.render_shelf(library, {})
+    demon_card = re.search(
+        r'<section class="card view" id="talk-demon-story"[^>]*>.*?</section>',
+        html,
+        re.S,
+    ).group(0)
+    assert "make-primer" not in demon_card
+    # The helper itself, directly.
+    assert build_shelf.has_primer_section("## Primer\n\nwords\n")
+    assert build_shelf.has_primer_section("# primer\n")
+    assert not build_shelf.has_primer_section("## Primary sources\n")
+    assert not build_shelf.has_primer_section("")
+
+
+def test_notes_that_are_all_headings_count_as_empty(tmp_path):
+    assert build_shelf.notes_are_empty("")
+    assert build_shelf.notes_are_empty("# Notes\n\n## My takeaways\n\n")
+    assert not build_shelf.notes_are_empty("# Notes\n\n- something landed\n")
+    assert not build_shelf.notes_are_empty("just a line\n")
+    # Rendered: a headings-only notes.md still gets the ✦ invitation.
+    library = _make_library(tmp_path)
+    (library / "far-talk" / "notes.md").write_text("# Notes\n\n## My takeaways\n")
+    html = build_shelf.render_shelf(library, {})
+    far_card = re.search(
+        r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
+    ).group(0)
+    assert 'class="make-notes" data-title="Far Talk"' in far_card
+
+
+def test_generator_canned_messages_ride_the_queue_aware_send(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Every ✦ is a delegated click through sendOrQueue — swapped-in rooms
+    # keep working with no rebinding.
+    for marker in (
+        'event.target.closest(".make-primer")',
+        'event.target.closest(".make-notes")',
+        'event.target.closest(".more-moments")',
+        'sendOrQueue("Read this talk\'s transcript and write a 60-90 second "',
+        "'## Primer', speak it to primer.mp3 with the ",
+        'sendOrQueue("Please start notes for this talk — a few lines on "',
+        'sendOrQueue("Mark 2-3 MORE moments in this talk beyond the ones "',
+    ):
+        assert marker in html, marker
+    assert "innerHTML" not in html
+
+
+def test_prompt_chips_markup_context_and_wiring(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The strip exists (hidden) above the input; flex must not defeat hidden.
+    assert '<div id="prompt-chips" hidden></div>' in html
+    assert re.search(r"#prompt-chips\[hidden\] \{ display: none", html)
+    # Context-aware suggestions: a talk room offers talk work; home and
+    # curriculum offer the path.
+    for suggestion in (
+        "mark the moments in this talk",
+        "make an interactive guide with jump-to links",
+        "what should I listen for?",
+        "where are we on the path?",
+        "what's next for me?",
+        "play me something short",
+    ):
+        assert suggestion in html, suggestion
+    # Shown only over a focused, EMPTY input; gone on the first keystroke
+    # or when focus leaves the tray (Tab onto a chip keeps it open).
+    assert 'input.addEventListener("focus", showPromptChips)' in html
+    assert 'input.addEventListener("focusout", chipFocusOut)' in html
+    assert "promptChips.contains(next)" in html
+    assert "hidePromptChips" in html
+    # One tap sends through the queue-aware door.
+    assert 'event.target.closest(".prompt-chip")' in html
+    assert "sendOrQueue(chip.textContent)" in html
+    # Built with createElement + textContent, never markup.
+    assert "innerHTML" not in html
+
+
+def test_prompt_chip_suggestions_under_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    fn = re.search(r"function chipSuggestions\(view\) \{[\s\S]*?\n  \}", html)
+    assert fn, "chipSuggestions missing"
+    harness = fn.group(0) + r"""
+var talk = chipSuggestions("quiet-mind");
+var home = chipSuggestions(null);
+function ok(cond, label) {
+  if (!cond) { console.error(label); process.exit(1); }
+}
+ok(talk.length >= 3 && talk.length <= 4, "talk count");
+ok(home.length >= 3 && home.length <= 4, "home count");
+ok(talk.indexOf("mark the moments in this talk") !== -1, "talk moments");
+ok(home.indexOf("where are we on the path?") !== -1, "home path");
+ok(talk.join("|") !== home.join("|"), "contexts differ");
+console.log("chips ok");
+"""
+    js = tmp_path / "chips.js"
+    js.write_text(harness)
+    result = subprocess.run(["node", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "chips ok" in result.stdout
+
+
+def test_prep_settings_line_names_all_three_basics(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The nightly-prep description keeps up with the standard: primer,
+    # notes, AND moments are a talk's basics now.
+    settings = re.search(
+        r'<section class="set-group" id="set-prep"[\s\S]*?</section>', html
+    ).group(0)
+    assert "moments" in settings
 
 
 # --- unheard: latest entry wins on the render side too --------------------------
