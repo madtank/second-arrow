@@ -61,6 +61,12 @@ Routes:
     POST /api/reopen  {"slug"} — the exact inverse: Studied → Queued
                     with a "(reopened <date>)" one-liner + rebuild.
                     Reopening a not-done talk is a clean no-op.
+    POST /api/skip  {"name"} — a stub room's "skip — not for me right
+                    now": the queued entry (matched by normalized NAME —
+                    these were never fetched, so no slug exists) moves to
+                    Studied with a "(set aside <date> — didn't call right
+                    now)" one-liner + rebuild. Idempotent; unknown names
+                    404 — skip never invents path entries.
     POST /api/chat/stop  {"session"?} — abort that episode's in-flight
                     turn (default: the current episode): the claude
                     subprocess is killed / the hermes or ollama stream
@@ -696,6 +702,23 @@ def mark_reopened_on_path(
     )
 
 
+def mark_skipped_on_path(
+    study_text: str, name: str, date_str: str | None = None
+) -> tuple[str, bool]:
+    """Queued → Studied with a "(set aside <date> — didn't call right
+    now)" one-liner — a stub room's skip door. Unlike done, an entry
+    absent from both lists is NEVER added: skipping can only set aside
+    what the path actually holds. Returns (new_text, changed)."""
+    date_str = date_str or datetime.now(timezone.utc).date().isoformat()
+    return _move_on_path(
+        study_text,
+        name,
+        "studied",
+        f"- **{name}** — (set aside {date_str} — didn't call right now)",
+        add_when_absent=False,
+    )
+
+
 def mark_done(library: Path, slug) -> dict:
     """The ONE write path behind POST /api/done — instant, idempotent,
     no LLM involved.
@@ -756,6 +779,40 @@ def mark_reopen(library: Path, slug) -> dict:
         "moved": moved,
         "shelf_mtime": shelf_mtime(library),
     }
+
+
+def mark_skip(library: Path, name) -> dict:
+    """The ONE write path behind POST /api/skip — a stub room's
+    "skip — not for me right now", instant and idempotent.
+
+    These entries have no library slug (they were never fetched), so the
+    match is by normalized NAME within STUDY.md's Queued list. Moved:
+    the entry lands in Studied with a "(set aside <date> — didn't call
+    right now)" one-liner and the shelf rebuilds — the stub room and its
+    sidebar line are gone before the guide says a word. Already set
+    aside: a clean idempotent {ok}. Unknown name: LookupError (the route
+    answers 404) — skip never invents path entries."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"invalid path entry name {name!r}")
+    study_path = library.parent / "STUDY.md"
+    study_text = study_path.read_text(encoding="utf-8") if study_path.exists() else ""
+    new_text, moved = mark_skipped_on_path(study_text, name)
+    if moved:
+        study_path.write_text(new_text, encoding="utf-8")
+        rebuild_shelf(library)
+        return {"ok": True, "moved": True, "shelf_mtime": shelf_mtime(library)}
+    # Nothing moved: idempotent when the entry already reads as done /
+    # set aside on the path; otherwise the name is simply not there.
+    build_shelf = load_build_shelf()
+    path = build_shelf.parse_study(study_text)
+    key = build_shelf.normalize_title(name)
+    settled = {
+        build_shelf.normalize_title(entry)
+        for entry in path.get("studied", []) + path.get("parked", [])
+    }
+    if key in settled:
+        return {"ok": True, "moved": False, "shelf_mtime": shelf_mtime(library)}
+    raise LookupError(f"no queued path entry named {name!r}")
 
 
 def artifact_path(library: Path, slug: str, name: str) -> Path:
@@ -3421,6 +3478,19 @@ def create_app(brain: str, ollama_model: str):
         # note. Idempotent; reopening a not-done talk is a clean no-op.
         try:
             return mark_reopen(LIBRARY, body.get("slug"))
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+
+    @app.post("/api/skip")
+    def api_skip(body: dict):
+        # A stub room's "skip — not for me right now": the queued entry
+        # (matched by name — never fetched, so no slug) moves to Studied
+        # with a set-aside note, instantly, no LLM. The guide's role is
+        # only the conversational follow-through afterwards.
+        try:
+            return mark_skip(LIBRARY, body.get("name"))
+        except LookupError as error:
+            return JSONResponse({"error": str(error)}, status_code=404)
         except ValueError as error:
             return JSONResponse({"error": str(error)}, status_code=400)
 

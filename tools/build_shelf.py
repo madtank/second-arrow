@@ -337,21 +337,21 @@ def talk_states(path: dict, talks: list[dict]) -> tuple[dict[str, str], list[str
     return states, unfetched
 
 
-# URLs that are readings, not recordings — a sutta page can't be fetched
-# as a talk, so its stub room asks the guide instead of offering a fetch.
-# A "for now" heuristic, matching the curriculum's current shape.
+# URLs that are readings, not recordings (fetch_talk keeps a twin) — a
+# sutta page fetches as TEXT: its stub room's build door says so instead
+# of promising audio. A "for now" heuristic matching the curriculum.
 _READING_URL_RE = re.compile(r"dhammatalks\.org/suttas/|suttacentral\.net")
 
 
 def curriculum_entries(curriculum: Path) -> list[dict]:
     """Everything the curriculum knows per entry, for the stub rooms.
 
-    [{title, teacher, url, why, fetchable}] from curriculum/*.md
+    [{title, teacher, url, why, fetchable, kind}] from curriculum/*.md
     (README skipped). An entry is its `- **Title — Teacher (meta)**`
     line plus the contiguous description lines under it; the first URL
-    is its source. fetchable means a URL exists and looks like a
-    recording (reading pages — suttas — stay ask-the-guide). Tolerant:
-    junk entries simply contribute less.
+    is its source. fetchable means a URL exists; kind says what the
+    fetch would ingest — "talk" (a recording) or "reading" (a text
+    page, suttas). Tolerant: junk entries simply contribute less.
     """
     entries: list[dict] = []
     files = sorted(curriculum.glob("*.md")) if curriculum.is_dir() else []
@@ -379,14 +379,20 @@ def curriculum_entries(curriculum: Path) -> list[dict]:
                 r"https?://[^\s)]+", block
             )
             url_text = url.group(0) if url else ""
+            if not url_text:
+                kind = ""
+            elif _READING_URL_RE.search(url_text):
+                kind = "reading"
+            else:
+                kind = "talk"
             entries.append(
                 {
                     "title": title.strip(),
                     "teacher": teacher,
                     "url": url_text,
                     "why": " ".join(why_lines),
-                    "fetchable": bool(url_text)
-                    and not _READING_URL_RE.search(url_text),
+                    "fetchable": bool(url_text),
+                    "kind": kind,
                 }
             )
     return entries
@@ -420,6 +426,7 @@ def curriculum_stub(name: str, entries: list[dict]) -> dict:
         "url": "",
         "why": "",
         "fetchable": False,
+        "kind": "",
     }
     for entry in entries:
         ekey = normalize_title(entry["title"])
@@ -430,6 +437,7 @@ def curriculum_stub(name: str, entries: list[dict]) -> dict:
                 url=entry["url"],
                 why=entry["why"],
                 fetchable=entry["fetchable"],
+                kind=entry.get("kind", ""),
             )
             break
     return stub
@@ -462,20 +470,28 @@ def render_path_strip(path: dict) -> str:
 
 
 def probe(talk_dir: Path) -> dict:
-    """See which study artifacts a talk folder actually has."""
+    """See which study artifacts a talk folder actually has.
+
+    "reading" is the file-shape verdict: transcript.md with no audio and
+    no transcript.json is a text source (a sutta, an article) — its room
+    renders the text itself, with no player and no timestamps.
+    """
     audio = next(
         (p for p in sorted(talk_dir.glob("audio.*")) if p.suffix.lower() in AUDIO_EXTENSIONS),
         None,
     )
+    transcript_md = (talk_dir / "transcript.md").exists()
+    transcript_json = (talk_dir / "transcript.json").exists()
     return {
         "primer_mp3": (talk_dir / "primer.mp3").exists(),
         "primer_md": (talk_dir / "primer.md").exists(),
         "notes_md": (talk_dir / "notes.md").exists(),
-        "transcript_md": (talk_dir / "transcript.md").exists(),
+        "transcript_md": transcript_md,
         "audio": audio.name if audio else None,
         "artifacts": sorted(p.name for p in (talk_dir / "artifacts").glob("*.html")),
         "thumbnail": (talk_dir / "thumbnail.jpg").exists(),
-        "transcript_json": (talk_dir / "transcript.json").exists(),
+        "transcript_json": transcript_json,
+        "reading": transcript_md and audio is None and not transcript_json,
     }
 
 
@@ -693,6 +709,18 @@ STYLE = """
   .more-moments { font-size: 0.85rem; padding: 0.3rem 0.9rem; }
   .fetch-stub { background: #efe7d9; border-style: solid; } /* the primary */
   .fetch-stub:hover { background: #e7dcc8; }
+  /* The stub room's decision copy and its quieter second door. */
+  .stub-copy { color: #6d5f4b; margin: 0.8rem 0 0.2rem; }
+  .stub-action { margin: 0.7rem 0 0.2rem; }
+  .skip-stub { font: inherit; font-size: 0.92rem; color: #7a6a50;
+               background: none; border: 1px dashed #d8cbb4;
+               border-radius: 999px; padding: 0.45rem 1.1rem;
+               cursor: pointer; }
+  .skip-stub:hover { background: #f6f1e7; }
+  .skip-stub:disabled { color: #a99e8e; cursor: default; }
+  /* The reading room: the text itself is the talk — a comfortable
+     reading measure, no player anywhere. */
+  .reading-text { max-width: 34em; line-height: 1.75; }
   /* "Listen for": the guide's curated jump-to moments — anchored
      listening chips, each one a transcript-click-shaped seek. */
   .moments { display: flex; flex-direction: column; align-items: flex-start;
@@ -1277,9 +1305,18 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   });
   // "✦ ask the guide to write & speak a primer" — the empty Primer
   // section's generator: transcript → '## Primer' in notes → primer.mp3.
+  // A reading's primer (the reading-primer class) adapts: how to read
+  // this, not what to listen for — and nothing is spoken.
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".make-primer");
     if (!button) return;
+    if (button.classList.contains("reading-primer")) {
+      sendOrQueue("Read this reading's text and write a short "
+        + "'how to read this' primer — who is speaking, how to approach "
+        + "the text, what to notice — into the notes under '## Primer', "
+        + "then rebuild the shelf.");
+      return;
+    }
     sendOrQueue("Read this talk's transcript and write a 60-90 second "
       + "primer — who the teacher is, what to listen for — into the "
       + "notes under '## Primer', speak it to primer.mp3 with the "
@@ -1294,12 +1331,20 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       + "what it covers and a '## My takeaways' section to grow, then "
       + "rebuild the shelf.");
   });
-  // The stub rooms' one primary action: an explicit single-item fetch
-  // (recording URL known) or a plain ask (reading/no URL) — both through
-  // the queue-aware send, never silently dropped.
+  // The stub rooms' build door: an explicit single-item fetch through
+  // the queue-aware send, never silently dropped. data-kind picks the
+  // ask — a talk's recording ritual or a reading's text ingest.
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".fetch-stub");
     if (!button) return;
+    if (button.getAttribute("data-kind") === "reading") {
+      sendOrQueue("Please fetch this reading — "
+        + button.getAttribute("data-url") + " — single explicit ingest "
+        + "I'm asking for; extract the text, verify it's really "
+        + button.getAttribute("data-title") + ", notes with a "
+        + "short 'how to read this' primer, update the path, rebuild.");
+      return;
+    }
     sendOrQueue("Please fetch " + button.getAttribute("data-title")
       + " (" + button.getAttribute("data-teacher") + ") — curriculum URL "
       + button.getAttribute("data-url") + ". Single explicit download I'm "
@@ -1337,14 +1382,14 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   // (so the version poll doesn't double-refresh), the room swapped in
   // place, and THEN the guide follow-up through the queue-aware send —
   // conversation follows the action instead of performing it.
-  function serverFirstAction(button, api, workingLabel, followUp, undoMark) {
+  function serverFirstAction(button, api, body, workingLabel, followUp, undoMark) {
     button.disabled = true;
     var was = button.textContent;
     button.textContent = workingLabel;
     fetch(api, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug: button.getAttribute("data-slug") }),
+      body: JSON.stringify(body),
     }).then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
@@ -1366,7 +1411,9 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".done-for-now");
     if (!button || button.disabled) return;
-    serverFirstAction(button, "/api/done", "✓ done — finding what's next…",
+    serverFirstAction(button, "/api/done",
+      { slug: button.getAttribute("data-slug") },
+      "✓ done — finding what's next…",
       "I'm done with " + button.getAttribute("data-title")
       + " for now — the shelf has already marked it done on the path. "
       + "What's next? If nothing unheard is left in the library, this "
@@ -1380,11 +1427,29 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".reopen-talk");
     if (!button || button.disabled) return;
-    serverFirstAction(button, "/api/reopen", "reopening…",
+    serverFirstAction(button, "/api/reopen",
+      { slug: button.getAttribute("data-slug") },
+      "reopening…",
       "I've reopened " + button.getAttribute("data-title")
       + " — pick it up with me when you're ready: what should we "
       + "look at again?",
       markSidebarState(button.getAttribute("data-slug"), "nav-next", "→"));
+  });
+  // "skip — not for me right now" — a stub room's set-aside door, the
+  // same server-first shape: POST /api/skip {name} moves the entry from
+  // Queued to Studied with a set-aside note (no library slug — the match
+  // is by name), the button becomes its own receipt, the sidebar entry
+  // flips ✓ optimistically, and THEN the guide gets the follow-up.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".skip-stub");
+    if (!button || button.disabled) return;
+    serverFirstAction(button, "/api/skip",
+      { name: button.getAttribute("data-name") },
+      "set aside ✓",
+      "I set aside " + button.getAttribute("data-title")
+      + " — it didn't call to me right now. The shelf already moved it. "
+      + "Anything you'd suggest instead, or shall we sit with what's here?",
+      markSidebarState(button.getAttribute("data-slug"), "nav-done", "✓"));
   });
   // "…or wrap it up together" — the heard card's quieter door into the
   // full wrap-up conversation, through the same send path.
@@ -2980,16 +3045,17 @@ def render_moments(slug: str, title: str, moments: list[dict]) -> str:
 
 
 def render_stub_card(stub: dict) -> str:
-    """A room-in-waiting for a queued talk not yet in the library.
+    """A room-in-waiting for a queued talk not yet in the library — and a
+    decision point.
 
-    The sidebar's greyed dead-ends become real rooms: title, teacher,
-    why it's on the path (the curriculum's own line), the source link,
-    and ONE primary action. With a fetchable URL that's "✦ fetch this
-    talk" (an explicit single-item download, said plainly); a reading
-    or unknown source gets "ask the guide about this" instead — never a
-    fetch without a recording URL. Both go through the queue-aware chat
-    send; once the real talk lands, the next shelf swap replaces this
-    room with the real one.
+    Three doors, one choice, said in the room's own copy: [✦ build this
+    room] (only with a URL — an explicit single-item fetch of a talk's
+    recording or a reading's text, data-kind picking the canned ask),
+    [skip — not for me right now] (server-first POST /api/skip: the
+    entry moves to Studied with a set-aside note, then the guide follows
+    up in conversation), and [ask the guide about this]. Every ask rides
+    the queue-aware chat send; once a real talk lands, the next shelf
+    swap replaces this room with the real one.
     """
     parts = [
         f'<section class="card view talk-stub" id="talk-{escape(stub["slug"])}">',
@@ -3007,28 +3073,46 @@ def render_stub_card(stub: dict) -> str:
         parts.append(
             f'<p class="reach"><em>on the path because: {escape(stub["why"])}</em></p>'
         )
+    parts.append(
+        '<p class="stub-copy">this one\'s on the path but not built yet — '
+        "build it, set it aside, or talk it through.</p>"
+    )
     if stub.get("url"):
         parts.append(
             f'<a class="source-link" href="{escape(stub["url"])}" target="_blank" '
             'rel="noopener">source &#8599;</a>'
         )
     if stub.get("fetchable"):
+        kind = stub.get("kind") or "talk"
         parts.append(
             '<p class="stub-action"><button type="button" class="fetch-stub" '
+            f'data-kind="{escape(kind)}" '
             f'data-title="{escape(stub["title"])}" '
             f'data-teacher="{escape(stub.get("teacher", ""))}" '
-            f'data-url="{escape(stub["url"])}">✦ fetch this talk</button></p>'
+            f'data-url="{escape(stub["url"])}">✦ build this room</button></p>'
         )
-        parts.append(
-            '<p class="state-note">downloads are explicit — this fetches one '
-            "talk; transcription can take a few minutes.</p>"
-        )
-    else:
-        parts.append(
-            '<p class="stub-action"><button type="button" class="ask-stub" '
-            f'data-title="{escape(stub["title"])}">'
-            "ask the guide about this</button></p>"
-        )
+        if kind == "reading":
+            parts.append(
+                '<p class="state-note">this is a reading — the fetch ingests '
+                "the page's text; no audio, nothing else followed.</p>"
+            )
+        else:
+            parts.append(
+                '<p class="state-note">downloads are explicit — this fetches one '
+                "talk; transcription can take a few minutes.</p>"
+            )
+    parts.append(
+        '<p class="stub-action"><button type="button" class="skip-stub" '
+        f'data-name="{escape(stub["name"])}" '
+        f'data-slug="{escape(stub["slug"])}" '
+        f'data-title="{escape(stub["title"])}">'
+        "skip — not for me right now</button></p>"
+    )
+    parts.append(
+        '<p class="stub-action"><button type="button" class="ask-stub" '
+        f'data-title="{escape(stub["title"])}">'
+        "ask the guide about this</button></p>"
+    )
     parts.append("</section>")
     return "\n".join(parts)
 
@@ -3042,6 +3126,9 @@ def render_card(
 ) -> str:
     slug = talk["slug"]
     title = talk.get("title", slug)
+    # A reading (probe's file-shape verdict) keeps every mark and door on
+    # the same plumbing, but the language reads instead of listening.
+    reading = bool(files.get("reading"))
     cap = duration_to_seconds(talk.get("duration", ""))
     cap_attr = f' data-duration="{cap}"' if cap else ""
     parts = [
@@ -3075,10 +3162,10 @@ def render_card(
     else:
         if heard:
             # Named next to the Done button, so the button's purpose is
-            # obvious: heard, but not yet closed out on the path.
+            # obvious: heard (or read), but not yet closed out on the path.
             status_bits.append(
                 '<span class="status-mark status-heard">'
-                "heard — not closed out yet</span>"
+                f"{'read' if reading else 'heard'} — not closed out yet</span>"
             )
         elif state == "queued":
             status_bits.append(
@@ -3094,6 +3181,13 @@ def render_card(
                 '<button type="button" class="wrap-up-talk" '
                 f'data-title="{escape(title)}">'
                 "…or wrap it up together — what landed?</button>"
+            )
+        elif reading:
+            # Readings have no player to notice the finish: this IS the
+            # door — same /api/listened plumbing, reading words.
+            status_bits.append(
+                f'<button type="button" class="mark-heard" data-slug="{escape(slug)}" '
+                'title="finished this reading? record it">mark as read</button>'
             )
         else:
             # The manual door, for listens the player couldn't see. On
@@ -3149,25 +3243,33 @@ def render_card(
                 f'data-slug="{escape(slug)}">\n{button}\n</div>'
             )
         else:
+            verb = "Read" if reading else "Listen"
             parts.append(
                 f'<a class="source-link" href="{escape(source)}" target="_blank" '
-                'rel="noopener">Listen at the source &rarr;</a>'
+                f'rel="noopener">{verb} at the source &rarr;</a>'
             )
     if heard:
         # Finished at least once: say so quietly. Replay simply plays —
         # the resume position was cleared at the end, so it starts fresh.
         # A not-yet-done talk can also step back to unheard ("come back
         # to this"); done is a path state and keeps its own reopen door.
+        # Readings say "read ✓" and skip replay — there is nothing to play.
         unheard = (
             f' · <button type="button" class="mark-unheard" '
-            f'data-slug="{escape(slug)}">mark unheard — come back to this</button>'
+            f'data-slug="{escape(slug)}">mark '
+            f'{"unread" if reading else "unheard"} — come back to this</button>'
             if state != "studied"
             else ""
         )
+        replay = (
+            ""
+            if reading
+            else f' · <button type="button" class="listened-replay" '
+            f'data-slug="{escape(slug)}">replay</button>'
+        )
         parts.append(
-            f'<p class="listened-line">listened ✓ {escape(listened["last"][:10])}'
-            f' · <button type="button" class="listened-replay" '
-            f'data-slug="{escape(slug)}">replay</button>{unheard}</p>'
+            f'<p class="listened-line">{"read" if reading else "listened"} ✓ '
+            f'{escape(listened["last"][:10])}{replay}{unheard}</p>'
         )
     return "\n".join(parts)
 
@@ -3374,15 +3476,26 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
             primer = md_to_html((talk_dir / "primer.md").read_text())
             card.append(f"<details><summary>Primer text</summary>\n{primer}\n</details>")
         elif not (files["primer_mp3"] or has_primer_section(notes_text)):
-            card.append(
-                "<details open><summary>Primer</summary>\n"
-                + render_generator(
+            if files["reading"]:
+                # A reading's primer orients the eye, not the ear.
+                primer_gen = render_generator(
+                    "make-primer reading-primer",
+                    title,
+                    "ask the guide to write a 'how to read this' primer",
+                    "a short orientation — who is speaking, how to approach "
+                    "the text, what to notice",
+                )
+            else:
+                primer_gen = render_generator(
                     "make-primer",
                     title,
                     "ask the guide to write & speak a primer",
                     "a 60–90 second spoken introduction — who the teacher "
                     "is, what to listen for",
                 )
+            card.append(
+                "<details open><summary>Primer</summary>\n"
+                + primer_gen
                 + "\n</details>"
             )
         if not notes_are_empty(notes_text):
@@ -3451,16 +3564,26 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 + "\n</details>"
             )
         if not segments and files["transcript_md"]:
-            # Rendered inline (escaped, formatted) — the raw .md link alone
-            # opened as one wall of unformatted text. Transcripts run long,
-            # so the rendered copy lives in a scrollable box, with the raw
-            # file still a click away.
             transcript = md_to_html((talk_dir / "transcript.md").read_text())
-            card.append(
-                "<details><summary>Transcript</summary>\n"
-                f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
-                f'<div class="scroll-box">\n{transcript}\n</div>\n</details>'
-            )
+            if files["reading"]:
+                # A reading room: the text itself IS the talk — open and
+                # prominent at a comfortable reading measure, no scroll
+                # cage, the raw file still a click away.
+                card.append(
+                    "<details open><summary>The reading</summary>\n"
+                    f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
+                    f'<div class="reading-text">\n{transcript}\n</div>\n</details>'
+                )
+            else:
+                # Rendered inline (escaped, formatted) — the raw .md link
+                # alone opened as one wall of unformatted text. Transcripts
+                # run long, so the rendered copy lives in a scrollable box,
+                # with the raw file still a click away.
+                card.append(
+                    "<details><summary>Transcript</summary>\n"
+                    f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
+                    f'<div class="scroll-box">\n{transcript}\n</div>\n</details>'
+                )
         if files["artifacts"]:
             # Guide-written interactive pages. The static HTML carries only
             # plain new-tab links; the sandboxed iframes (allow-scripts,

@@ -131,7 +131,8 @@ def test_render_shelf_talk_without_audio_gets_source_link(tmp_path):
     # far-talk has no primer.mp3 and no audio.* — no audio tag points at it.
     assert 'src="far-talk/' not in html
     assert 'href="https://example.org/far-talk.html"' in html
-    assert "Listen at the source" in html
+    # A reading's source link reads, it doesn't listen.
+    assert "Read at the source" in html
     # Its transcript is linked relatively.
     assert 'href="far-talk/transcript.md"' in html
 
@@ -1987,12 +1988,12 @@ def test_card_without_moments_offers_the_ask_button(tmp_path):
     assert "✦ ask the guide to mark the moments" in demon_card
     # No moments yet, so nothing to ask "more like this" of.
     assert "more-moments" not in demon_card
-    # far-talk has no transcript.json: no grounded timestamps possible,
-    # so a plain Transcript block and no moments layer at all.
+    # far-talk (a reading) has no transcript.json: no grounded timestamps
+    # possible, so the plain text block and no moments layer at all.
     far_card = re.search(
         r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
     ).group(0)
-    assert "<summary>Transcript</summary>" in far_card
+    assert "<summary>The reading</summary>" in far_card
     assert "Transcript · listen for" not in far_card
     assert "mark-moments" not in far_card and "moment-chip" not in far_card
     # The button's canned ask goes through the queue-aware send.
@@ -2280,15 +2281,18 @@ def test_curriculum_entries_extraction():
     assert anger["teacher"] == "Thanissaro Bhikkhu"
     assert anger["url"].endswith("190531-anger-issues.html")
     assert anger["fetchable"] is True
+    assert anger["kind"] == "talk"
     assert "A short, direct look" in anger["why"]
     assert "Reach for it when anger feels righteous." in anger["why"]
-    # A sutta page is a READING: known URL, but not fetchable as a talk.
+    # A sutta page is a READING: fetchable as text, and it says so.
     sutta = by_title["The Arrow (Sallatha Sutta, SN 36:6)"]
-    assert sutta["fetchable"] is False
+    assert sutta["fetchable"] is True
+    assert sutta["kind"] == "reading"
     assert "dhammatalks.org/suttas" in sutta["url"]
     # No URL at all: honest empties.
     bare = by_title["Bare Idea"]
     assert bare["url"] == "" and bare["fetchable"] is False
+    assert bare["kind"] == ""
 
 
 def test_curriculum_stub_matches_tolerantly():
@@ -2299,6 +2303,7 @@ def test_curriculum_stub_matches_tolerantly():
             "url": "https://x.example/anger.html",
             "why": "Reach for it when testing.",
             "fetchable": True,
+            "kind": "talk",
         }
     ]
     # The STUDY.md spelling (teacher parenthetical) meets the curriculum's.
@@ -2307,24 +2312,31 @@ def test_curriculum_stub_matches_tolerantly():
     )
     assert stub["slug"] == "queued-anger-issues"
     assert stub["fetchable"] is True and stub["url"].endswith("anger.html")
+    assert stub["kind"] == "talk"
     # No curriculum match: a bare stub — the room still exists.
     bare = build_shelf.curriculum_stub("Mystery Talk", entries)
     assert bare["slug"] == "queued-mystery-talk"
     assert bare["fetchable"] is False and bare["url"] == ""
+    assert bare["kind"] == ""
 
 
-def test_stub_room_renders_with_the_fetch_ritual(tmp_path):
+def _stub_library(tmp_path):
     library = _make_library(tmp_path)
     (tmp_path / "STUDY.md").write_text(
         "## Queued\n"
         "- **Anger Issues (Thanissaro Bhikkhu, 2019)** — next.\n"
         "- **The Arrow (Sallatha Sutta, SN 36:6)** — read alongside.\n"
+        "- **Bare Idea** — someday, maybe.\n"
     )
     curriculum = tmp_path / "curriculum"
     curriculum.mkdir()
     (curriculum / "01.md").write_text(STUB_CURRICULUM)
-    html = build_shelf.render_shelf(library, {})
-    # The fetchable stub: a real room with the one primary action.
+    return library
+
+
+def test_stub_room_renders_with_the_fetch_ritual(tmp_path):
+    html = build_shelf.render_shelf(_stub_library(tmp_path), {})
+    # The fetchable stub: a real room, the build door first among three.
     stub = re.search(
         r'<section class="card view talk-stub" id="talk-queued-anger-issues">.*?</section>',
         html,
@@ -2338,22 +2350,167 @@ def test_stub_room_renders_with_the_fetch_ritual(tmp_path):
     assert 'class="source-link" href="https://www.dhammatalks.org/audio' in room
     fetch_button = re.search(r'<button type="button" class="fetch-stub"[^>]*>', room)
     assert fetch_button and 'data-url="https://www.dhammatalks.org/audio' in fetch_button.group(0)
-    assert "✦ fetch this talk" in room
+    assert 'data-kind="talk"' in fetch_button.group(0)
+    assert "✦ build this room" in room
     # The honesty line: explicit, single-item, slow transcription named.
     assert "downloads are explicit — this fetches one talk" in room
     assert "transcription can take a few minutes" in room
     # The sidebar entry is now a real link into that room.
     assert '<a href="#talk/queued-anger-issues">' in html
-    # The reading gets the ask-the-guide variant: never a fetch for a text.
+    # Both canned fetch messages ride the queue-aware send (JS side).
+    assert "Single explicit download I'm " in html
+    assert "full ritual: probe and say what you found" in html
+
+
+def test_stub_rooms_are_decision_points_with_three_doors(tmp_path):
+    html = build_shelf.render_shelf(_stub_library(tmp_path), {})
+    room = re.search(
+        r'<section class="card view talk-stub" id="talk-queued-anger-issues">.*?</section>',
+        html,
+        re.S,
+    ).group(0)
+    # The room's copy invites the choice...
+    assert "build it, set it aside, or talk it through" in room
+    # ...and the three doors stand in order: build, skip, ask.
+    assert room.index("✦ build this room") < room.index(
+        "skip — not for me right now"
+    ) < room.index("ask the guide about this")
+    skip = re.search(r'<button type="button" class="skip-stub"[^>]*>', room)
+    assert skip, "skip door missing"
+    # The skip door carries the STUDY.md name (the /api/skip key), the
+    # stub slug (the sidebar's optimistic flip), and the display title.
+    assert 'data-name="Anger Issues (Thanissaro Bhikkhu, 2019)"' in skip.group(0)
+    assert 'data-slug="queued-anger-issues"' in skip.group(0)
+    assert 'data-title="Anger Issues"' in skip.group(0)
+    # A reading stub: the build door is a text fetch and says so.
     sutta = re.search(
         r'<section class="card view talk-stub" id="talk-queued-the-arrow[^"]*">.*?</section>',
         html,
         re.S,
-    )
-    assert sutta, "sutta stub missing"
-    assert "ask-stub" in sutta.group(0) and "fetch-stub" not in sutta.group(0)
-    assert "ask the guide about this" in sutta.group(0)
-    # Both buttons' canned messages ride the queue-aware send (JS side).
-    assert "Single explicit download I'm " in html
-    assert "full ritual: probe and say what you found" in html
+    ).group(0)
+    sutta_fetch = re.search(r'<button type="button" class="fetch-stub"[^>]*>', sutta)
+    assert sutta_fetch and 'data-kind="reading"' in sutta_fetch.group(0)
+    assert "✦ build this room" in sutta
+    assert "this is a reading" in sutta and "no audio" in sutta
+    assert "skip-stub" in sutta and "ask-stub" in sutta
+    # No URL at all: no build door — skip and ask still stand.
+    bare = re.search(
+        r'<section class="card view talk-stub" id="talk-queued-bare-idea">.*?</section>',
+        html,
+        re.S,
+    ).group(0)
+    assert "fetch-stub" not in bare
+    assert "skip-stub" in bare and "ask-stub" in bare
+
+
+def test_skip_click_is_server_first_in_js(tmp_path):
+    html = build_shelf.render_shelf(_stub_library(tmp_path), {})
+    # The skip door goes server-first through the shared action shape:
+    # POST /api/skip {name}, optimistic set-aside state, sidebar flip.
+    assert '".skip-stub"' in html
+    assert '"/api/skip"' in html
+    assert '{ name: button.getAttribute("data-name") }' in html
+    assert '"set aside ✓"' in html
+    # THEN the guide's follow-up, through the queue-aware send.
+    assert "I set aside " in html
+    assert "it didn't call to me right now. The shelf already moved it." in html
+    assert "Anything you'd suggest instead, or shall we sit with what's here?" in html
+    # done / reopen / skip all flip the sidebar optimistically.
+    assert html.count("markSidebarState(") >= 3
+    assert "innerHTML" not in html
+
+
+def test_reading_stub_fetch_message_is_the_reading_ritual(tmp_path):
+    html = build_shelf.render_shelf(_stub_library(tmp_path), {})
+    # The reading build door composes its own canned ingest ask.
+    assert 'getAttribute("data-kind") === "reading"' in html
+    assert 'sendOrQueue("Please fetch this reading — "' in html
+    assert "single explicit ingest " in html
+    assert "I'm asking for; extract the text, verify it's really " in html
+    assert "short 'how to read this' primer, update the path, rebuild." in html
     assert " on my path — what is it, and how should we approach it?" in html
+
+
+# --- reading rooms: transcript.md, no audio, no timestamps ----------------------
+
+
+def _far_card(html):
+    return re.search(
+        r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S
+    ).group(0)
+
+
+def test_reading_room_renders_the_text_with_no_player(tmp_path):
+    # far-talk (transcript.md only — no audio, no transcript.json) is a
+    # READING: the text itself is the room, prominently rendered.
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    far_card = _far_card(html)
+    assert "<details open><summary>The reading</summary>" in far_card
+    assert '<div class="reading-text">' in far_card
+    assert "<p>Words.</p>" in far_card
+    assert 'href="far-talk/transcript.md"' in far_card  # raw file, one click
+    # No player of any kind, and no moments/seek — there are no timestamps.
+    assert "<audio" not in far_card
+    assert "yt-embed" not in far_card
+    assert "moment-chip" not in far_card and "mark-moments" not in far_card
+    assert "seg-transcript" not in far_card
+    # The completion door speaks reading language on the same plumbing.
+    button = re.search(
+        r'<button type="button" class="mark-heard"[^>]*>([^<]*)</button>', far_card
+    )
+    assert button and button.group(1) == "mark as read"
+    assert 'data-slug="far-talk"' in button.group(0)
+    # The source link reads, it doesn't listen.
+    assert "Read at the source" in far_card
+    assert "Listen at the source" not in far_card
+    # Primer ✦ adapts: how to read this, not what to listen for.
+    assert 'class="make-primer reading-primer"' in far_card
+    assert "how to read this" in far_card
+    assert "write &amp; speak a primer" not in far_card
+    # Notes + Interactive keep the uniform ✦ pattern.
+    assert 'class="make-notes"' in far_card
+    assert 'class="make-interactive"' in far_card
+
+
+def test_reading_room_read_marks(tmp_path):
+    library = _make_library(tmp_path)
+    (library / ".listening.jsonl").write_text(
+        '{"slug": "far-talk", "at": "2026-07-02T06:00:00+00:00"}\n'
+    )
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    # The finished mark reads, it doesn't listen — same log underneath.
+    assert "read ✓ 2026-07-02" in far_card
+    assert "listened ✓" not in far_card
+    assert (
+        '<span class="status-mark status-heard">read — not closed out yet</span>'
+        in far_card
+    )
+    # No replay — there is nothing to play; the way back is mark unread.
+    assert "listened-replay" not in far_card
+    unheard = re.search(
+        r'<button type="button" class="mark-unheard"[^>]*>([^<]*)</button>', far_card
+    )
+    assert unheard and unheard.group(1) == "mark unread — come back to this"
+
+
+def test_a_talk_with_audio_keeps_the_plain_transcript_block(tmp_path):
+    library = _make_library(tmp_path)
+    (library / "far-talk" / "audio.mp3").write_bytes(b"\x00")
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    # With audio it is a talk again: the player, the plain Transcript
+    # details, listening language throughout.
+    assert "<audio" in far_card
+    assert "<details><summary>Transcript</summary>" in far_card
+    assert "The reading" not in far_card
+    assert ">mark as heard</button>" in far_card
+    assert "reading-primer" not in far_card
+
+
+def test_reading_primer_js_sends_the_how_to_read_ask(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # One delegated .make-primer handler, branching on the reading class.
+    assert 'button.classList.contains("reading-primer")' in html
+    assert "'how to read this' primer" in html
+    assert "innerHTML" not in html

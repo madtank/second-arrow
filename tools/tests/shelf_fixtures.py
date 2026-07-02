@@ -10,7 +10,8 @@ build_shelf renders:
 
     quiet-mind   local audio + primer + notes + artifacts/ + a
                  whisper-shaped transcript.json (timed segments)
-    far-talk     transcript.md only (the plain rendered transcript)
+    far-talk     transcript.md only — the READING shape (no audio, no
+                 transcript.json: its room renders the text itself)
     demon-story  YouTube source + thumbnail + captions-shaped
                  transcript.json
     bare-yt      YouTube source, nothing else

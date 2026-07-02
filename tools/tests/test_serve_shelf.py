@@ -2718,6 +2718,71 @@ def test_mark_reopen_moves_studied_back_to_queued(tmp_path):
         serve_shelf.mark_reopen(library, "../evil")
 
 
+# --- skip: a stub room's set-aside door, server-first by NAME ------------------
+
+
+def test_mark_skipped_on_path_sets_aside_with_the_date():
+    text, changed = serve_shelf.mark_skipped_on_path(
+        DONE_PATH_STUDY, "Far Talk", date_str="2026-07-02"
+    )
+    assert changed is True
+    studied = text.split("## Studied")[1].split("## Queued")[0]
+    assert (
+        "- **Far Talk** — (set aside 2026-07-02 — didn't call right now)" in studied
+    )
+    # The queued line left whole; everything else untouched.
+    assert "after that" not in text
+    assert "- **Patience (Thanissaro Bhikkhu)** — next up," in text
+    for heading in ("## Where we are", "## Studied", "## Queued", "## Open questions"):
+        assert heading in text
+    # Idempotent: already set aside changes nothing.
+    again, changed = serve_shelf.mark_skipped_on_path(text, "Far Talk")
+    assert changed is False and again == text
+    # Absent from both lists: NOT added — skip never invents path entries.
+    same, changed = serve_shelf.mark_skipped_on_path(DONE_PATH_STUDY, "Mystery")
+    assert changed is False and same == DONE_PATH_STUDY
+
+
+def test_mark_skip_moves_by_name_rebuilds_and_answers(tmp_path):
+    library = _markable_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_PATH_STUDY)
+    # "Far Talk" has NO library slug — the match is by normalized name
+    # within Queued, exactly what a stub room's skip door sends.
+    state = serve_shelf.mark_skip(library, "Far Talk")
+    assert state["ok"] is True and state["moved"] is True
+    assert state["shelf_mtime"] == serve_shelf.shelf_mtime(library)
+    study = (tmp_path / "STUDY.md").read_text()
+    studied = study.split("## Studied")[1].split("## Queued")[0]
+    assert re.search(
+        r"- \*\*Far Talk\*\* — \(set aside \d{4}-\d{2}-\d{2} — "
+        r"didn't call right now\)",
+        studied,
+    )
+    assert (library / "shelf.html").exists()  # the stub room is gone
+
+
+def test_mark_skip_is_idempotent_and_404s_unknown_names(tmp_path):
+    library = _markable_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_PATH_STUDY)
+    serve_shelf.mark_skip(library, "Far Talk")
+    study_after = (tmp_path / "STUDY.md").read_text()
+    # A second skip: ok, nothing moved, nothing changed anywhere.
+    again = serve_shelf.mark_skip(library, "Far Talk")
+    assert again["ok"] is True and again["moved"] is False
+    assert (tmp_path / "STUDY.md").read_text() == study_after
+    # STUDY.md-vs-curriculum spellings meet through normalize_title.
+    spelled = serve_shelf.mark_skip(library, "Far Talk (Ajahn Test)")
+    assert spelled["ok"] is True and spelled["moved"] is False
+    # An unknown name is a 404-shaped miss, never an invented entry.
+    with pytest.raises(LookupError):
+        serve_shelf.mark_skip(library, "No Such Entry")
+    assert (tmp_path / "STUDY.md").read_text() == study_after
+    # Junk names are a 400-shaped rejection.
+    for bad in ("", "   ", None, 42):
+        with pytest.raises(ValueError):
+            serve_shelf.mark_skip(library, bad)
+
+
 # --- stopping a turn: the kill switch --------------------------------------
 
 
