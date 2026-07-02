@@ -593,7 +593,7 @@ def test_home_view_is_the_intro_room(tmp_path):
         "the guide comes with you",
         "your place is kept",
         "transcript follows the voice",
-        "Learning tools",
+        "Interactive",
         "it remembers so you don't have to",
     ):
         assert line in home.group(0), line
@@ -607,9 +607,9 @@ def test_home_view_is_the_intro_room(tmp_path):
 def test_render_shelf_lists_artifacts_behind_the_sandbox_contract(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # The talk card lists artifacts/*.html under the human label
-    # "Learning tools" (the folder and routes keep the artifact name).
-    assert "<summary>Learning tools</summary>" in html
-    assert "<summary>Artifacts</summary>" not in html
+    # "Interactive" (the folder and routes keep the artifact name).
+    assert "<summary>Interactive</summary>" in html
+    assert "<summary>Learning tools</summary>" not in html
     item = re.search(r'<li class="artifact-item"[^>]*>', html)
     assert item and 'data-slug="quiet-mind"' in item.group(0)
     assert 'data-name="breath-timer.html"' in item.group(0)
@@ -630,10 +630,15 @@ def test_render_shelf_lists_artifacts_behind_the_sandbox_contract(tmp_path):
     assert "/artifacts/" in html  # the CSP-walled route the frames point at
 
 
-def test_render_shelf_talk_without_artifacts_has_no_section(tmp_path):
+def test_interactive_section_is_always_present_and_open(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    # Only quiet-mind has artifacts; the section appears exactly once.
-    assert html.count("<summary>Learning tools</summary>") == 1
+    # Default-open on every talk card: interactivity is a first-class
+    # part of a talk, not a drawer to discover.
+    assert html.count("<details open><summary>Interactive</summary>") == 4
+    # quiet-mind has artifacts: the list. The rest: one calm generator.
+    buttons = re.findall(r'<button type="button" class="make-interactive" data-title="([^"]+)">', html)
+    assert sorted(buttons) == ["Bare YT", "Demon Story", "Far Talk"]
+    assert "✦ create interactive tools from this talk" in html
 
 
 def test_chat_panel_has_the_ollama_model_picker(tmp_path):
@@ -1434,4 +1439,59 @@ def test_unfetched_hint_depends_on_curriculum_urls(tmp_path):
     # Nothing anywhere knows Mystery Talk's URL: say what is missing.
     mystery = re.search(r'<li class="nav-unfetched">[\s\S]*?Mystery Talk[\s\S]*?</li>', sidebar)
     assert mystery and "needs a URL — tell the guide" in mystery.group(0)
+
+
+def test_generate_button_sends_the_composed_ask(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Clicking composes and SENDS through the one send path.
+    assert '"Please create interactive tools for "' in html or "'Please create interactive tools for '" in html
+    assert "listening-first" in html
+    assert ".make-interactive" in html
+    # Titles are escaped in the data attribute.
+    assert 'data-title="Quiet Mind &amp; &lt;Friends&gt;"' not in html  # has artifacts: no button
+    assert 'data-title="Far Talk"' in html
+
+
+# --- artifact -> seek: anchored listening from interactives --------------------
+
+
+def test_artifact_seek_validator_under_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    fn = re.search(r"function validArtifactSeek\(data, cap\) \{[\s\S]*?\n  \}", html)
+    assert fn, "validArtifactSeek missing"
+    harness = fn.group(0) + r"""
+function check(i, got, want) {
+  if (!!got !== want) { console.error("case " + i); process.exit(1); }
+}
+check(0, validArtifactSeek({type: "second-arrow:seek", start: 803}, 3832), true);
+check(1, validArtifactSeek({type: "second-arrow:seek", start: 0, label: "the eggs story"}, 3832), true);
+check(2, validArtifactSeek({type: "second-arrow:seek", start: 4000}, 3832), false); // past the end
+check(3, validArtifactSeek({type: "second-arrow:seek", start: 4000}, 0), true);     // no cap known
+check(4, validArtifactSeek({type: "second-arrow:seek", start: -1}, 0), false);
+check(5, validArtifactSeek({type: "second-arrow:seek", start: NaN}, 0), false);
+check(6, validArtifactSeek({type: "second-arrow:seek", start: "803"}, 0), false);
+check(7, validArtifactSeek({type: "second-arrow:seek", start: 10, label: "x".repeat(81)}, 0), false);
+check(8, validArtifactSeek({type: "second-arrow:reflection", start: 10}, 0), false);
+check(9, validArtifactSeek(null, 0), false);
+console.log("seek matrix ok");
+"""
+    js = tmp_path / "artseek.js"
+    js.write_text(harness)
+    result = subprocess.run(["node", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "seek matrix ok" in result.stdout
+
+
+def test_artifact_seek_uses_frame_identity_and_click_semantics(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Same identity rule as reflections: the source must be OUR mounted
+    # frame; the slug comes only from OUR data-slug.
+    assert '"second-arrow:seek"' in html
+    # Execution rides the user-click path (saExecuteCue -> seekTalk),
+    # bypassing the guide lock: locks tie the GUIDE's hands, and an
+    # artifact button is the user's own finger.
+    assert "the user's own finger" in html
+    assert re.search(r'saExecuteCue\(\{ kind: "seek", slug: from\.slug', html)
 

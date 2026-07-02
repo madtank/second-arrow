@@ -515,6 +515,11 @@ STYLE = """
   .artifact-name { color: #6d5f4b; font-size: 0.95rem; }
   .artifact-open { margin-left: 0.75rem; font-size: 0.85rem; color: #a99e8e; }
   .artifact-note { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
+  .make-interactive { font: inherit; font-size: 0.92rem; color: #5a4d3a;
+                      background: #f6f1e7; border: 1px dashed #d8cbb4;
+                      border-radius: 999px; padding: 0.45rem 1.1rem;
+                      cursor: pointer; }
+  .make-interactive:hover { background: #efe7d9; }
   .artifact-frame { display: block; width: 100%; height: 480px;
                     margin-top: 0.5rem; border: 1px solid #e8e0d3;
                     border-radius: 8px; background: #fffdf9;
@@ -866,6 +871,16 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   document.getElementById("peek-dismiss").addEventListener("click", function () {
     peek.hidden = true;
   });
+
+  // "✦ create interactive tools" — composes and SENDS the ask through
+  // the one send path; the peek carries the build narrative from there.
+  document.querySelectorAll(".make-interactive").forEach(function (button) {
+    button.addEventListener("click", function () {
+      sendMessage("Please create interactive tools for "
+        + JSON.stringify(button.getAttribute("data-title"))
+        + " from its transcript and notes — remember I prefer listening-first.");
+    });
+  });
   // The now-playing capsule (its own closure) asks the chat to step
   // aside before it navigates to the playing talk's room.
   window.saDockChat = function () { setChatState("docked"); };
@@ -1021,12 +1036,40 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       && data.text.length <= 4000;
   }
 
+  function validArtifactSeek(data, cap) {
+    return !!data
+      && typeof data === "object"
+      && data.type === "second-arrow:seek"
+      && typeof data.start === "number"
+      && isFinite(data.start)
+      && data.start >= 0
+      && (data.label === undefined
+          || (typeof data.label === "string" && data.label.length <= 80))
+      && (!cap || data.start <= cap);
+  }
+
   window.addEventListener("message", function (event) {
     var from = null;
     toolFrames.forEach(function (tool) {
       if (tool.win === event.source) from = tool;
     });
-    if (!from || !validReflection(event.data)) return;
+    if (!from) return; // only OUR mounted interactives speak here
+    if (event.data && event.data.type === "second-arrow:seek") {
+      // Anchored listening: a tool's "listen from 13:23" button. The
+      // slug comes ONLY from OUR data-slug; execution rides the same
+      // user-click path as a transcript line. The guide lock does not
+      // apply — locks tie the GUIDE's hands, and an artifact button is
+      // the user's own finger. No announcement: direct manipulation.
+      var room = document.getElementById("talk-" + from.slug);
+      var cap = room ? parseFloat(room.getAttribute("data-duration")) : NaN;
+      if (!validArtifactSeek(event.data, cap)) return;
+      if (window.saExecuteCue) {
+        window.saExecuteCue({ kind: "seek", slug: from.slug,
+          seconds: event.data.start });
+      }
+      return;
+    }
+    if (!validReflection(event.data)) return;
     // OUR mounted file name, not the message's claim, names the tool.
     reflections[from.slug] = { tool: from.name, text: event.data.text };
     chipSlug = from.slug;
@@ -2179,13 +2222,26 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 ' target="_blank" rel="noopener">open full page ↗</a>\n</li>'
                 for name in files["artifacts"]
             )
-            card.append(
-                "<details><summary>Learning tools</summary>\n"
+            interactive_body = (
                 '<p class="artifact-note">Interactive pages the guide made for'
                 " this talk. The sandboxed view appears on the served shelf;"
                 " these links open the raw page.</p>\n"
-                f'<ul class="artifact-list">\n{items}\n</ul>\n</details>'
+                f'<ul class="artifact-list">\n{items}\n</ul>'
             )
+        else:
+            # No tools yet: one calm generator. Clicking sends the ask
+            # through the normal chat path — the peek shows the build.
+            interactive_body = (
+                '<p class="interactive-empty">'
+                f'<button type="button" class="make-interactive" '
+                f'data-title="{escape(talk.get("title", talk["slug"]))}">'
+                "✦ create interactive tools from this talk</button></p>"
+            )
+        card.append(
+            "<details open><summary>Interactive</summary>\n"
+            + interactive_body
+            + "\n</details>"
+        )
         card.append("</section>")
         cards.append("\n".join(card))
     talk_views = "\n\n".join(cards)
@@ -2235,7 +2291,7 @@ Rebuild: <code>uv run tools/build_shelf.py</code>
 <p>Pick a talk from the sidebar — the guide comes with you.</p>
 <p>Press play. Leave whenever; your place is kept.</p>
 <p>The transcript follows the voice — click any line to be there.</p>
-<p>Learning tools live on each talk's card, made for you by the guide.</p>
+<p>Interactive tools live on each talk's card, made for you by the guide.</p>
 <p>And just tell the guide where you are — it remembers so you don't have to.</p>
 </div>
 {path_strip}{empty_note}

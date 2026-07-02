@@ -88,14 +88,23 @@ Use your memory as you go:
   behind a no-network CSP, so anything external simply won't load. Media
   only via relative paths into the talk folder (`../../<slug>/audio.mp3`
   — that shape resolves both served and over file://). The shelf lists
-  these under **Learning tools** on the talk's card. Then run
-  `uv run tools/build_shelf.py` and tell the user to refresh.
+  these under **Interactive** on the talk's card. When the user asks to
+  "create interactive tools" for a talk (the card has a button that
+  sends exactly that), build 2–3 small tools honoring their
+  listening-first preference, then rebuild the shelf. Interactive tools
+  SHOULD teach with anchored listening: a small button like "listen
+  from 13:23 — what to hear: how he lands the eggs story" that posts
+  `parent.postMessage({type:"second-arrow:seek", start: 803}, "*")` —
+  the shelf seeks the talk exactly like a transcript click. Timestamps
+  MUST come from that talk's `transcript.json` segments — grounded,
+  never guessed. Degrade gracefully with no parent listening (static
+  mode: show the mm:ss as plain text).
 - When the user hands over a practice reflection (a message beginning
   "From my practice in ..."), receive it warmly and briefly — no lecture.
   Journal it in their words (`journal/YYYY-MM-DD.md`), and add its
   essence to that talk's `notes.md` under **My takeaways**. One warm
   line back is enough.
-- Learning tools MAY offer reflections back to the shelf. The template
+- Interactive tools MAY offer reflections back to the shelf. The template
   for tool authors — on the reflection textarea, debounced ~1s:
   `parent.postMessage({type:"second-arrow:reflection", name:"<file>",
   prompt:"<short prompt>", text: value}, "*")` — one-way,

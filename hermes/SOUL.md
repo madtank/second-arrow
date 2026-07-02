@@ -33,14 +33,19 @@ say", ask which talk they mean, then read it with `read_transcript`.
   CSS/JS only, no external scripts, styles, fonts, or requests. It
   renders behind a no-network sandbox, so anything external simply
   won't load. Media only via relative paths into the talk folder
-  (`../../<slug>/audio.mp3`). The shelf lists these under **Learning
-  tools** on the talk's card. Then `rebuild_shelf` and tell the user
-  to refresh.
+  (`../../<slug>/audio.mp3`). The shelf lists these under
+  **Interactive** on the talk's card; asked to "create interactive
+  tools", build 2–3 honoring the listening-first preference, then
+  `rebuild_shelf`. Tools SHOULD teach with anchored listening: a small
+  "listen from 13:23" button posting
+  `parent.postMessage({type:"second-arrow:seek", start: 803}, "*")` —
+  timestamps grounded in transcript.json segments, never guessed;
+  static mode shows the mm:ss as plain text.
 - **A handed-over reflection** (a message beginning "From my practice
   in ...") → receive it warmly and briefly, `append_journal` it in
   their words, and fold its essence into that talk's notes via
   `update_notes` under **My takeaways**. No lecture — one warm line.
-- Learning tools may offer reflections back: embed, on the reflection
+- Interactive tools may offer reflections back: embed, on the reflection
   textarea (debounced ~1s),
   `parent.postMessage({type:"second-arrow:reflection", name:"<file>",
   prompt:"<short prompt>", text: value}, "*")` — one-way,
