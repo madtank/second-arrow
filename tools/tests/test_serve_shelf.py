@@ -1586,6 +1586,8 @@ def test_artifact_csp_walls_off_the_network():
     assert "connect-src" not in csp  # inherited 'none' — do not loosen it
     assert serve_shelf.ARTIFACT_HEADERS["X-Content-Type-Options"] == "nosniff"
     assert serve_shelf.ARTIFACT_HEADERS["Content-Security-Policy"] == csp
+    # The guide rewrites artifacts mid-conversation — never serve stale.
+    assert serve_shelf.ARTIFACT_HEADERS["Cache-Control"] == "no-store"
 
 
 def test_pick_ollama_model_remembers_the_choice():

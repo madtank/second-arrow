@@ -234,6 +234,10 @@ LISTEN_DEDUPE_SECONDS = 3600  # refresh loops / double events fold into one
 ARTIFACT_HEADERS = {
     "Content-Security-Policy": ARTIFACT_CSP,
     "X-Content-Type-Options": "nosniff",
+    # The guide rewrites artifacts mid-conversation; a cached copy showed
+    # the user a stale interactive while "open full page" fetched fresh.
+    # Never cache — the files are local and small.
+    "Cache-Control": "no-store",
 }
 HISTORY_LIMIT = 50  # turns served back to the panel on page load
 # OLLAMA_URL (env) exists for the same reason HERMES_URL's override does:
