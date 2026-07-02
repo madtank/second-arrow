@@ -294,6 +294,27 @@ def talk_states(path: dict, talks: list[dict]) -> tuple[dict[str, str], list[str
     return states, unfetched
 
 
+def curriculum_names(curriculum: Path) -> set[str]:
+    """Normalized names of curriculum entries that carry a URL.
+
+    An unfetched queued talk whose name matches one of these can be
+    fetched by the guide; one that matches nothing needs a URL first —
+    the sidebar hint says which.
+    """
+    names: set[str] = set()
+    files = sorted(curriculum.glob("*.md")) if curriculum.is_dir() else []
+    for path in files:
+        if path.name.lower() == "readme.md":
+            continue
+        for entry in re.split(r"\n(?=- \*\*)", path.read_text(encoding="utf-8")):
+            if not entry.startswith("- **"):
+                continue
+            bold = re.match(r"- \*\*(.+?)\*\*", entry)
+            if bold and re.search(r"https?://", entry):
+                names.add(normalize_title(bold.group(1)))
+    return names
+
+
 def render_path_strip(path: dict) -> str:
     """A small calm strip: studied talks with a check, queued with an arrow.
 
@@ -1991,12 +2012,18 @@ def render_nav(
             f'{mark}<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>{tag}'
             f'<span class="nav-teacher">{escape(talk.get("teacher", ""))}</span></a></li>'
         )
-    items += [
-        '<li class="nav-unfetched">'
-        f'{_NAV_MARKS["queued"]}<span class="nav-title">{escape(name)}</span>'
-        '<span class="nav-teacher">not fetched yet — ask the guide</span></li>'
-        for name in unfetched
-    ]
+    for entry in unfetched:
+        name, has_url = entry if isinstance(entry, tuple) else (entry, True)
+        hint = (
+            "not fetched yet — ask the guide"
+            if has_url
+            else "needs a URL — tell the guide"
+        )
+        items.append(
+            '<li class="nav-unfetched">'
+            f'{_NAV_MARKS["queued"]}<span class="nav-title">{escape(name)}</span>'
+            f'<span class="nav-teacher">{hint}</span></li>'
+        )
     return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>"
 
 
@@ -2071,6 +2098,19 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     path_strip = render_path_strip(path)  # the home view's small summary
     talks = parse_index((library / "INDEX.md").read_text())
     states, unfetched = talk_states(path, talks)
+    known = curriculum_names(library.parent / "curriculum")
+    unfetched = [
+        (
+            name,
+            any(
+                key == normalize_title(name)
+                or key in normalize_title(name)
+                or normalize_title(name) in key
+                for key in known
+            ),
+        )
+        for name in unfetched
+    ]
     listening = load_listening(library)
     curriculum_view = render_curriculum(library.parent / "curriculum", talks)
     curriculum_link = (

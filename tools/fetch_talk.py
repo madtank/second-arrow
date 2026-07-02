@@ -91,6 +91,66 @@ def clean_youtube_title(title: str) -> str:
     return base or (title or "").strip() or "talk"
 
 
+MIN_TRANSCRIPT_CHARS = 500  # anything smaller is a failed ingest
+
+
+def page_title(html: str) -> str | None:
+    """The <title> of a fetched page, or None — the probe's handle."""
+    match = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.I | re.S)
+    if not match:
+        return None
+    title = " ".join(match.group(1).split())
+    return title or None
+
+
+def _match_key(name: str) -> str:
+    """normalize_title's twin (kept local — this tool stays standalone)."""
+    name = re.sub(r"\([^)]*\)", " ", name or "")
+    name = name.split("|")[0]
+    name = re.sub(r"[^a-z0-9 ]+", " ", name.lower())
+    return " ".join(name.split())
+
+
+def titles_match(expected: str, found: str) -> bool:
+    """Fuzzy but not gullible: normalized equality or containment."""
+    a, b = _match_key(expected), _match_key(found)
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
+def transcript_chars(talk_dir: Path) -> int:
+    """Body size of transcript.md (after the Full Transcript heading)."""
+    path = talk_dir / "transcript.md"
+    if not path.exists():
+        return 0
+    text = path.read_text(encoding="utf-8")
+    _, _, body = text.partition("## Full Transcript")
+    return len((body or text).strip())
+
+
+def ensure_valid_transcript(talk_dir: Path, fresh: bool) -> None:
+    """A trivial transcript means the ingest failed — never shelve junk.
+
+    Fresh ingests are removed wholesale (the INDEX entry is only written
+    after this passes, so nothing dangles); refreshes of existing talks
+    report loudly but never delete what was already there.
+    """
+    size = transcript_chars(talk_dir)
+    if size >= MIN_TRANSCRIPT_CHARS:
+        return
+    if fresh:
+        shutil.rmtree(talk_dir, ignore_errors=True)
+        raise SystemExit(
+            f"ingest failed: transcript too small ({size} chars < "
+            f"{MIN_TRANSCRIPT_CHARS}) — partial talk removed, nothing indexed"
+        )
+    raise SystemExit(
+        f"refresh failed: new transcript too small ({size} chars) — "
+        "the existing talk folder was left as it was"
+    )
+
+
 def format_duration(seconds) -> str:
     """65 -> "1:05", 3725 -> "1:02:05"; unknown/zero -> ""."""
     if not isinstance(seconds, (int, float)) or seconds <= 0:
@@ -399,6 +459,52 @@ def transcribe(audio_path: Path, *, talk_dir: Path, title: str, teacher: str, so
         raise SystemExit(f"Transcription produced no transcript.md in {talk_dir}")
 
 
+def probe_source(url: str) -> dict:
+    """Look before downloading: {kind, title, teacher, duration, final_url}.
+
+    YouTube probes via extract_info(download=False); pages are fetched
+    once for their <title> and audio link (the link is the final URL);
+    bare audio URLs read their filename. Raises SystemExit when a page
+    has no audio to offer — nothing has been created at this point.
+    """
+    kind = classify_url(url)
+    if kind == "youtube":
+        meta = probe_youtube(url)
+        return {
+            "kind": "youtube",
+            "title": meta["title"],
+            "teacher": meta["uploader"],
+            "duration": meta["duration"],
+            "final_url": url,
+        }
+    if kind == "page":
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "second-arrow-study/1.0"}
+        )
+        with urllib.request.urlopen(request) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        audio_url = find_audio_link(html, url)
+        if not audio_url:
+            raise SystemExit(f"No audio link found on page: {url}")
+        return {
+            "kind": "page",
+            "title": page_title(html) or guess_title_from_filename(
+                Path(urllib.parse.urlparse(audio_url).path).name
+            ),
+            "teacher": "",
+            "duration": "",
+            "final_url": audio_url,
+        }
+    filename = Path(urllib.parse.urlparse(url).path).name
+    return {
+        "kind": "audio",
+        "title": guess_title_from_filename(filename),
+        "teacher": "",
+        "duration": "",
+        "final_url": url,
+    }
+
+
 def parse_index_entries(index_text: str) -> list[dict]:
     """{"slug", lowercase field -> value} per INDEX entry (the same shape
     build_shelf.parse_index yields; duplicated to keep this tool standalone)."""
@@ -513,6 +619,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--library", type=Path, default=LIBRARY, help="Library root directory")
     parser.add_argument(
+        "--expect-title", default=None,
+        help="abort (before any download) unless the probed title fuzzily "
+             "matches this — use the curriculum's title",
+    )
+    parser.add_argument(
+        "--probe-only", action="store_true",
+        help="probe the source (title/teacher/duration/final URL) and exit "
+             "without downloading anything",
+    )
+    parser.add_argument(
         "--refresh", action="store_true",
         help="when the talk is already in the library, refresh its captions/"
              "transcript.json/thumbnail in place instead of skipping",
@@ -548,9 +664,24 @@ def main() -> None:
         if index_path.exists()
         else None
     )
-    if existing and not args.refresh:
+    if existing and not args.refresh and not args.probe_only:
         print(f"already in library as {existing} — nothing to do "
               "(use --refresh to update captions/thumbnail in place)")
+        return
+
+    # Look first. Nothing is created until the probe (and any expected
+    # title) checks out — a wrong link aborts empty-handed.
+    probe = probe_source(args.url)
+    print(f"probe: {probe['title']!r}"
+          + (f" — {probe['teacher']}" if probe['teacher'] else "")
+          + (f" — {probe['duration']}" if probe['duration'] else "")
+          + f" — {probe['final_url']}")
+    if args.expect_title and not titles_match(args.expect_title, probe["title"]):
+        raise SystemExit(
+            f"title mismatch: expected {args.expect_title!r}, found "
+            f"{probe['title']!r} — nothing created"
+        )
+    if args.probe_only:
         return
 
     if kind == "youtube":
@@ -570,6 +701,7 @@ def main() -> None:
             audio_path = download_youtube_audio(args.url, talk_dir)
             transcribe(audio_path, talk_dir=talk_dir, title=title, teacher=teacher,
                        source_url=args.url, model=args.model)
+        ensure_valid_transcript(talk_dir, fresh=existing is None)
         download_thumbnail(args.url, talk_dir)
         if existing:
             print(f"Refreshed library/{existing}/ in place")
@@ -587,15 +719,7 @@ def main() -> None:
         print(f"Ingested into library/{slug}/")
         return
     else:  # noqa: RET505 — kept symmetric with the youtube branch above
-        if kind == "page":
-            request = urllib.request.Request(args.url, headers={"User-Agent": "second-arrow-study/1.0"})
-            with urllib.request.urlopen(request) as resp:
-                html = resp.read().decode("utf-8", errors="replace")
-            audio_url = find_audio_link(html, args.url)
-            if not audio_url:
-                raise SystemExit(f"No audio link found on page: {args.url}")
-        else:
-            audio_url = args.url
+        audio_url = probe["final_url"]
         filename = Path(urllib.parse.urlparse(audio_url).path).name
         title = args.title or guess_title_from_filename(filename)
         teacher = args.teacher or "Unknown"
@@ -604,6 +728,7 @@ def main() -> None:
         audio_path = download_file(audio_url, talk_dir / f"audio{Path(filename).suffix or '.mp3'}")
         transcribe(audio_path, talk_dir=talk_dir, title=title, teacher=teacher,
                    source_url=args.url, model=args.model)
+        ensure_valid_transcript(talk_dir, fresh=existing is None)
         if existing:
             print(f"Refreshed library/{existing}/ in place")
             return

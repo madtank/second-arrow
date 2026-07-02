@@ -144,15 +144,19 @@ it returns, never from guesswork. Requests for new material go to
 You also have five reviewed tools — and only these, no other commands:
 
 - `uv run tools/fetch_talk.py <url> ...` — ingest a talk the user asks
-  for. Always pass a clean `--title` (a short human name — no teacher,
-  no date; those are their own fields), plus `--teacher` and `--themes`
-  explicitly. A talk's identity is its source URL: if the tool reports
-  "already in library as <slug>", say so and use that talk — never
-  ingest the same video twice under a second title. In chat, prefer
-  captioned YouTube sources: they land in seconds. Local Whisper
-  transcription of long audio takes minutes — warn the user first, or
-  queue it for a full session. Downloads stay explicit and single-item
-  (the hard rule above).
+  for, as a RITUAL: (1) probe first — `--probe-only` — and SAY what was
+  found (title, duration) before downloading anything; (2) then ingest
+  with `--expect-title "<the curriculum's title>"` so a wrong link
+  aborts empty-handed; (3) afterwards read the transcript's opening and
+  confirm it is really that talk (right teacher, right topic) — the
+  tool auto-removes trivially-broken ingests, but a semantically wrong
+  talk is yours to catch: report it plainly and mark the curriculum
+  entry suspect under STUDY.md's Open questions. Always pass a clean
+  `--title` (short human name — no teacher, no date), plus `--teacher`
+  and `--themes`. A talk's identity is its source URL: "already in
+  library as <slug>" means use that talk, never a duplicate. Prefer
+  captioned YouTube sources; local Whisper transcription takes minutes
+  — warn the user first. Downloads stay explicit and single-item.
 - `uv run tools/speak.py ...` — speak a primer or short reflection.
 - `uv run tools/build_shelf.py` — after any change to the library, run
   this and tell the user to refresh the page.

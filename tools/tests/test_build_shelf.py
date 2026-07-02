@@ -421,9 +421,10 @@ def test_sidebar_talks_list_is_the_path(tmp_path):
     demon = re.search(r'<li><a href="#talk/demon-story">.*?</a></li>', sidebar, re.S).group(0)
     assert '<span class="nav-tag">parked</span>' in demon
     # A queued talk not yet in the library appears muted and unclickable.
+    # No curriculum in this fixture, so no URL is known anywhere for it.
     unfetched = re.search(r'<li class="nav-unfetched">.*?</li>', sidebar, re.S).group(0)
     assert "Anger Issues (Thanissaro Bhikkhu, 2019)" in unfetched
-    assert "not fetched yet" in unfetched
+    assert "needs a URL — tell the guide" in unfetched
     assert "<a " not in unfetched
     # The separate sidebar path strip is gone — the list IS the path...
     assert 'class="path-strip"' not in sidebar
@@ -1411,4 +1412,26 @@ def test_auto_fresh_polling_and_chip(tmp_path):
     assert re.search(r"#fresh-chip\[hidden\] \{ display: none", html)
     assert "location.reload()" in html
     assert "window.saIsPlaying" in html
+
+
+def test_unfetched_hint_depends_on_curriculum_urls(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(
+        "## Queued\n- **Anger Issues (Thanissaro Bhikkhu, 2019)** — next.\n"
+        "- **Mystery Talk** — no source known.\n"
+    )
+    curriculum = tmp_path / "curriculum"
+    curriculum.mkdir()
+    (curriculum / "01.md").write_text(
+        "# Cluster\n\n- **Anger Issues — Thanissaro Bhikkhu (2019-05-31)** — "
+        "https://www.dhammatalks.org/a.html\n  Reach for it when testing.\n"
+    )
+    html = build_shelf.render_shelf(library, {})
+    sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
+    # The curriculum knows Anger Issues' URL: the guide can fetch it.
+    anger = re.search(r'<li class="nav-unfetched">[\s\S]*?Anger Issues[\s\S]*?</li>', sidebar)
+    assert anger and "not fetched yet — ask the guide" in anger.group(0)
+    # Nothing anywhere knows Mystery Talk's URL: say what is missing.
+    mystery = re.search(r'<li class="nav-unfetched">[\s\S]*?Mystery Talk[\s\S]*?</li>', sidebar)
+    assert mystery and "needs a URL — tell the guide" in mystery.group(0)
 

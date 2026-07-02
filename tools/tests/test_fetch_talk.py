@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "fetch_talk.py"
 SPEC = importlib.util.spec_from_file_location("fetch_talk", MODULE_PATH)
 fetch_talk = importlib.util.module_from_spec(SPEC)
@@ -299,3 +301,61 @@ def test_update_index_appends_once(tmp_path):
     content = index.read_text()
     assert content.count("## on-anger") == 1
     assert content.startswith("# Library Index")
+
+
+# --- verified ingest: probe first, trust nothing -------------------------------
+
+
+def test_page_title_extraction():
+    assert fetch_talk.page_title("<html><head><title> Patience | dhammatalks.org </title></head></html>") == (
+        "Patience | dhammatalks.org"
+    )
+    assert fetch_talk.page_title("<TITLE>Upper Case</TITLE>") == "Upper Case"
+    assert fetch_talk.page_title("<p>no title here</p>") is None
+
+
+def test_titles_match_is_fuzzy_but_not_gullible():
+    match = fetch_talk.titles_match
+    assert match("Killing Anger", "Killing Anger | dhammatalks.org")
+    assert match("Anger Issues (Thanissaro Bhikkhu, 2019)", "Anger Issues")
+    assert match("Anger Eating Demons", "Anger Eating Demons | Ajahn Brahm | 07-10-2011")
+    assert not match("Killing Anger", "Metta for Beginners")
+    assert not match("Killing Anger", "")
+    assert not match("", "Killing Anger")
+
+
+def test_transcript_chars_counts_only_the_body(tmp_path):
+    talk = tmp_path / "talk"
+    talk.mkdir()
+    (talk / "transcript.md").write_text(
+        "# T\n\n- Teacher: X\n- Source: y\n\n## Full Transcript\n\nhello there\n"
+    )
+    assert fetch_talk.transcript_chars(talk) == len("hello there")
+    (talk / "transcript.md").unlink()
+    assert fetch_talk.transcript_chars(talk) == 0
+
+
+def test_ensure_valid_transcript_removes_a_junk_fresh_ingest(tmp_path):
+    talk = tmp_path / "library" / "junk-talk"
+    talk.mkdir(parents=True)
+    (talk / "transcript.md").write_text(
+        "# J\n\n## Full Transcript\n\n[Music]\n"
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        fetch_talk.ensure_valid_transcript(talk, fresh=True)
+    assert "too small" in str(excinfo.value)
+    assert not talk.exists()  # the partial dir is gone
+    # A refresh of an existing talk reports but never deletes.
+    talk.mkdir(parents=True)
+    (talk / "transcript.md").write_text("# J\n\n## Full Transcript\n\nhi\n")
+    (talk / "notes.md").write_text("keep me")
+    with pytest.raises(SystemExit):
+        fetch_talk.ensure_valid_transcript(talk, fresh=False)
+    assert (talk / "notes.md").exists()
+    # A real transcript sails through.
+    (talk / "transcript.md").write_text(
+        "# J\n\n## Full Transcript\n\n" + ("word " * 200) + "\n"
+    )
+    fetch_talk.ensure_valid_transcript(talk, fresh=True)
+    assert talk.exists()
+

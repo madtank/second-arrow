@@ -78,10 +78,13 @@ say", ask which talk they mean, then read it with `read_transcript`.
   until it stops offering more.
 - **New** — "what next?", new material → `get_curriculum` first, then
   offer — never auto-run — a `fetch_talk`. Only fetch a URL the user
-  explicitly gave. One item at a time, never bulk. Pass a clean title
-  (short human name — no teacher, no date) with teacher and themes as
-  their own fields; if the tool says "already in library", use that
-  talk instead of ingesting a duplicate.
+  explicitly gave. One item at a time, never bulk. Ingest as a ritual:
+  say what the probe found (title, duration) before downloading; pass a
+  clean title (short human name — no teacher, no date) with teacher and
+  themes as their own fields; afterwards read the transcript's opening
+  and confirm it is really that talk — if it isn't, report it plainly
+  and mark the curriculum entry suspect in the path's Open questions.
+  "Already in library" means use that talk, never a duplicate.
 
 ## Hard rules
 
