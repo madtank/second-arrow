@@ -1495,3 +1495,106 @@ def test_artifact_seek_uses_frame_identity_and_click_semantics(tmp_path):
     assert "the user's own finger" in html
     assert re.search(r'saExecuteCue\(\{ kind: "seek", slug: from\.slug', html)
 
+
+
+# --- iteration 13: the page stays alive — soft refresh + deferred reload -----
+
+
+def test_turn_end_checks_version_immediately(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The finally of a streamed turn (success or error alike) polls right
+    # away — never waiting out the 8s tick after the guide builds things.
+    finally_block = re.search(r"\.finally\(function \(\) \{[\s\S]*?\n    \}\);", html)
+    assert finally_block, "sendMessage finally missing"
+    assert "checkVersion()" in finally_block.group(0)
+
+
+def test_pending_reload_auto_applies_under_node(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    safe = re.search(
+        r"function reloadIsSafe\(playing, state, draft\) \{[\s\S]*?\n  \}", html
+    )
+    fn = re.search(r"function maybeApplyPendingReload\(\) \{[\s\S]*?\n  \}", html)
+    assert safe and fn, "pending-reload machinery missing"
+    harness = (
+        'var reloads = 0;\n'
+        'var playing = false;\n'
+        'var window = { saIsPlaying: function () { return playing; } };\n'
+        'var location = { reload: function () { reloads += 1; } };\n'
+        'var input = { value: "" };\n'
+        'var chatState = "docked";\n'
+        'var pendingReload = false;\n'
+        + safe.group(0) + "\n" + fn.group(0) + "\n"
+        + """
+function check(i, want) {
+  maybeApplyPendingReload();
+  if (reloads !== want) { console.error("case " + i, reloads); process.exit(1); }
+}
+check(0, 0);                                   // nothing pending: never fires
+pendingReload = true; playing = true; check(1, 0);       // never mid-listen
+playing = false; chatState = "conversation"; check(2, 0); // never over chat
+chatState = "docked"; input.value = "half a thought"; check(3, 0); // never mid-draft
+input.value = ""; check(4, 1);                 // calm at last: it applies
+console.log("pending ok");
+"""
+    )
+    js = tmp_path / "pending.js"
+    js.write_text(harness)
+    result = subprocess.run(["node", str(js)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "pending ok" in result.stdout
+
+
+def test_version_change_defers_and_reevaluates_at_calm_moments(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Detected-but-unsafe changes set the flag (soft swap failing first)
+    # and show the chip; the chip click clears the flag (it reloads anyway).
+    assert "pendingReload = true" in html
+    assert "pendingReload = false" in html
+    # Re-evaluated on every poll tick (the unchanged-version branch), on
+    # chat docking, and after every completed turn (via checkVersion).
+    check = re.search(r"function checkVersion\(\) \{[\s\S]*?\n  \}", html)
+    assert check and "maybeApplyPendingReload()" in check.group(0)
+    dock = re.search(r"function setChatState\(next\) \{[\s\S]*?\n  \}", html)
+    assert dock and "maybeApplyPendingReload()" in dock.group(0)
+    chip = re.search(r'freshChip\.addEventListener\("click", function \(\) \{[\s\S]*?\}\);', html)
+    assert chip and "pendingReload = false" in chip.group(0)
+
+
+def test_soft_refresh_swaps_in_place_but_never_the_playing_room(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The real "alive" feel: an unsafe moment gets the fresh page fetched,
+    # parsed, and swapped in place — sidebar path + every room EXCEPT the
+    # one holding the playing player. DOMParser + importNode only.
+    assert "function softRefresh()" in html
+    assert "DOMParser" in html
+    assert "document.importNode" in html
+    assert "innerHTML" not in html
+    swap = re.search(r"function swapShelf\(doc\) \{[\s\S]*?\n  \}", html)
+    assert swap, "swapShelf missing"
+    assert "saPlayingSlug" in swap.group(0)  # the playing room is skipped
+    assert "talk-nav" in swap.group(0)  # the sidebar path swaps too
+    # Swapped rooms get their wiring back and (served) their live artifact
+    # views; the router then re-applies the active room.
+    assert "window.saBindRoom" in html
+    assert "window.saShowView" in html
+    assert "window.saPlayingSlug" in html
+    # Folds stay as the reader left them, best effort.
+    assert "function carryDetails(" in html
+
+
+def test_room_bindings_are_container_scoped_for_rebinding(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # All per-element room wiring is one function callable on a swapped-in
+    # subtree; page load wires the whole document through the same door.
+    assert "function bindRoom(root)" in html
+    assert "bindRoom(document)" in html
+    # mountArtifacts targets one room and never double-mounts a frame.
+    assert re.search(r"function mountArtifacts\(root\)", html)
+    assert 'item.querySelector(".artifact-frame")' in html
+    # The generate button and sidebar links are delegated, so swapped-in
+    # copies work without any rebinding at all.
+    assert 'event.target.closest(".make-interactive")' in html
+    assert 'event.target.closest("#talk-nav a")' in html

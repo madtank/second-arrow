@@ -833,6 +833,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       "chat-conversation-mode", next === "conversation");
     if (window.saUpdateCapsule) window.saUpdateCapsule();
     if (next === "conversation") list.scrollTop = list.scrollHeight;
+    if (next === "docked") maybeApplyPendingReload(); // a calm moment
   }
 
   document.getElementById("chat-open").addEventListener("click", function () {
@@ -874,12 +875,14 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 
   // "✦ create interactive tools" — composes and SENDS the ask through
   // the one send path; the peek carries the build narrative from there.
-  document.querySelectorAll(".make-interactive").forEach(function (button) {
-    button.addEventListener("click", function () {
-      sendMessage("Please create interactive tools for "
-        + JSON.stringify(button.getAttribute("data-title"))
-        + " from its transcript and notes — remember I prefer listening-first.");
-    });
+  // Delegated, never per-button: the button also lives in rooms the
+  // soft refresh swaps in later.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".make-interactive");
+    if (!button) return;
+    sendMessage("Please create interactive tools for "
+      + JSON.stringify(button.getAttribute("data-title"))
+      + " from its transcript and notes — remember I prefer listening-first.");
   });
   // The now-playing capsule (its own closure) asks the chat to step
   // aside before it navigates to the playing talk's room.
@@ -1103,11 +1106,15 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   // grant), so the artifact runs as a null origin. Wall 2 is the
   // /artifacts/ route's no-network CSP. The static file:// shelf keeps
   // the plain links instead: a file:// iframe would have neither wall.
-  function mountArtifacts() {
-    document.querySelectorAll(".artifact-note").forEach(function (note) {
+  // Scoped to a container so the soft refresh can mount exactly the
+  // rooms it swapped in; an already-live item is never mounted twice.
+  function mountArtifacts(root) {
+    var scope = root || document;
+    scope.querySelectorAll(".artifact-note").forEach(function (note) {
       note.hidden = true; // the live view replaces the explanation
     });
-    document.querySelectorAll(".artifact-item").forEach(function (item) {
+    scope.querySelectorAll(".artifact-item").forEach(function (item) {
+      if (item.querySelector(".artifact-frame")) return; // already live
       var name = item.getAttribute("data-name");
       var frame = document.createElement("iframe");
       frame.setAttribute("sandbox", "allow-scripts");
@@ -1253,29 +1260,123 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   }
 
   // --- the shelf refreshes itself when new content lands ----------------
+  // Safe moments reload outright (resume positions + history make that
+  // cheap). Unsafe moments — mid-listen, mid-conversation, mid-draft —
+  // get a soft refresh instead: the fresh page is fetched and swapped in
+  // place, never touching the playing room or this tray. Only when even
+  // that fails does the change wait (pendingReload + the chip) for the
+  // next calm moment.
   var freshChip = document.getElementById("fresh-chip");
   var shelfVersion = null;
+  var pendingReload = false; // new content waiting for a calm moment
 
   function reloadIsSafe(playing, state, draft) {
     return !playing && state === "docked" && !draft.trim();
+  }
+
+  function maybeApplyPendingReload() {
+    if (!pendingReload) return;
+    var playing = window.saIsPlaying ? window.saIsPlaying() : false;
+    if (reloadIsSafe(playing, chatState, input.value)) location.reload();
+  }
+
+  // Best effort: folds stay as the reader left them across a swap.
+  function carryDetails(oldView, newView) {
+    var before = oldView.querySelectorAll("details");
+    var after = newView.querySelectorAll("details");
+    before.forEach(function (fold, i) {
+      if (after[i]) after[i].open = fold.open;
+    });
+  }
+
+  // Swap the fresh page in under the reader: the sidebar path and every
+  // room EXCEPT the one holding the playing player (its embed must never
+  // blink). DOM import/replace only — nothing is ever parsed as markup
+  // in place. Returns false when the fetched page doesn't look like the
+  // shelf.
+  function swapShelf(doc) {
+    var container = document.getElementById("views");
+    var newViews = doc.getElementById("views");
+    if (!container || !newViews) return false;
+    var newNav = doc.getElementById("talk-nav");
+    var oldNav = document.getElementById("talk-nav");
+    if (newNav && oldNav) {
+      oldNav.replaceWith(document.importNode(newNav, true));
+    }
+    var playingSlug = window.saPlayingSlug ? window.saPlayingSlug() : null;
+    var keep = playingSlug ? "talk-" + playingSlug : null;
+    var freshIds = {};
+    var swapped = [];
+    Array.prototype.slice.call(newViews.children).forEach(function (view) {
+      if (!view.classList.contains("view") || !view.id) return;
+      freshIds[view.id] = true;
+      if (view.id === keep) return; // the playing room is untouchable
+      var node = document.importNode(view, true);
+      var old = document.getElementById(view.id);
+      if (old) {
+        carryDetails(old, node);
+        old.replaceWith(node);
+      } else {
+        container.appendChild(node); // a brand-new room
+      }
+      swapped.push(node);
+    });
+    Array.prototype.slice.call(container.children).forEach(function (view) {
+      if (!view.classList.contains("view")) return;
+      if (view.id === keep || freshIds[view.id]) return;
+      container.removeChild(view); // gone from the shelf
+    });
+    swapped.forEach(function (node) {
+      if (window.saBindRoom) window.saBindRoom(node); // wiring back
+      if (!panel.hidden) mountArtifacts(node); // served: live tool views
+    });
+    if (window.saShowView) window.saShowView(); // active room, nav marks
+    return true;
+  }
+
+  function softRefresh() {
+    return fetch(location.pathname, { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      })
+      .then(function (html) {
+        var doc = new DOMParser().parseFromString(html, "text/html");
+        var x = window.scrollX;
+        var y = window.scrollY;
+        if (!swapShelf(doc)) throw new Error("nothing to swap");
+        window.scrollTo(x, y); // best effort: stay where the reader was
+      });
   }
 
   function checkVersion() {
     fetch("/api/version").then(function (r) { return r.json(); }).then(function (data) {
       if (typeof data.shelf_mtime !== "number") return;
       if (shelfVersion === null) { shelfVersion = data.shelf_mtime; return; }
-      if (data.shelf_mtime === shelfVersion) return;
+      if (data.shelf_mtime === shelfVersion) {
+        maybeApplyPendingReload(); // an earlier change may apply now
+        return;
+      }
       shelfVersion = data.shelf_mtime;
       var playing = window.saIsPlaying ? window.saIsPlaying() : false;
       if (reloadIsSafe(playing, chatState, input.value)) {
         location.reload(); // resume positions + history make this cheap
-      } else {
-        freshChip.hidden = false; // never mid-listen, never mid-draft
+        return;
       }
+      softRefresh().then(function () {
+        pendingReload = false; // the page IS current — nothing waits
+        freshChip.hidden = true;
+      }).catch(function () {
+        pendingReload = true; // apply at the next calm moment instead
+        freshChip.hidden = false; // with the chip as the manual door
+      });
     }).catch(function () { /* static shelf: nothing to poll */ });
   }
 
-  freshChip.addEventListener("click", function () { location.reload(); });
+  freshChip.addEventListener("click", function () {
+    pendingReload = false; // this reload IS the application
+    location.reload();
+  });
   setInterval(function () {
     if (!document.hidden) checkVersion(); // poll only while visible
   }, 8000);
@@ -1442,8 +1543,6 @@ LAYOUT_SCRIPT = """<script>
 (function () {
   var sidebar = document.getElementById("sidebar");
   var toggle = document.getElementById("sidebar-toggle");
-  var views = document.querySelectorAll(".view");
-  var links = document.querySelectorAll("#talk-nav a");
   document.body.classList.add("js"); // hiding starts here, never in the HTML
 
   function show() {
@@ -1452,10 +1551,12 @@ LAYOUT_SCRIPT = """<script>
     if (hash.indexOf("#talk/") === 0) id = "talk-" + hash.slice(6);
     else if (hash === "#curriculum") id = "view-curriculum";
     if (!document.getElementById(id)) id = "view-home"; // unknown hash: go home
-    views.forEach(function (view) {
+    // Queried live, never cached: the soft refresh swaps rooms and the
+    // sidebar path in and out under this router.
+    document.querySelectorAll(".view").forEach(function (view) {
       view.classList.toggle("active", view.id === id);
     });
-    links.forEach(function (link) {
+    document.querySelectorAll("#talk-nav a").forEach(function (link) {
       link.classList.toggle("active", link.getAttribute("href") === hash);
     });
     keepPlayingViewAlive(); // the playing talk's embed survives the switch
@@ -1486,10 +1587,11 @@ LAYOUT_SCRIPT = """<script>
       setSidebarCollapsed(true);
     }
   } catch (e) { /* fresh page each time is fine */ }
-  links.forEach(function (link) {
-    link.addEventListener("click", function () {
+  // Delegated: the soft refresh replaces the nav list whole.
+  sidebar.addEventListener("click", function (event) {
+    if (event.target.closest("#talk-nav a")) {
       sidebar.classList.remove("open"); // narrow screens: picking closes it
-    });
+    }
   });
 
   // --- resume positions: localStorage only, never sent anywhere --------
@@ -1558,15 +1660,6 @@ LAYOUT_SCRIPT = """<script>
     return false;
   }
 
-  document.querySelectorAll(".seg-transcript").forEach(function (box) {
-    box.addEventListener("click", function (event) {
-      var seg = event.target.closest(".seg");
-      if (!seg) return;
-      seekTalk(box.getAttribute("data-slug"),
-        parseFloat(seg.getAttribute("data-start")) || 0);
-    });
-  });
-
   // --- now playing: one voice, one visible handle ------------------------
   // Views hide, they never unmount — so a talk keeps playing across room
   // changes and chat states. The capsule is its handle: visible whenever
@@ -1614,18 +1707,6 @@ LAYOUT_SCRIPT = """<script>
       body: JSON.stringify({ slug: slug }),
     }).catch(function () { /* static shelf: the server remembers next time */ });
   }
-
-  document.querySelectorAll(".listened-replay").forEach(function (button) {
-    button.addEventListener("click", function () {
-      var slug = button.getAttribute("data-slug");
-      var audio = document.querySelector(
-        'audio.talk-audio[data-slug="' + slug + '"]');
-      if (audio) { audio.play(); return; }
-      var holder = document.querySelector(
-        '.yt-embed[data-slug="' + slug + '"]');
-      if (holder) mountFrame(holder, 0);
-    });
-  });
 
   function pauseOthers(slug) {
     // One voice at a time: whoever starts, everyone else goes quiet.
@@ -1724,9 +1805,6 @@ LAYOUT_SCRIPT = """<script>
     }
   }
 
-  document.querySelectorAll(".guide-lock").forEach(function (button) {
-    button.addEventListener("click", function () { setGuideLock(!guideLock); });
-  });
   applyLockUI(); // reflect the persisted choice, silently
 
   function updateRoomLocks() {
@@ -1831,7 +1909,7 @@ LAYOUT_SCRIPT = """<script>
   }
 
   // --- local audio: restore, track, highlight ---------------------------
-  document.querySelectorAll("audio.talk-audio").forEach(function (audio) {
+  function bindAudio(audio) {
     var slug = audio.getAttribute("data-slug");
     var lastSave = 0;
     audio.addEventListener("loadedmetadata", function () {
@@ -1872,7 +1950,7 @@ LAYOUT_SCRIPT = """<script>
         keepPlayingViewAlive();
       }
     });
-  });
+  }
 
   // --- YouTube embeds: click-to-load, resume via &start=, jsapi track ---
   var ytMounted = {}; // slug -> true once its iframe exists
@@ -1913,12 +1991,6 @@ LAYOUT_SCRIPT = """<script>
     if (old) holder.replaceChild(box, old);
   }
 
-  document.querySelectorAll(".yt-embed").forEach(function (holder) {
-    var button = holder.querySelector(".yt-play");
-    if (!button) return;
-    button.addEventListener("click", function () { mountFrame(holder); });
-  });
-
   window.addEventListener("message", function (event) {
     if (event.origin !== "https://www.youtube-nocookie.com"
         && event.origin !== "https://www.youtube.com") return;
@@ -1946,6 +2018,53 @@ LAYOUT_SCRIPT = """<script>
     ytLastSave[slug] = now;
     savePos(slug, data.info.currentTime, data.info.duration);
   });
+
+  // --- one wiring point per room -----------------------------------------
+  // Every per-element binding lives here, scoped to a container, so the
+  // chat side's soft refresh can rebind exactly the rooms it swapped in
+  // (window.saBindRoom). Page load wires the whole document once.
+  function bindRoom(root) {
+    root.querySelectorAll(".seg-transcript").forEach(function (box) {
+      box.addEventListener("click", function (event) {
+        var seg = event.target.closest(".seg");
+        if (!seg) return;
+        seekTalk(box.getAttribute("data-slug"),
+          parseFloat(seg.getAttribute("data-start")) || 0);
+      });
+    });
+    root.querySelectorAll(".listened-replay").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var slug = button.getAttribute("data-slug");
+        var audio = document.querySelector(
+          'audio.talk-audio[data-slug="' + slug + '"]');
+        if (audio) { audio.play(); return; }
+        var holder = document.querySelector(
+          '.yt-embed[data-slug="' + slug + '"]');
+        if (holder) mountFrame(holder, 0);
+      });
+    });
+    root.querySelectorAll(".guide-lock").forEach(function (button) {
+      button.addEventListener("click", function () { setGuideLock(!guideLock); });
+    });
+    root.querySelectorAll("audio.talk-audio").forEach(bindAudio);
+    root.querySelectorAll(".yt-embed").forEach(function (holder) {
+      var button = holder.querySelector(".yt-play");
+      if (!button) return;
+      button.addEventListener("click", function () { mountFrame(holder); });
+    });
+  }
+  bindRoom(document);
+
+  // The chat side's soft refresh hands each swapped-in room through here.
+  window.saBindRoom = function (root) {
+    bindRoom(root);
+    applyLockUI(); // fresh lock buttons reflect the persisted choice
+    updateRoomLocks();
+  };
+  window.saShowView = show;
+  window.saPlayingSlug = function () {
+    return nowPlaying ? nowPlaying.slug : null;
+  };
 })();
 </script>"""
 
