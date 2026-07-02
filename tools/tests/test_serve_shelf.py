@@ -1246,15 +1246,22 @@ def test_validate_tool_call_search_history():
             serve_shelf.validate_tool_call("search_history", {"q": bad})
 
 
-def test_ollama_tools_cover_the_six_reviewed_hands():
+def test_ollama_tools_cover_the_seven_reviewed_hands():
     names = {tool["function"]["name"] for tool in serve_shelf.OLLAMA_TOOLS}
     assert names == {
         "fetch_talk", "rebuild_shelf", "speak", "search_history",
-        "write_artifact", "update_session_summary",
+        "write_artifact", "update_session_summary", "get_curriculum",
     }
-    for name in ("search_history", "write_artifact", "update_session_summary"):
+    for name in ("search_history", "write_artifact", "update_session_summary",
+                 "get_curriculum"):
         assert name in serve_shelf.TOOL_PROGRESS
         assert name in serve_shelf.AGENCY_TOOLS_NOTE
+
+
+def test_validate_tool_call_get_curriculum_marker():
+    # No arguments; in-process like write_artifact.
+    assert serve_shelf.validate_tool_call("get_curriculum", {}) == ["get_curriculum"]
+    assert serve_shelf.validate_tool_call("get_curriculum", {"junk": 1}) == ["get_curriculum"]
 
 
 # --- update_session_summary: freshness as a tool ------------------------------
@@ -1617,4 +1624,69 @@ def test_ambient_prefix_carries_listened_completion():
         serve_shelf.ambient_prefix("patience", titles, session_id="s-1", listened_last=None)
     )
     assert "listened" not in serve_shelf.ambient_prefix("patience", titles)
+
+
+# --- brain parity: the offline pack sees what the persona assumes -------------
+
+
+def _curriculum_dir(tmp_path):
+    cur = tmp_path / "curriculum"
+    cur.mkdir()
+    (cur / "01-anger.md").write_text(
+        "# Cluster 1\n\n- **Anger Issues** — https://www.dhammatalks.org/a.html\n"
+    )
+    (cur / "02-later.md").write_text("# Cluster 2\n\n- later things.\n")
+    (cur / "README.md").write_text("machine notes, not for the pack\n")
+    return cur
+
+
+def test_load_curriculum_concatenates_and_skips_readme(tmp_path):
+    text = serve_shelf.load_curriculum(_curriculum_dir(tmp_path))
+    assert "--- 01-anger.md ---" in text
+    assert "--- 02-later.md ---" in text
+    assert text.index("01-anger") < text.index("02-later")
+    assert "https://www.dhammatalks.org/a.html" in text
+    assert "machine notes" not in text
+    assert serve_shelf.load_curriculum(tmp_path / "missing") == ""
+
+
+def test_load_curriculum_truncates_only_when_oversized(tmp_path):
+    cur = tmp_path / "curriculum"
+    cur.mkdir()
+    (cur / "01-big.md").write_text("x" * 9000)
+    (cur / "02-big.md").write_text("y" * 9000)
+    text = serve_shelf.load_curriculum(cur, cap=8192)
+    assert len(text) < 10000
+    assert text.count("truncated") == 2
+    # Small curricula pass through whole.
+    small_dir = tmp_path / "small"
+    small_dir.mkdir()
+    small = serve_shelf.load_curriculum(_curriculum_dir(small_dir), cap=8192)
+    assert "truncated" not in small
+
+
+def test_ollama_pack_carries_curriculum_and_open_talk_notes():
+    payload = serve_shelf.build_ollama_payload(
+        [{"role": "user", "content": "what next?"}],
+        model="m",
+        study="## Studied",
+        index="## idx",
+        chunks=[("Patience", "chunk text")],
+        curriculum="--- 01-anger.md ---\n- **Anger Issues** — https://real.url",
+        view_notes="## My takeaways\n- it landed.",
+    )
+    system = payload["messages"][0]["content"]
+    # Knowledge parity: what the claude brain reads itself, the offline
+    # brain gets packed in.
+    assert "## Curriculum" in system
+    assert "https://real.url" in system
+    assert "never invent" in system.lower() or "real urls" in system.lower()
+    assert "## Notes for the open talk" in system
+    assert "- it landed." in system
+    # Absent inputs add no empty sections.
+    bare = serve_shelf.build_ollama_payload(
+        [{"role": "user", "content": "hi"}], model="m"
+    )["messages"][0]["content"]
+    assert "## Curriculum" not in bare
+    assert "## Notes for the open talk" not in bare
 

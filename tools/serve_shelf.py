@@ -432,8 +432,43 @@ def write_artifact(library: Path, slug: str, name: str, html) -> Path:
     return path
 
 
+def load_curriculum(curriculum: Path, cap: int = 8192) -> str:
+    """Concatenated curriculum/*.md (README skipped) for the offline pack.
+
+    Knowledge parity: the claude brain reads these files itself; the
+    local brain gets them packed in — otherwise switching pills silently
+    changes what the guide KNOWS (it happened: the offline guide asked
+    for a URL that was sitting in cluster 1). Small by design; if the
+    whole set outgrows the cap, each cluster keeps its head with a note.
+    """
+    files = [
+        path
+        for path in (sorted(curriculum.glob("*.md")) if curriculum.is_dir() else [])
+        if path.name.lower() != "readme.md"
+    ]
+    if not files:
+        return ""
+    texts = [path.read_text(encoding="utf-8") for path in files]
+    if sum(len(text) for text in texts) > cap:
+        per_file = max(512, cap // len(files))
+        texts = [
+            text[:per_file] + "\n[… truncated — the full cluster is in curriculum/]"
+            if len(text) > per_file
+            else text
+            for text in texts
+        ]
+    return "\n\n".join(
+        f"--- {path.name} ---\n{text}" for path, text in zip(files, texts)
+    )
+
+
 def build_system_prompt(
-    study: str, index: str, chunks: list[tuple[str, str]], agency: str = ""
+    study: str,
+    index: str,
+    chunks: list[tuple[str, str]],
+    agency: str = "",
+    curriculum: str = "",
+    view_notes: str = "",
 ) -> str:
     parts = [GUIDE_PERSONA]
     if agency.strip():
@@ -442,6 +477,13 @@ def build_system_prompt(
         parts.append("## Study memory (STUDY.md)\n\n" + study.strip())
     if index.strip():
         parts.append("## Library index\n\n" + index.strip())
+    if curriculum.strip():
+        parts.append(
+            "## Curriculum (what could come next — use these REAL URLs, "
+            "never invent one)\n\n" + curriculum.strip()
+        )
+    if view_notes.strip():
+        parts.append("## Notes for the open talk\n\n" + view_notes.strip())
     if chunks:
         excerpts = "\n\n".join(
             f'### From "{title}"\n\n{chunk}' for title, chunk in chunks
@@ -459,8 +501,12 @@ def build_ollama_payload(
     stream: bool = False,
     tools: list | None = None,
     agency: str = "",
+    curriculum: str = "",
+    view_notes: str = "",
 ) -> dict:
-    system = build_system_prompt(study, index, list(chunks), agency)
+    system = build_system_prompt(
+        study, index, list(chunks), agency, curriculum, view_notes
+    )
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system}, *messages],
@@ -900,6 +946,17 @@ OLLAMA_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_curriculum",
+            "description": (
+                "Re-read the full curriculum — every cluster with its real "
+                "talk URLs. Use it before recommending anything new."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_session_summary",
             "description": (
                 "Update THIS conversation's title and short summary in the "
@@ -927,10 +984,11 @@ TOOL_PROGRESS = {
     "search_history": "— searching past conversations… —",
     "write_artifact": "— writing the page… —",
     "update_session_summary": "— updating the session title… —",
+    "get_curriculum": "— reading the curriculum… —",
 }
 
 AGENCY_TOOLS_NOTE = """\
-You can act, sparingly, through six tools:
+You can act, sparingly, through seven tools:
 - fetch_talk: ingest ONE talk from a URL the user explicitly gave
   (captioned YouTube preferred). Never invent or guess URLs.
 - rebuild_shelf: regenerate the shelf page after any library change,
@@ -943,6 +1001,8 @@ You can act, sparingly, through six tools:
   HTML page — inline CSS/JS only, nothing external — then rebuild_shelf.
 - update_session_summary: when the conversation meaningfully turns or
   wraps, refresh this session's sidebar title and short summary.
+- get_curriculum: re-read the full curriculum (clusters + real URLs)
+  before recommending anything new. Never invent a URL.
 Only use a tool when the user asks for the thing it does."""
 
 AGENCY_NO_TOOLS_NOTE = """\
@@ -1021,6 +1081,8 @@ def validate_tool_call(name: str, args) -> list[str]:
                 "one light self-contained page"
             )
         return ["write_artifact", slug, art_name, html]
+    if name == "get_curriculum":
+        return ["get_curriculum"]  # no arguments; in-process read
     if name == "update_session_summary":
         sid = args.get("session_id")
         title, summary = args.get("title"), args.get("summary")
@@ -1916,8 +1978,23 @@ def stream_ollama(
     study_path = library.parent / "STUDY.md"
     study = study_path.read_text() if study_path.exists() else ""
     index = (library / "INDEX.md").read_text()
-    # The talk open on the shelf leads retrieval — "this talk" means it.
+    curriculum = load_curriculum(library.parent / "curriculum")
+    # The talk open on the shelf leads retrieval — "this talk" means it —
+    # and its notes + completion state ride along (parity with the claude
+    # brain, which reads these itself).
     view_title = load_talk_titles(library).get(view) if view else None
+    view_notes = ""
+    if view:
+        notes_path = library / view / "notes.md"
+        if notes_path.exists():
+            view_notes = notes_path.read_text(encoding="utf-8")
+        heard = last_listened(load_listening(library / ".listening.jsonl"), view)
+        if heard:
+            view_notes = (
+                view_notes
+                + f"\n\n(The user has listened to this talk to the end — "
+                f"most recently {heard[:10]}.)"
+            ).strip()
     chunks = pick_chunks_for_view(
         messages[-1]["content"], load_transcripts(library), view_title, k=4
     )
@@ -1936,6 +2013,8 @@ def stream_ollama(
         stream=True,
         tools=OLLAMA_TOOLS if has_tools else None,
         agency=agency,
+        curriculum=curriculum,
+        view_notes=view_notes,
     )
     try:  # urlopen returns once headers arrive; the body then streams NDJSON
         response = _open_ollama_chat(payload)
@@ -1964,6 +2043,9 @@ def stream_ollama(
                 f"Wrote {rel}. Now call rebuild_shelf, then tell the user "
                 "to refresh the page."
             )
+        if argv and argv[0] == "get_curriculum":
+            text = load_curriculum(library.parent / "curriculum")
+            return True, text or "No curriculum files found under curriculum/."
         if argv and argv[0] == "update_session_summary":
             try:
                 meta = update_session_summary(SESSIONS_DIR, argv[1], argv[2], argv[3])
