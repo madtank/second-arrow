@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import re
 import shutil
 import subprocess
@@ -121,21 +122,50 @@ def _make_library(tmp_path):
 - **Title:** Demon Story
 - **Teacher:** Ajahn Brahm
 - **Source:** https://www.youtube.com/watch?v=me7Wm5LOpx0
+- **Duration:** 56:04
 - **Themes:** anger, stories
 - **Path:** library/demon-story/
+
+## bare-yt
+- **Title:** Bare YT
+- **Teacher:** Ajahn Test
+- **Source:** https://youtu.be/abcdefUVWXY
+- **Themes:** anger
+- **Path:** library/bare-yt/
 """
     )
     quiet = library / "quiet-mind"
     quiet.mkdir()
     (quiet / "primer.mp3").write_bytes(b"\x00")
+    (quiet / "audio.mp3").write_bytes(b"\x00")
     (quiet / "notes.md").write_text("# Notes\n\nWhat landed: **kindness** wins.\n")
     (quiet / "artifacts").mkdir()
     (quiet / "artifacts" / "breath-timer.html").write_text(
         "<!DOCTYPE html><html><body><h1>Breathe</h1></body></html>"
     )
+    # A whisper-shaped transcript.json (extra keys ride along).
+    (quiet / "transcript.json").write_text(
+        json.dumps(
+            {
+                "text": "ignored",
+                "segments": [
+                    {"id": 0, "seek": 0, "start": 0.0, "end": 4.5,
+                     "text": " Quiet begins & <opens>. ", "tokens": [1]},
+                    {"id": 1, "start": 4.5, "end": 9.0, "text": "It settles."},
+                ],
+            }
+        )
+    )
     far = library / "far-talk"
     far.mkdir()
     (far / "transcript.md").write_text("# Far Talk\n\nWords.\n")
+    demon = library / "demon-story"
+    demon.mkdir()
+    (demon / "thumbnail.jpg").write_bytes(b"\xff\xd8\xff")
+    # A captions-shaped transcript.json (bare start/end/text).
+    (demon / "transcript.json").write_text(
+        json.dumps({"segments": [{"start": 12.0, "end": 15.5, "text": "the demon arrives"}]})
+    )
     return library
 
 
@@ -550,8 +580,10 @@ def test_chat_panel_speaks_sessions_and_ambient_view(tmp_path):
 
 def test_render_shelf_lists_artifacts_behind_the_sandbox_contract(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    # The talk card grows an Artifacts section listing artifacts/*.html.
-    assert "<summary>Artifacts</summary>" in html
+    # The talk card lists artifacts/*.html under the human label
+    # "Learning tools" (the folder and routes keep the artifact name).
+    assert "<summary>Learning tools</summary>" in html
+    assert "<summary>Artifacts</summary>" not in html
     item = re.search(r'<li class="artifact-item"[^>]*>', html)
     assert item and 'data-slug="quiet-mind"' in item.group(0)
     assert 'data-name="breath-timer.html"' in item.group(0)
@@ -575,7 +607,7 @@ def test_render_shelf_lists_artifacts_behind_the_sandbox_contract(tmp_path):
 def test_render_shelf_talk_without_artifacts_has_no_section(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # Only quiet-mind has artifacts; the section appears exactly once.
-    assert html.count("<summary>Artifacts</summary>") == 1
+    assert html.count("<summary>Learning tools</summary>") == 1
 
 
 def test_chat_panel_has_the_ollama_model_picker(tmp_path):
@@ -611,3 +643,106 @@ def test_inline_scripts_parse_with_node(tmp_path):
             ["node", "--check", str(js)], capture_output=True, text=True
         )
         assert result.returncode == 0, result.stderr
+
+
+# --- the listening room: thumbnails, resume positions, transcript player -----
+
+
+def test_normalize_segments_accepts_whisper_and_captions_shapes():
+    whisper = {
+        "text": "all of it",
+        "segments": [
+            {"id": 0, "seek": 0, "start": 0.0, "end": 11.24, "text": " Patience is… ",
+             "tokens": [1, 2], "temperature": 0.0},
+        ],
+    }
+    captions = {"segments": [{"start": 2, "end": 4.5, "text": "about anger"}]}
+    assert build_shelf.normalize_segments(whisper) == [
+        {"start": 0.0, "end": 11.24, "text": "Patience is…"}
+    ]
+    assert build_shelf.normalize_segments(captions) == [
+        {"start": 2.0, "end": 4.5, "text": "about anger"}
+    ]
+    # Junk-tolerant: missing text/start, wrong types, non-dicts all drop out.
+    junk = {"segments": [
+        {"start": 1}, {"text": "no start"}, {"start": "x", "text": "y"},
+        "nope", {"start": 3, "end": None, "text": "end optional"},
+    ]}
+    assert build_shelf.normalize_segments(junk) == [
+        {"start": 3.0, "end": 3.0, "text": "end optional"}
+    ]
+    assert build_shelf.normalize_segments(None) == []
+    assert build_shelf.normalize_segments([1, 2]) == []
+
+
+def test_format_time_mm_ss_and_hours():
+    fmt = build_shelf.format_time
+    assert fmt(0) == "0:00"
+    assert fmt(65.4) == "1:05"
+    assert fmt(3725) == "1:02:05"
+
+
+def test_youtube_thumbnail_becomes_the_placeholder(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # demon-story has thumbnail.jpg: the placeholder is the local image
+    # with a play glyph and the talk duration (from INDEX) overlaid...
+    thumb = re.search(r'<button type="button" class="yt-play yt-thumb">.*?</button>', html, re.S)
+    assert thumb, "thumbnail play button missing"
+    assert '<img src="demon-story/thumbnail.jpg"' in thumb.group(0)
+    assert 'class="yt-glyph"' in thumb.group(0)
+    assert '<span class="yt-duration">56:04</span>' in thumb.group(0)
+    assert "Play here" not in thumb.group(0)
+    # ...while bare-yt (no thumbnail) keeps the plain button.
+    bare = html[html.index('data-slug="bare-yt"'):]
+    assert "Play here ▸" in bare[:600]
+    # Both carry data-slug for resume positions; noopener links stay.
+    assert re.search(r'<div class="yt-embed"[^>]*data-slug="demon-story"', html)
+    assert 'rel="noopener"' in html
+
+
+def test_transcript_player_renders_segments_with_data_start(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # quiet-mind (whisper transcript.json + audio.mp3): segment paragraphs.
+    box = re.search(
+        r'<div class="scroll-box seg-transcript" data-slug="quiet-mind">.*?</div>',
+        html, re.S,
+    )
+    assert box, "segmented transcript missing"
+    seg = re.search(r'<p class="seg" data-start="0">.*?</p>', box.group(0), re.S)
+    assert seg
+    assert '<span class="seg-time">0:00</span>' in seg.group(0)
+    # Segment text is escaped.
+    assert "Quiet begins &amp; &lt;opens&gt;." in box.group(0)
+    assert "<opens>" not in box.group(0)
+    assert 'data-start="4.5"' in box.group(0)
+    # The raw file stays a click away; the YouTube talk gets segments too.
+    assert 'href="quiet-mind/transcript.md"' in html
+    assert re.search(r'seg-transcript" data-slug="demon-story"', html)
+    assert 'data-start="12"' in html
+    # far-talk has only transcript.md: the plain rendering remains.
+    assert "<h3>Far Talk</h3>" in html
+
+
+def test_talk_audio_is_tagged_for_resume(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    audio = re.search(r"<audio[^>]*src=\"quiet-mind/audio.mp3\"[^>]*>", html)
+    assert audio
+    assert 'class="talk-audio"' in audio.group(0)
+    assert 'data-slug="quiet-mind"' in audio.group(0)
+    # The primer player is NOT position-tracked.
+    primer = re.search(r"<audio[^>]*src=\"quiet-mind/primer.mp3\"[^>]*>", html)
+    assert primer and "talk-audio" not in primer.group(0)
+
+
+def test_listening_room_js_markers(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Positions live in localStorage under sa-pos-<slug>, never sent out.
+    assert "sa-pos-" in html
+    assert "localStorage" in html
+    # YouTube resume: jsapi handshake + infoDelivery tracking + &start=.
+    assert "enablejsapi=1" in html
+    assert '"listening"' in html or "'listening'" in html
+    assert "infoDelivery" in html
+    assert "&start=" in html
+    # Still no innerHTML anywhere (covered elsewhere too, cheap here).
+    assert "innerHTML" not in html

@@ -14,12 +14,13 @@ Run with:
 """
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
-import sys
 import urllib.parse
 import urllib.request
+from datetime import date
 from pathlib import Path
 
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".ogg", ".wav", ".flac", ".aac", ".opus")
@@ -39,6 +40,84 @@ def guess_title_from_filename(filename: str) -> str:
     title = re.sub(r"^\d{6}(?:\([^)]*\))?[_ -]*", "", stem)
     title = title.replace("_", " ").replace("-", " ").strip().title()
     return title or stem
+
+
+def youtube_video_id(url: str) -> str | None:
+    """The bare video id from watch?v=/youtu.be forms (params in any
+    order); None otherwise. This is a talk's canonical identity."""
+    match = re.match(
+        r"https?://(?:www\.|m\.)?youtube\.com/watch\?(?:[^#\s]*&)?v=([\w-]{6,})", url or ""
+    ) or re.match(r"https?://youtu\.be/([\w-]{6,})", url or "")
+    return match.group(1) if match else None
+
+
+def same_source(a: str, b: str) -> bool:
+    """One talk, two URL spellings: bare YouTube ids match; else exact."""
+    id_a, id_b = youtube_video_id(a), youtube_video_id(b)
+    if id_a and id_b:
+        return id_a == id_b
+    return a == b
+
+
+def find_existing_slug(index_text: str, url: str) -> str | None:
+    """The slug of an INDEX entry whose Source is the same talk, or None.
+
+    The check that stops the same video being ingested twice under two
+    titles (it happened): identity is the source URL, not the title.
+    """
+    for block in re.split(r"\n(?=## )", index_text or ""):
+        heading = re.match(r"## (\S+)", block)
+        source = re.search(r"- \*\*Source:\*\* (.+)", block)
+        if heading and source and same_source(source.group(1).strip(), url):
+            return heading.group(1)
+    return None
+
+
+def clean_youtube_title(title: str) -> str:
+    """A short human name from a raw YouTube title.
+
+    "| Teacher"/"| date" pipe-tails and trailing dates drop away — teacher
+    and date are their own INDEX fields, never part of the title. (Cousin
+    of build_shelf.normalize_title, which makes lowercase MATCH keys;
+    this one keeps a display title.)
+    """
+    base = (title or "").split("|")[0].strip()
+    for tail in (
+        r"[\s\-–—:,(]*\b\d{1,2} \w+ \d{4}\b[\s)]*$",  # (27 January 2023)
+        r"[\s\-–—:,(]*\b\w+ \d{1,2},? \d{4}\b[\s)]*$",  # January 27, 2023
+        r"[\s\-–—:,(]*\b\d{4}-\d{2}-\d{2}\b[\s)]*$",  # 2023-01-27
+    ):
+        base = re.sub(tail, "", base).strip(" -–—:,")
+    return base or (title or "").strip() or "talk"
+
+
+def format_duration(seconds) -> str:
+    """65 -> "1:05", 3725 -> "1:02:05"; unknown/zero -> ""."""
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return ""
+    total = int(seconds)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def pick_thumbnail_url(info: dict) -> str | None:
+    """A good medium thumbnail URL from yt-dlp info, or None.
+
+    hq/mq variants keep the page light; the declared best is the
+    fallback. Thumbnails are downloaded locally at ingest so the shelf
+    never pings YouTube just to show a picture.
+    """
+    thumbnails = [t for t in info.get("thumbnails") or [] if t.get("url")]
+    for wanted in ("hqdefault", "mqdefault", "sddefault"):
+        for thumb in thumbnails:
+            if wanted in str(thumb["url"]):
+                return thumb["url"]
+    if info.get("thumbnail"):
+        return info["thumbnail"]
+    return thumbnails[-1]["url"] if thumbnails else None
 
 
 def classify_url(url: str) -> str:
@@ -88,6 +167,59 @@ def parse_vtt(vtt: str) -> str:
     return " ".join(deduped)
 
 
+_VTT_TIMING = re.compile(
+    r"(?:(\d+):)?(\d{1,2}):(\d{2})\.(\d{3})\s+-->\s+(?:(\d+):)?(\d{1,2}):(\d{2})\.(\d{3})"
+)
+
+
+def _vtt_seconds(hours, minutes, seconds, millis) -> float:
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000
+
+
+def parse_vtt_segments(vtt: str) -> list[dict]:
+    """parse_vtt with the timing kept: [{"start", "end", "text"}, ...].
+
+    Same rolling-caption dedupe, line by line: a repeated line extends the
+    earlier segment instead of duplicating it, a grown line replaces it.
+    Invariant (tested): joining the segment texts reproduces parse_vtt's
+    plain transcript exactly.
+    """
+    segments: list[dict] = []
+    start = end = 0.0
+    for raw in vtt.splitlines():
+        line = raw.strip()
+        timing = _VTT_TIMING.match(line)
+        if timing:
+            groups = timing.groups()
+            start, end = _vtt_seconds(*groups[:4]), _vtt_seconds(*groups[4:])
+            continue
+        if (
+            not line
+            or line.startswith(("WEBVTT", "Kind:", "Language:", "NOTE", "STYLE"))
+            or "-->" in line
+            or line.isdigit()
+        ):
+            continue
+        line = re.sub(r"<[^>]+>", "", line).strip()
+        if not line:
+            continue
+        if segments and line == segments[-1]["text"]:
+            segments[-1]["end"] = max(segments[-1]["end"], end)
+            continue
+        segments.append({"start": round(start, 3), "end": round(end, 3), "text": line})
+    deduped: list[dict] = []
+    for seg in segments:
+        if deduped and deduped[-1]["text"].endswith(seg["text"]):
+            deduped[-1]["end"] = max(deduped[-1]["end"], seg["end"])
+            continue
+        if deduped and seg["text"].startswith(deduped[-1]["text"]):
+            deduped[-1]["text"] = seg["text"]
+            deduped[-1]["end"] = max(deduped[-1]["end"], seg["end"])
+            continue
+        deduped.append(seg)
+    return deduped
+
+
 def render_transcript_markdown(*, text: str, title: str, teacher: str, source_url: str, origin: str) -> str:
     return "\n".join(
         [
@@ -105,13 +237,34 @@ def render_transcript_markdown(*, text: str, title: str, teacher: str, source_ur
     )
 
 
-def index_entry(*, slug: str, title: str, teacher: str, source_url: str, themes: str) -> str:
+def index_entry(
+    *,
+    slug: str,
+    title: str,
+    teacher: str,
+    source_url: str,
+    themes: str,
+    date: str = "",
+    duration: str = "",
+    origin: str = "",
+    ingested: str = "",
+) -> str:
+    """One INDEX entry, every field every time (blank beats missing).
+
+    Title is the short human name (no teacher, no date — those are their
+    own fields); Source is the talk's canonical identity; Origin says how
+    the transcript was made (youtube captions | whisper | captions+whisper).
+    """
     return "\n".join(
         [
             f"## {slug}",
             f"- **Title:** {title}",
             f"- **Teacher:** {teacher}",
             f"- **Source:** {source_url}",
+            f"- **Date:** {date}",
+            f"- **Duration:** {duration}",
+            f"- **Origin:** {origin}",
+            f"- **Ingested:** {ingested}",
             f"- **Themes:** {themes}",
             f"- **Path:** library/{slug}/",
             "",
@@ -139,20 +292,29 @@ YDL_COMMON = {"quiet": True, "no_warnings": True, "noplaylist": True}
 
 
 def probe_youtube(url: str) -> dict:
-    """Return {'title', 'uploader'} without downloading anything."""
+    """Video metadata without downloading anything: title, uploader,
+    thumbnail URL, duration (formatted), upload date (ISO)."""
     import yt_dlp
 
     with yt_dlp.YoutubeDL(dict(YDL_COMMON)) as ydl:
         info = ydl.extract_info(url, download=False)
-    return {"title": info.get("title") or "talk", "uploader": info.get("uploader") or ""}
+    upload = str(info.get("upload_date") or "")
+    return {
+        "title": info.get("title") or "talk",
+        "uploader": info.get("uploader") or "",
+        "thumbnail_url": pick_thumbnail_url(info),
+        "duration": format_duration(info.get("duration")),
+        "date": f"{upload[:4]}-{upload[4:6]}-{upload[6:8]}" if len(upload) == 8 else "",
+    }
 
 
-def fetch_youtube_captions(url: str, talk_dir: Path) -> str | None:
+def fetch_youtube_captions(url: str, talk_dir: Path) -> dict | None:
     """Download English captions (manual preferred over auto) into talk_dir.
 
     YouTube's timedtext URLs reject plain urllib clients, so the subtitle
-    download goes through yt-dlp itself. Returns parsed transcript text,
-    or None when no usable captions exist.
+    download goes through yt-dlp itself. Returns {"text", "segments"}
+    (segments carry start/end timing for the transcript player), or None
+    when no usable captions exist.
     """
     import yt_dlp
 
@@ -181,10 +343,14 @@ def fetch_youtube_captions(url: str, talk_dir: Path) -> str | None:
         (by_name[f"captions.{lang}.vtt"] for lang in languages if f"captions.{lang}.vtt" in by_name),
         vtt_files[0],
     )
-    text = parse_vtt(chosen.read_text(encoding="utf-8", errors="replace"))
+    vtt = chosen.read_text(encoding="utf-8", errors="replace")
+    text = parse_vtt(vtt)
+    segments = parse_vtt_segments(vtt)
     for vtt_file in vtt_files:
         vtt_file.unlink()
-    return text or None
+    if not text:
+        return None
+    return {"text": text, "segments": segments}
 
 
 def download_youtube_audio(url: str, talk_dir: Path) -> Path:
@@ -233,10 +399,111 @@ def transcribe(audio_path: Path, *, talk_dir: Path, title: str, teacher: str, so
         raise SystemExit(f"Transcription produced no transcript.md in {talk_dir}")
 
 
+def parse_index_entries(index_text: str) -> list[dict]:
+    """{"slug", lowercase field -> value} per INDEX entry (the same shape
+    build_shelf.parse_index yields; duplicated to keep this tool standalone)."""
+    entries = []
+    for block in re.split(r"\n(?=## )", index_text or ""):
+        heading = re.match(r"## (\S+)", block)
+        if not heading:
+            continue
+        entry = {"slug": heading.group(1)}
+        for key, value in re.findall(r"- \*\*(\w+):\*\* (.+)", block):
+            entry[key.lower()] = value.strip()
+        entries.append(entry)
+    return entries
+
+
+def download_thumbnail(url: str, talk_dir: Path) -> bool:
+    """Best-effort local thumbnail (privacy: the shelf never asks YouTube
+    for pictures at view time). Returns whether one now exists."""
+    dest = talk_dir / "thumbnail.jpg"
+    if dest.exists():
+        return True
+    try:
+        info = probe_youtube(url)
+        if not info["thumbnail_url"]:
+            return False
+        download_file(info["thumbnail_url"], dest)
+        return True
+    except Exception as error:  # noqa: BLE001 — thumbnails are a nicety
+        print(f"  thumbnail fetch failed (non-fatal): {error}")
+        return False
+
+
+def backfill_thumbnails(library: Path) -> None:
+    """Fetch thumbnail.jpg for YouTube-sourced INDEX entries missing one."""
+    index_path = library / "INDEX.md"
+    if not index_path.exists():
+        raise SystemExit(f"No {index_path} found — nothing to backfill.")
+    for entry in parse_index_entries(index_path.read_text(encoding="utf-8")):
+        source = entry.get("source", "")
+        if not youtube_video_id(source):
+            continue
+        talk_dir = library / entry["slug"]
+        if (talk_dir / "thumbnail.jpg").exists():
+            print(f"{entry['slug']}: thumbnail already present")
+            continue
+        talk_dir.mkdir(parents=True, exist_ok=True)
+        ok = download_thumbnail(source, talk_dir)
+        print(f"{entry['slug']}: {'thumbnail.jpg written' if ok else 'no thumbnail'}")
+
+
+def backfill_transcripts(library: Path) -> None:
+    """Re-fetch captions for YouTube-sourced entries missing transcript.json.
+
+    Regenerates transcript.md and transcript.json together (metadata
+    headers kept, from the INDEX entry) so the two never drift apart.
+    """
+    index_path = library / "INDEX.md"
+    if not index_path.exists():
+        raise SystemExit(f"No {index_path} found — nothing to backfill.")
+    for entry in parse_index_entries(index_path.read_text(encoding="utf-8")):
+        source = entry.get("source", "")
+        if not youtube_video_id(source):
+            continue
+        talk_dir = library / entry["slug"]
+        if (talk_dir / "transcript.json").exists():
+            print(f"{entry['slug']}: transcript.json already present")
+            continue
+        talk_dir.mkdir(parents=True, exist_ok=True)
+        captions = fetch_youtube_captions(source, talk_dir)
+        if not captions:
+            print(f"{entry['slug']}: no captions available — skipped")
+            continue
+        write_transcript(
+            talk_dir,
+            captions,
+            title=entry.get("title", entry["slug"]),
+            teacher=entry.get("teacher", ""),
+            source_url=source,
+        )
+        print(f"{entry['slug']}: transcript.md + transcript.json regenerated")
+
+
+def write_transcript(talk_dir: Path, captions: dict, *, title: str, teacher: str, source_url: str) -> None:
+    """transcript.md (metadata headers + text) and transcript.json together."""
+    (talk_dir / "transcript.md").write_text(
+        render_transcript_markdown(
+            text=captions["text"], title=title, teacher=teacher,
+            source_url=source_url, origin="youtube captions",
+        ),
+        encoding="utf-8",
+    )
+    if captions.get("segments"):
+        (talk_dir / "transcript.json").write_text(
+            json.dumps({"segments": captions["segments"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("url", help="Talk URL: YouTube, direct audio, or a page containing an audio link")
-    parser.add_argument("--title", help="Talk title (defaults to metadata or URL filename)")
+    parser.add_argument(
+        "url", nargs="?",
+        help="Talk URL: YouTube, direct audio, or a page containing an audio link",
+    )
+    parser.add_argument("--title", help="Talk title (defaults to cleaned metadata or URL filename)")
     parser.add_argument("--teacher", default="", help="Teacher name (defaults to YouTube uploader if known)")
     parser.add_argument("--themes", default="", help="Comma-separated themes for the library index")
     parser.add_argument(
@@ -245,33 +512,81 @@ def parse_args() -> argparse.Namespace:
         help="MLX Whisper model used when local transcription is needed",
     )
     parser.add_argument("--library", type=Path, default=LIBRARY, help="Library root directory")
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="when the talk is already in the library, refresh its captions/"
+             "transcript.json/thumbnail in place instead of skipping",
+    )
+    parser.add_argument(
+        "--backfill-thumbnails", action="store_true",
+        help="no URL: fetch thumbnail.jpg for YouTube talks missing one",
+    )
+    parser.add_argument(
+        "--backfill-transcripts", action="store_true",
+        help="no URL: re-fetch captions for YouTube talks missing transcript.json",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.backfill_thumbnails or args.backfill_transcripts:
+        if args.backfill_thumbnails:
+            backfill_thumbnails(args.library)
+        if args.backfill_transcripts:
+            backfill_transcripts(args.library)
+        return
+    if not args.url:
+        raise SystemExit("Give a talk URL (or a --backfill-* mode).")
     kind = classify_url(args.url)
+
+    # Canonical identity is the source URL: the same video under any
+    # spelling never becomes a second folder with a second title.
+    index_path = args.library / "INDEX.md"
+    existing = (
+        find_existing_slug(index_path.read_text(encoding="utf-8"), args.url)
+        if index_path.exists()
+        else None
+    )
+    if existing and not args.refresh:
+        print(f"already in library as {existing} — nothing to do "
+              "(use --refresh to update captions/thumbnail in place)")
+        return
 
     if kind == "youtube":
         meta = probe_youtube(args.url)
-        title = args.title or meta["title"]
+        title = args.title or clean_youtube_title(meta["title"])
         teacher = args.teacher or meta["uploader"] or "Unknown"
-        talk_dir = args.library / slugify(title)
+        slug = existing or slugify(title)
+        talk_dir = args.library / slug
         talk_dir.mkdir(parents=True, exist_ok=True)
-        transcript_text = fetch_youtube_captions(args.url, talk_dir)
-        if transcript_text:
-            (talk_dir / "transcript.md").write_text(
-                render_transcript_markdown(
-                    text=transcript_text, title=title, teacher=teacher,
-                    source_url=args.url, origin="youtube captions",
-                ),
-                encoding="utf-8",
-            )
+        captions = fetch_youtube_captions(args.url, talk_dir)
+        origin = "youtube captions"
+        if captions:
+            write_transcript(talk_dir, captions, title=title, teacher=teacher,
+                             source_url=args.url)
         else:
+            origin = "whisper"
             audio_path = download_youtube_audio(args.url, talk_dir)
             transcribe(audio_path, talk_dir=talk_dir, title=title, teacher=teacher,
                        source_url=args.url, model=args.model)
-    else:
+        download_thumbnail(args.url, talk_dir)
+        if existing:
+            print(f"Refreshed library/{existing}/ in place")
+            return
+        update_index(
+            index_path,
+            slug=slug,
+            entry=index_entry(
+                slug=slug, title=title, teacher=teacher, source_url=args.url,
+                themes=args.themes or "untagged", date=meta["date"],
+                duration=meta["duration"], origin=origin,
+                ingested=date.today().isoformat(),
+            ),
+        )
+        print(f"Ingested into library/{slug}/")
+        return
+    else:  # noqa: RET505 — kept symmetric with the youtube branch above
         if kind == "page":
             request = urllib.request.Request(args.url, headers={"User-Agent": "second-arrow-study/1.0"})
             with urllib.request.urlopen(request) as resp:
@@ -284,18 +599,23 @@ def main() -> None:
         filename = Path(urllib.parse.urlparse(audio_url).path).name
         title = args.title or guess_title_from_filename(filename)
         teacher = args.teacher or "Unknown"
-        slug = slugify(title)
+        slug = existing or slugify(title)
         talk_dir = args.library / slug
         audio_path = download_file(audio_url, talk_dir / f"audio{Path(filename).suffix or '.mp3'}")
         transcribe(audio_path, talk_dir=talk_dir, title=title, teacher=teacher,
                    source_url=args.url, model=args.model)
+        if existing:
+            print(f"Refreshed library/{existing}/ in place")
+            return
 
-    slug = slugify(title)
     update_index(
-        args.library / "INDEX.md",
+        index_path,
         slug=slug,
-        entry=index_entry(slug=slug, title=title, teacher=teacher, source_url=args.url,
-                          themes=args.themes or "untagged"),
+        entry=index_entry(
+            slug=slug, title=title, teacher=teacher, source_url=args.url,
+            themes=args.themes or "untagged", origin="whisper",
+            ingested=date.today().isoformat(),
+        ),
     )
     print(f"Ingested into library/{slug}/")
 

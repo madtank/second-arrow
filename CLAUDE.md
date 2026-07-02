@@ -79,7 +79,8 @@ that memory as you go:
   fonts, or network requests: the shelf renders it in a sandboxed iframe
   behind a no-network CSP, so anything external simply won't load. Media
   only via relative paths into the talk folder (`../../<slug>/audio.mp3`
-  — that shape resolves both served and over file://). Then run
+  — that shape resolves both served and over file://). The shelf lists
+  these under **Learning tools** on the talk's card. Then run
   `uv run tools/build_shelf.py` and tell the user to refresh.
 
 **Route by tense.** Present or ambient — "this talk", "what did he say"
@@ -90,13 +91,18 @@ story we discussed", "what landed for me last month" — means search:
 it returns, never from guesswork. Requests for new material go to
 `curriculum/` first, then an offered — never auto-run — fetch.
 
-You also have four reviewed tools — and only these, no other commands:
+You also have five reviewed tools — and only these, no other commands:
 
 - `uv run tools/fetch_talk.py <url> ...` — ingest a talk the user asks
-  for. In chat, prefer captioned YouTube sources: they land in seconds.
-  Local Whisper transcription of long audio takes minutes — warn the
-  user first, or queue it for a full session. Downloads stay explicit
-  and single-item (the hard rule above).
+  for. Always pass a clean `--title` (a short human name — no teacher,
+  no date; those are their own fields), plus `--teacher` and `--themes`
+  explicitly. A talk's identity is its source URL: if the tool reports
+  "already in library as <slug>", say so and use that talk — never
+  ingest the same video twice under a second title. In chat, prefer
+  captioned YouTube sources: they land in seconds. Local Whisper
+  transcription of long audio takes minutes — warn the user first, or
+  queue it for a full session. Downloads stay explicit and single-item
+  (the hard rule above).
 - `uv run tools/speak.py ...` — speak a primer or short reflection.
 - `uv run tools/build_shelf.py` — after any change to the library, run
   this and tell the user to refresh the page.

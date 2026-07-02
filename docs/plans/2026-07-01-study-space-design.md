@@ -249,6 +249,33 @@ phone), revisit with real usage behind the decision.
   /api/sessions after each completed turn, so fresh titles appear
   immediately. Persona contract: retitle when the conversation
   meaningfully turns or wraps — don't wait for the user to leave.
+- **Iter 9 — DONE: the listening room + talk identity.** YouTube talks
+  get their thumbnail downloaded at ingest (privacy-first: the shelf
+  never pings YouTube to show a picture) and the click-to-load
+  placeholder becomes the local image with a play glyph and duration
+  overlay; "Play here ▸" remains only without a thumbnail. Resume
+  positions live in localStorage (`sa-pos-<slug>`, never sent
+  anywhere): local audio restores on load and clears near the end;
+  YouTube embeds resume via `&start=` and track via the jsapi
+  listening/infoDelivery postMessage handshake (no SDK script), with
+  the "open on YouTube ↗" link updating live to `&t=`. Captions now
+  keep their timing: fetch_talk writes transcript.json ({segments:
+  [{start,end,text}]}, same rolling-caption dedupe as parse_vtt —
+  parity tested) and the transcript details render as a player: every
+  segment clickable (local audio seeks and plays with the current
+  segment highlighted and gently scrolled; YouTube reloads the embed
+  at that second). Whisper and captions shapes normalize in one
+  loader. "Artifacts" is relabeled **Learning tools** everywhere
+  user-visible. Talk identity became the source URL: fetch_talk
+  refuses to re-ingest the same video under a second spelling/title
+  ("already in library as <slug>", `--refresh` updates in place),
+  YouTube titles are cleaned at ingest (pipe-tails and trailing dates
+  drop; teacher/date are their own fields), and INDEX entries follow
+  one field standard (Title/Teacher/Source/Date/Duration/Origin/
+  Ingested/Themes/Path). The duplicate anger-and-forgiveness ingest
+  was merged (bodies were byte-identical; the stray dir removed) and
+  all four entries normalized; `--backfill-thumbnails` /
+  `--backfill-transcripts` filled the three YouTube talks.
 
 ## Boundaries
 

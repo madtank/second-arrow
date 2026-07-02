@@ -26,6 +26,7 @@ Then:
 """
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -50,6 +51,44 @@ def youtube_embed_url(source_url: str) -> str | None:
     if not match:
         return None
     return f"https://www.youtube-nocookie.com/embed/{match.group(1)}"
+
+
+def format_time(seconds) -> str:
+    """65 -> "1:05", 3725 -> "1:02:05" — segment stamps and durations."""
+    total = int(seconds)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def normalize_segments(data) -> list[dict]:
+    """[{"start", "end", "text"}] from a transcript.json of either shape.
+
+    Whisper's segments carry extra keys (id/seek/tokens/...); the captions
+    parser writes bare start/end/text. Both normalize to the same three
+    fields; junk entries drop out; anything unusable gives [].
+    """
+    if not isinstance(data, dict):
+        return []
+    segments: list[dict] = []
+    for seg in data.get("segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        text = seg.get("text")
+        start = seg.get("start")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if not isinstance(start, (int, float)) or isinstance(start, bool):
+            continue
+        end = seg.get("end")
+        if not isinstance(end, (int, float)) or isinstance(end, bool):
+            end = start
+        segments.append(
+            {"start": float(start), "end": float(end), "text": text.strip()}
+        )
+    return segments
 
 
 def parse_index(text: str) -> list[dict]:
@@ -224,6 +263,8 @@ def probe(talk_dir: Path) -> dict:
         "transcript_md": (talk_dir / "transcript.md").exists(),
         "audio": audio.name if audio else None,
         "artifacts": sorted(p.name for p in (talk_dir / "artifacts").glob("*.html")),
+        "thumbnail": (talk_dir / "thumbnail.jpg").exists(),
+        "transcript_json": (talk_dir / "transcript.json").exists(),
     }
 
 
@@ -309,6 +350,25 @@ STYLE = """
   .yt-frame { aspect-ratio: 16 / 9; }
   .yt-frame iframe { width: 100%; height: 100%; border: 0;
                      border-radius: 8px; }
+  .yt-thumb { position: relative; display: block; width: 100%; padding: 0;
+              border: none; background: none; cursor: pointer;
+              border-radius: 8px; overflow: hidden; }
+  .yt-thumb img { display: block; width: 100%; }
+  .yt-glyph { position: absolute; top: 50%; left: 50%;
+              transform: translate(-50%, -50%); width: 3.2rem;
+              height: 3.2rem; line-height: 3.2rem; border-radius: 999px;
+              background: rgba(40, 35, 28, 0.72); color: #fdf9f0;
+              font-size: 1.25rem; text-align: center; }
+  .yt-thumb:hover .yt-glyph { background: rgba(40, 35, 28, 0.9); }
+  .yt-duration { position: absolute; right: 0.5rem; bottom: 0.5rem;
+                 background: rgba(40, 35, 28, 0.75); color: #fdf9f0;
+                 font-size: 0.78rem; border-radius: 6px;
+                 padding: 0.05rem 0.45rem; }
+  .seg { cursor: pointer; margin: 0.5rem 0; border-radius: 6px;
+         padding: 0.1rem 0.3rem; }
+  .seg:hover { background: #f2ece1; }
+  .seg.active { background: #efe7d9; }
+  .seg-time { color: #a99e8e; font-size: 0.8rem; margin-right: 0.4rem; }
   .artifact-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
   .artifact-item { margin: 0.75rem 0; }
   .artifact-name { color: #6d5f4b; font-size: 0.95rem; }
@@ -669,11 +729,13 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 </script>"""
 
 
-# Hash routing, the sidebar toggle, and the click-to-load YouTube player.
-# Views are hidden only under the runtime "js" class (added below): with
-# JS off, or file:// oddities, every view simply renders stacked. The
-# player iframe is built with createElement + setAttribute — the page
-# makes no third-party request until the user presses "Play here".
+# Hash routing, the sidebar toggle, and the listening room: click-to-load
+# YouTube players (thumbnail or button placeholder), resume positions
+# (localStorage only — sa-pos-<slug>, never sent to any server), and the
+# transcript player (click a segment to seek; local audio highlights the
+# current segment). Views are hidden only under the runtime "js" class:
+# with JS off, everything still renders stacked. Iframes are built with
+# createElement + setAttribute — no third-party request until asked.
 LAYOUT_SCRIPT = """<script>
 (function () {
   var sidebar = document.getElementById("sidebar");
@@ -705,22 +767,157 @@ LAYOUT_SCRIPT = """<script>
     });
   });
 
+  // --- resume positions: localStorage only, never sent anywhere --------
+  function posKey(slug) { return "sa-pos-" + slug; }
+
+  function loadPos(slug) {
+    try {
+      var value = parseFloat(localStorage.getItem(posKey(slug)));
+      return isNaN(value) ? 0 : value;
+    } catch (e) { return 0; }
+  }
+
+  function savePos(slug, t, duration) {
+    try {
+      if (duration && duration - t < 15) localStorage.removeItem(posKey(slug));
+      else if (t > 1) localStorage.setItem(posKey(slug), String(Math.floor(t)));
+    } catch (e) { /* storage blocked: resume is a nicety */ }
+    // Keep the external link honest: it jumps to where you are.
+    var holder = document.querySelector('.yt-embed[data-slug="' + slug + '"]');
+    var link = holder && holder.querySelector(".yt-link");
+    if (link) {
+      var base = link.getAttribute("data-href") || link.getAttribute("href");
+      link.setAttribute("data-href", base);
+      var at = Math.floor(loadPos(slug));
+      link.setAttribute("href", at > 0
+        ? base + (base.indexOf("?") >= 0 ? "&" : "?") + "t=" + at + "s"
+        : base);
+    }
+  }
+
+  // --- the transcript player: click a segment, be there -----------------
+  function highlightSegment(slug, t) {
+    var box = document.querySelector('.seg-transcript[data-slug="' + slug + '"]');
+    if (!box) return;
+    var details = box.closest("details");
+    if (details && !details.open) return; // gentle: only while it's open
+    var active = null;
+    box.querySelectorAll(".seg").forEach(function (seg) {
+      if (parseFloat(seg.getAttribute("data-start")) <= t) active = seg;
+    });
+    box.querySelectorAll(".seg").forEach(function (seg) {
+      seg.classList.toggle("active", seg === active);
+    });
+    if (active && box.getAttribute("data-active") !== active.getAttribute("data-start")) {
+      box.setAttribute("data-active", active.getAttribute("data-start"));
+      active.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }
+
+  function seekAudio(audio, t) {
+    audio.setAttribute("data-restored", "1"); // an explicit seek wins
+    if (audio.readyState >= 1) {
+      audio.currentTime = t;
+    } else {
+      audio.addEventListener("loadedmetadata", function once() {
+        audio.removeEventListener("loadedmetadata", once);
+        audio.currentTime = t;
+      });
+    }
+    audio.play();
+  }
+
+  document.querySelectorAll(".seg-transcript").forEach(function (box) {
+    box.addEventListener("click", function (event) {
+      var seg = event.target.closest(".seg");
+      if (!seg) return;
+      var slug = box.getAttribute("data-slug");
+      var start = parseFloat(seg.getAttribute("data-start")) || 0;
+      var audio = document.querySelector(
+        'audio.talk-audio[data-slug="' + slug + '"]');
+      if (audio) { seekAudio(audio, start); return; }
+      var holder = document.querySelector(
+        '.yt-embed[data-slug="' + slug + '"]');
+      // No API dependency: seeking a YouTube talk just reloads the
+      // embed at that second.
+      if (holder) mountFrame(holder, Math.floor(start));
+    });
+  });
+
+  // --- local audio: restore, track, highlight ---------------------------
+  document.querySelectorAll("audio.talk-audio").forEach(function (audio) {
+    var slug = audio.getAttribute("data-slug");
+    var lastSave = 0;
+    audio.addEventListener("loadedmetadata", function () {
+      if (audio.getAttribute("data-restored")) return;
+      audio.setAttribute("data-restored", "1");
+      var saved = loadPos(slug);
+      if (saved > 0 && saved < audio.duration - 15) audio.currentTime = saved;
+    });
+    audio.addEventListener("timeupdate", function () {
+      highlightSegment(slug, audio.currentTime);
+      var now = Date.now();
+      if (now - lastSave < 5000) return; // throttled
+      lastSave = now;
+      savePos(slug, audio.currentTime, audio.duration);
+    });
+  });
+
+  // --- YouTube embeds: click-to-load, resume via &start=, jsapi track ---
+  var ytMounted = {}; // slug -> true once its iframe exists
+  var ytLastSave = {};
+
+  function mountFrame(holder, startAt) {
+    var slug = holder.getAttribute("data-slug");
+    var src = holder.getAttribute("data-embed") + "?autoplay=1&enablejsapi=1";
+    if (location.protocol === "http:" || location.protocol === "https:") {
+      src += "&origin=" + encodeURIComponent(location.origin);
+    }
+    var at = startAt !== undefined ? startAt : Math.floor(loadPos(slug));
+    if (at > 0) src += "&start=" + at; // resumes even if the API stays mute
+    var frame = document.createElement("iframe");
+    frame.setAttribute("src", src);
+    frame.setAttribute("title", "YouTube player");
+    frame.setAttribute("allow", "accelerometer; autoplay; clipboard-write; "
+      + "encrypted-media; gyroscope; picture-in-picture; web-share");
+    frame.setAttribute("allowfullscreen", "");
+    frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
+    frame.addEventListener("load", function () {
+      // The standard listening handshake: the player then streams
+      // infoDelivery events (currentTime) back — no SDK script needed.
+      try {
+        frame.contentWindow.postMessage(JSON.stringify(
+          { event: "listening", id: slug, channel: "widget" }),
+          "https://www.youtube-nocookie.com");
+      } catch (e) { /* degrade: the &start= above already resumed us */ }
+    });
+    ytMounted[slug] = true;
+    var box = document.createElement("div");
+    box.className = "yt-frame";
+    box.appendChild(frame);
+    var old = holder.querySelector(".yt-frame") || holder.querySelector(".yt-play");
+    if (old) holder.replaceChild(box, old);
+  }
+
   document.querySelectorAll(".yt-embed").forEach(function (holder) {
     var button = holder.querySelector(".yt-play");
     if (!button) return;
-    button.addEventListener("click", function () {
-      var frame = document.createElement("iframe");
-      frame.setAttribute("src", holder.getAttribute("data-embed") + "?autoplay=1");
-      frame.setAttribute("title", "YouTube player");
-      frame.setAttribute("allow", "accelerometer; autoplay; clipboard-write; "
-        + "encrypted-media; gyroscope; picture-in-picture; web-share");
-      frame.setAttribute("allowfullscreen", "");
-      frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
-      var box = document.createElement("div");
-      box.className = "yt-frame";
-      box.appendChild(frame);
-      holder.replaceChild(box, button);
-    });
+    button.addEventListener("click", function () { mountFrame(holder); });
+  });
+
+  window.addEventListener("message", function (event) {
+    if (event.origin !== "https://www.youtube-nocookie.com"
+        && event.origin !== "https://www.youtube.com") return;
+    var data;
+    try { data = JSON.parse(event.data); } catch (e) { return; }
+    if (!data || data.event !== "infoDelivery" || !data.info) return;
+    var slug = data.id;
+    if (!ytMounted[slug] || typeof data.info.currentTime !== "number") return;
+    highlightSegment(slug, data.info.currentTime);
+    var now = Date.now();
+    if (now - (ytLastSave[slug] || 0) < 5000) return; // throttled
+    ytLastSave[slug] = now;
+    savePos(slug, data.info.currentTime, data.info.duration);
   });
 })();
 </script>"""
@@ -744,18 +941,37 @@ def render_card(talk: dict, files: dict, reach: str | None) -> str:
     if files["audio"]:
         parts.append('<p class="player-label">The talk</p>')
         parts.append(
-            f'<audio controls preload="none" src="{escape(slug)}/{escape(files["audio"])}"></audio>'
+            f'<audio controls preload="none" class="talk-audio" '
+            f'data-slug="{escape(slug)}" '
+            f'src="{escape(slug)}/{escape(files["audio"])}"></audio>'
         )
     elif talk.get("source"):
         source = talk["source"]
         embed = youtube_embed_url(source)
         if embed:
-            # Click-to-load: the iframe exists only after "Play here", so
-            # the page stays light and makes no third-party request until
-            # asked. A small new-tab escape hatch sits alongside.
+            # Click-to-load: the iframe exists only after the click, so the
+            # page stays light and makes no third-party request until
+            # asked. With a local thumbnail the placeholder is the picture
+            # itself (downloaded at ingest — YouTube is never pinged just
+            # to show it); otherwise a plain calm button.
+            if files["thumbnail"]:
+                duration = talk.get("duration", "")
+                duration_tag = (
+                    f'<span class="yt-duration">{escape(duration)}</span>\n'
+                    if duration
+                    else ""
+                )
+                button = (
+                    '<button type="button" class="yt-play yt-thumb">\n'
+                    f'<img src="{escape(slug)}/thumbnail.jpg" alt="" loading="lazy">\n'
+                    '<span class="yt-glyph">▶</span>\n'
+                    f"{duration_tag}</button>"
+                )
+            else:
+                button = '<button type="button" class="yt-play">Play here ▸</button>'
             parts.append(
-                f'<div class="yt-embed" data-embed="{escape(embed)}">\n'
-                '<button type="button" class="yt-play">Play here ▸</button>\n'
+                f'<div class="yt-embed" data-embed="{escape(embed)}" '
+                f'data-slug="{escape(slug)}">\n{button}\n'
                 f'<a class="yt-link" href="{escape(source)}" target="_blank" '
                 'rel="noopener">open on YouTube ↗</a>\n</div>'
             )
@@ -827,7 +1043,31 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
         if files["notes_md"]:
             notes = md_to_html((talk_dir / "notes.md").read_text())
             card.append(f"<details><summary>Notes</summary>\n{notes}\n</details>")
-        if files["transcript_md"]:
+        segments = []
+        if files["transcript_json"]:
+            try:
+                segments = normalize_segments(
+                    json.loads((talk_dir / "transcript.json").read_text())
+                )
+            except (OSError, json.JSONDecodeError):
+                segments = []  # a torn file falls back to the plain rendering
+        if segments:
+            # The transcript as a player: each timed segment is clickable —
+            # local-audio talks seek and play, YouTube talks reload the
+            # embed at that moment. The raw file stays a click away.
+            rows = "\n".join(
+                f'<p class="seg" data-start="{seg["start"]:g}">'
+                f'<span class="seg-time">{format_time(seg["start"])}</span> '
+                f"{escape(seg['text'])}</p>"
+                for seg in segments
+            )
+            card.append(
+                "<details><summary>Transcript</summary>\n"
+                f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
+                f'<div class="scroll-box seg-transcript" data-slug="{slug}">\n'
+                f"{rows}\n</div>\n</details>"
+            )
+        elif files["transcript_md"]:
             # Rendered inline (escaped, formatted) — the raw .md link alone
             # opened as one wall of unformatted text. Transcripts run long,
             # so the rendered copy lives in a scrollable box, with the raw
@@ -852,7 +1092,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 for name in files["artifacts"]
             )
             card.append(
-                "<details><summary>Artifacts</summary>\n"
+                "<details><summary>Learning tools</summary>\n"
                 '<p class="artifact-note">Interactive pages the guide made for'
                 " this talk. The sandboxed view appears on the served shelf;"
                 " these links open the raw page.</p>\n"
