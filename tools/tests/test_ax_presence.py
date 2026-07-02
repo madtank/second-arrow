@@ -369,14 +369,68 @@ def test_resolve_hermes_key_order():
     assert ax.resolve_hermes_key({}) is None
 
 
-def test_build_hermes_request_uses_conversation_continuity():
-    req = ax.build_hermes_request("[aX message from @alice] hi", "ax-alice")
-    assert req == {
+def test_build_hermes_request_session_header_and_single_message_body():
+    body, headers = ax.build_hermes_request(
+        "[aX message from @alice] hi", "ax-alice", "key1"
+    )
+    # continuity is the header's job (state.db history, LRU-safe) — the
+    # body holds ONLY the new user message, never client-side history
+    assert body == {
         "model": "hermes-agent",
-        "input": "[aX message from @alice] hi",
-        "conversation": "ax-alice",
-        "store": True,
+        "messages": [{"role": "user", "content": "[aX message from @alice] hi"}],
+        "stream": False,
     }
+    assert headers["X-Hermes-Session-Id"] == "ax-alice"
+    assert headers["Authorization"] == "Bearer key1"
+
+
+class _FakeResponse:
+    def __init__(self, status, payload=None):
+        self.status_code = status
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def _ok_payload(text="Hello."):
+    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+
+
+def test_hermes_429_retries_once_then_succeeds(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+
+    responses = [_FakeResponse(429), _FakeResponse(200, _ok_payload())]
+    posts, naps = [], []
+    monkeypatch.setattr(
+        httpx, "post", lambda url, **kw: posts.append(url) or responses.pop(0)
+    )
+    mention = {"sender": "alice", "text": "hi"}
+    reply = ax.hermes_reply_for(mention, "http://h:1", "k", sleep=naps.append)
+    assert reply == "Hello."
+    assert len(posts) == 2 and posts[0].endswith("/v1/chat/completions")
+    assert naps == [ax.HERMES_RETRY_DELAY]
+
+
+def test_hermes_429_twice_gives_up_gracefully(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: _FakeResponse(429))
+    with pytest.raises(ax.GuideError) as err:
+        ax.hermes_reply_for(
+            {"sender": "a", "text": "t"}, "http://h:1", "k", sleep=lambda s: None
+        )
+    assert "429" in str(err.value)
+
+
+def test_hermes_403_means_bad_key(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+
+    # the session header requires API-key auth: 403 without it (reference §7)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: _FakeResponse(403))
+    with pytest.raises(ax.GuideError) as err:
+        ax.hermes_reply_for({"sender": "a", "text": "t"}, "http://h:1", "k")
+    assert "HERMES_API_KEY" in str(err.value)
 
 
 def test_strip_think():

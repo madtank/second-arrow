@@ -98,13 +98,19 @@ export HERMES_API_KEY=<the profile's API_SERVER_KEY>
 uv run tools/ax_presence.py listen --guide hermes   # --hermes-url http://127.0.0.1:8642
 ```
 
-The bridge POSTs `/v1/responses` (bearer auth; `API_SERVER_KEY` works as
-an env fallback), non-streamed, and relies on the api-server's documented
-server-side `conversation` parameter for continuity — one named
-conversation per aX sender, no client-side history to maintain. `<think>`
-blocks are stripped from replies. If the gateway is down or rejects the
-key, the failure is logged locally and the mention simply stays
-unanswered — error text is never sent to aX.
+The bridge POSTs `/v1/chat/completions` (bearer auth; `API_SERVER_KEY`
+works as an env fallback), non-streamed, with **only the new user
+message** in the body: continuity rides on the `X-Hermes-Session-Id`
+header — the server loads history from its own state.db, one session per
+aX sender (`ax-<sender>`), and echoes the id back. This deliberately
+avoids `/v1/responses`' named `conversation` chains, which are capped at
+100 stored responses with LRU eviction and would silently truncate
+long-lived threads (`docs/hermes-reference.md` §7/§10). `<think>` blocks
+are stripped from replies. A 429 (the gateway's shared
+`max_concurrent_runs` cap) gets one retry after ~2s; after that — like a
+gateway that's down or rejects the key (401/403) — the failure is logged
+locally and the mention simply stays unanswered. Error text is never
+sent to aX.
 
 **Privacy in hermes mode:** the mention text goes to whatever model the
 Hermes profile is configured with — in phase 1 a *hosted* model
@@ -131,9 +137,9 @@ extending the surface needs an explicit decision here first.
 - **"guide unreachable"** — `serve_shelf.py` isn't running on
   `http://127.0.0.1:8765`. Start it, or point the bridge elsewhere with
   `--guide-url`.
-- **"Hermes gateway unreachable" / "rejected the key (401)"** — in hermes
-  mode the profile's api-server isn't up on `--hermes-url`, or the key is
-  wrong. The mention stays unanswered (nothing is sent to aX). Check the
+- **"Hermes gateway unreachable" / "rejected the key (401/403)"** — in
+  hermes mode the profile's api-server isn't up on `--hermes-url`, or the
+  key is wrong (the session header requires API-key auth — 403 without it). The mention stays unanswered (nothing is sent to aX). Check the
   profile's `.env` (`API_SERVER_ENABLED=true`, `API_SERVER_KEY`) and gate
   it with `HERMES_API_KEY=... uv run tools/hermes_probe.py`.
 - **"NO message-send tool found"** — aX changed its tool surface again;

@@ -36,11 +36,14 @@ Guide backends (--guide, listen only):
             sessions via the X-Session header.
     hermes  the Hermes profile gateway (--hermes-url, default
             http://127.0.0.1:8642; bearer key from HERMES_API_KEY, or
-            API_SERVER_KEY as fallback): POST /v1/responses, non-streamed,
-            continuity via the server-side `conversation` parameter — one
-            named conversation per aX sender. NOTE: in hermes mode the
-            mention text goes to whatever model the profile runs
-            (possibly hosted).
+            API_SERVER_KEY as fallback): POST /v1/chat/completions,
+            non-streamed, only the new user message in the body —
+            continuity via the X-Hermes-Session-Id header (server-side
+            state.db history, one session per aX sender; chosen over
+            /v1/responses' `conversation`, whose 100-response LRU would
+            silently truncate long threads). 429 (concurrency cap) gets
+            one ~2s retry. NOTE: in hermes mode the mention text goes to
+            whatever model the profile runs (possibly hosted).
 
 aX scope: this bridge uses ONLY the `messages` tool — send, check, and
 receiving mentions over SSE. It never touches tasks/agents/spaces/context.
@@ -393,29 +396,39 @@ def resolve_hermes_key(env: dict) -> str | None:
     return env.get("HERMES_API_KEY") or env.get("API_SERVER_KEY") or None
 
 
-def build_hermes_request(prompt: str, conversation: str) -> dict:
-    """The /v1/responses body for one mention.
+def build_hermes_request(
+    prompt: str, session_id: str, api_key: str
+) -> tuple[dict, dict]:
+    """(body, headers) for one mention via POST /v1/chat/completions.
 
-    Continuity choice: the Hermes api-server docs' `conversation`
-    parameter — "the server automatically chains to the latest response
-    in that conversation" — so one named conversation per aX sender
-    (the same ax-<sender> key the shelf path uses) gives per-sender
-    threads with zero client-side history bookkeeping.
+    Continuity choice (docs/hermes-reference.md §7): the
+    `X-Hermes-Session-Id` header — server-owned continuity, verified in
+    source: "history is loaded from state.db instead of from the
+    request body", so the body carries ONLY the new user message. One
+    session per aX sender (the same ax-<sender> key the shelf path
+    uses). Switched from /v1/responses' `conversation` param, whose
+    100-stored-responses LRU eviction would silently truncate
+    long-lived threads (§10). The header requires API-key auth (403
+    otherwise); the id echoes back in the response.
     """
-    return {
+    body = {
         "model": HERMES_MODEL,
-        "input": prompt,
-        "conversation": conversation,
-        "store": True,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
     }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "X-Hermes-Session-Id": session_id,
+    }
+    return body, headers
 
 
 def extract_hermes_reply(payload: dict) -> str:
-    """The assistant text out of a /v1/responses payload, think-stripped.
+    """The assistant text out of a Hermes reply payload, think-stripped.
 
-    Reads the documented shape (output[] items of type "message" whose
-    content holds "output_text" blocks) and falls back to the
-    /v1/chat/completions shape (choices[0].message.content) so either
+    Reads the /v1/chat/completions shape (choices[0].message.content)
+    and keeps the /v1/responses shape (output[] items of type "message"
+    holding "output_text" blocks) as a tolerated fallback, so either
     endpoint's answer parses. Empty replies raise GuideError — the
     bridge never sends blanks or error dumps to aX.
     """
@@ -845,32 +858,50 @@ def guide_reply_for(mention: dict, guide_url: str, brain: str | None) -> str:
 # --- the guide (Hermes profile gateway) ----------------------------------------
 
 
-def hermes_reply_for(mention: dict, hermes_url: str, api_key: str | None) -> str:
+HERMES_RETRY_DELAY = 2.0  # seconds before the single 429 retry
+
+
+def hermes_reply_for(
+    mention: dict, hermes_url: str, api_key: str | None, sleep=time.sleep
+) -> str:
     """Route one mention through the Hermes profile gateway.
 
-    POST /v1/responses (bearer auth) with the same [aX message from @x]
-    prefix; continuity via the server-side `conversation` parameter, one
-    conversation per sender. Non-streamed — an aX reply is one message.
-    Any failure (down, 401, junk body) raises GuideError: the caller
-    logs it locally and sends NOTHING to aX.
+    POST /v1/chat/completions with the same [aX message from @x] prefix;
+    continuity via the X-Hermes-Session-Id header (one server-side
+    session per sender — see build_hermes_request). Non-streamed — an aX
+    reply is one message. A 429 (the gateway's shared
+    max_concurrent_runs cap) gets ONE retry after ~2s; any other failure
+    (down, 401/403, junk body) raises GuideError immediately. Either
+    way the caller only logs locally and sends NOTHING to aX.
     """
     import httpx
 
     if not api_key:
         raise GuideError("no Hermes key — set HERMES_API_KEY (or API_SERVER_KEY)")
     prompt = build_guide_prompt(mention["sender"], mention["text"])
-    payload = build_hermes_request(prompt, session_key(mention["sender"]))
-    try:
-        response = httpx.post(
-            hermes_url.rstrip("/") + "/v1/responses",
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=httpx.Timeout(30.0, read=GUIDE_TIMEOUT),
+    body, headers = build_hermes_request(prompt, session_key(mention["sender"]), api_key)
+    for attempt in (1, 2):
+        try:
+            response = httpx.post(
+                hermes_url.rstrip("/") + "/v1/chat/completions",
+                json=body,
+                headers=headers,
+                timeout=httpx.Timeout(30.0, read=GUIDE_TIMEOUT),
+            )
+        except httpx.HTTPError as error:
+            raise GuideError(f"Hermes gateway unreachable at {hermes_url}: {error!r}")
+        if response.status_code != 429:
+            break
+        if attempt == 1:
+            log(f"Hermes gateway busy (429) — retrying once in {HERMES_RETRY_DELAY:.0f}s")
+            sleep(HERMES_RETRY_DELAY)
+    if response.status_code == 429:
+        raise GuideError("Hermes gateway still busy (429) after one retry — giving up")
+    if response.status_code in (401, 403):
+        raise GuideError(
+            f"Hermes gateway rejected the key ({response.status_code}) — "
+            "check HERMES_API_KEY"
         )
-    except httpx.HTTPError as error:
-        raise GuideError(f"Hermes gateway unreachable at {hermes_url}: {error!r}")
-    if response.status_code == 401:
-        raise GuideError("Hermes gateway rejected the key (401) — check HERMES_API_KEY")
     if response.status_code >= 400:
         raise GuideError(f"Hermes gateway returned HTTP {response.status_code}")
     try:
