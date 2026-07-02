@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import urllib.parse
 from pathlib import Path
 
@@ -24,6 +25,23 @@ def test_classify_url_direct_audio():
 def test_classify_url_html_page_treated_as_page():
     url = "https://www.dhammatalks.org/audio/morning/2026/260612-patience.html"
     assert fetch_talk.classify_url(url) == "page"
+
+
+def test_classify_url_reading_hosts_are_readings():
+    # Sutta pages are text sources, never audio hunts.
+    assert (
+        fetch_talk.classify_url("https://www.dhammatalks.org/suttas/SN/SN36_6.html")
+        == "reading"
+    )
+    assert (
+        fetch_talk.classify_url("https://suttacentral.net/sn36.6/en/sujato")
+        == "reading"
+    )
+    # Talk pages on the same site stay pages (audio-link hunts).
+    assert (
+        fetch_talk.classify_url("https://www.dhammatalks.org/audio/morning/2019/190531-anger-issues.html")
+        == "page"
+    )
 
 
 def test_find_audio_link_in_dhammatalks_page():
@@ -386,4 +404,178 @@ def test_ensure_valid_transcript_removes_a_junk_fresh_ingest(tmp_path):
     )
     fetch_talk.ensure_valid_transcript(talk, fresh=True)
     assert talk.exists()
+
+
+# --- readings: text pages ingest as transcripts --------------------------------
+
+DHAMMATALKS_SUTTA_HTML = """<html><head>
+<title>SN 36:6  The Arrow | Sallattha Sutta | sutta on dhammatalks.org</title>
+<script>var junk = "never body text";</script>
+<style>.hidden { color: red; }</style>
+</head><body>
+<nav><a href="/suttas/SN/SN36_5.html">Previous page</a></nav>
+<main id="content" class="container px-0">
+<div id="sutta">
+<h1 id="SN36.6">The Arrow<br>Sallattha Sutta  (SN 36:6)</h1>
+<p>“Monks, an uninstructed run-of-the-mill person feels feelings of pleasure.”</p>
+<p>“When touched with a feeling of pain, he sorrows &amp; grieves.”</p>
+<div class="verse"><p>The discerning person,</p><p>learned,</p></div>
+</div><!--end:sutta-->
+</main>
+<div class="footer container"><ul><li><a href="/search.html">search everywhere</a></li></ul></div>
+</body></html>"""
+
+GENERIC_PAGE_HTML = """<html><head><title>On Patience | some site</title>
+<script>tracker();</script></head>
+<body>
+<nav><a href="/">home</a> <a href="/about">about the site</a></nav>
+<div class="content">
+<p>Patience is the antidote the texts keep returning to.</p>
+<p>It is not grim endurance.</p>
+</div>
+<footer>copyright somewhere</footer>
+</body></html>"""
+
+
+def test_extract_reading_dhammatalks_sutta_shape():
+    reading = fetch_talk.extract_reading(
+        DHAMMATALKS_SUTTA_HTML, "https://www.dhammatalks.org/suttas/SN/SN36_6.html"
+    )
+    # The title is the page's, with site tails dropped.
+    assert reading["title"] == "SN 36:6 The Arrow"
+    text = reading["text"]
+    assert "uninstructed run-of-the-mill person" in text
+    assert "sorrows & grieves" in text  # entities unescaped
+    assert "The discerning person" in text
+    # Boilerplate never leaks: nav, footer, scripts, styles.
+    assert "Previous page" not in text
+    assert "search everywhere" not in text
+    assert "junk" not in text and "color: red" not in text
+    # Paragraphs survive as blank-line breaks.
+    assert "\n\n" in text
+
+
+def test_extract_reading_generic_fallback_takes_the_body_text():
+    reading = fetch_talk.extract_reading(
+        GENERIC_PAGE_HTML, "https://example.org/on-patience.html"
+    )
+    assert reading["title"] == "On Patience"
+    assert "not grim endurance" in reading["text"]
+    assert "Patience is the antidote" in reading["text"]
+    assert "about the site" not in reading["text"]
+    assert "tracker" not in reading["text"]
+    assert "copyright somewhere" not in reading["text"]
+
+
+SUTTACENTRAL_API_JSON = json.dumps(
+    {
+        "translation_text": {
+            "sn36.6:0.1": "Linked Discourses 36.6 ",
+            "sn36.6:0.3": "An Arrow ",
+            "sn36.6:1.1": "“Mendicants, an unlearned ordinary person feels pleasant feeling. ",
+            "sn36.6:1.2": "So does a learned noble disciple. ",
+            "sn36.6:2.1": "It’s like a person struck by two arrows. ",
+        },
+        "keys_order": [
+            "sn36.6:0.1", "sn36.6:0.3", "sn36.6:1.1", "sn36.6:1.2", "sn36.6:2.1",
+        ],
+    }
+)
+
+
+def test_suttacentral_reading_speaks_the_bilara_api(monkeypatch):
+    # suttacentral.net pages are a JS shell with no text in them — the
+    # extractor asks the public bilara API for the segments instead.
+    calls = []
+
+    def fake_fetch(url):
+        calls.append(url)
+        return SUTTACENTRAL_API_JSON
+
+    monkeypatch.setattr(fetch_talk, "fetch_page", fake_fetch)
+    reading = fetch_talk.fetch_reading("https://suttacentral.net/sn36.6/en/sujato")
+    assert calls == ["https://suttacentral.net/api/bilarasuttas/sn36.6/sujato?lang=en"]
+    assert reading["title"] == "An Arrow"
+    # Same-section segments join into one paragraph; sections break.
+    assert (
+        "unlearned ordinary person feels pleasant feeling. So does a learned "
+        "noble disciple." in reading["text"]
+    )
+    assert "\n\n" in reading["text"]
+    # Heading segments (section 0) feed the title, not the body.
+    assert "Linked Discourses" not in reading["text"]
+    # A bare suttacentral URL (no translator) aborts with clear words.
+    with pytest.raises(SystemExit):
+        fetch_talk.fetch_suttacentral_reading("https://suttacentral.net/sn36.6")
+
+
+def test_probe_source_reading_kind_and_word_count(monkeypatch):
+    monkeypatch.setattr(fetch_talk, "fetch_page", lambda url: DHAMMATALKS_SUTTA_HTML)
+    probe = fetch_talk.probe_source("https://www.dhammatalks.org/suttas/SN/SN36_6.html")
+    assert probe["kind"] == "reading"
+    assert probe["title"] == "SN 36:6 The Arrow"
+    assert probe["words"] == len(probe["text"].split())
+    assert probe["words"] > 0
+    assert probe["duration"] == "~1 min read"
+    assert probe["final_url"] == "https://www.dhammatalks.org/suttas/SN/SN36_6.html"
+    # A page that offers no audio link is a reading too — never an error.
+    monkeypatch.setattr(fetch_talk, "fetch_page", lambda url: GENERIC_PAGE_HTML)
+    probe = fetch_talk.probe_source("https://example.org/on-patience.html")
+    assert probe["kind"] == "reading"
+    assert "not grim endurance" in probe["text"]
+
+
+def test_reading_minutes():
+    assert fetch_talk.reading_minutes(5) == 1  # never zero
+    assert fetch_talk.reading_minutes(100) == 1
+    assert fetch_talk.reading_minutes(1000) == 5
+
+
+def test_ingest_reading_writes_transcript_and_index(tmp_path):
+    library = tmp_path / "library"
+    text = ("Patience is the antidote. " * 40).strip()
+    slug = fetch_talk.ingest_reading(
+        library=library,
+        url="https://www.dhammatalks.org/suttas/SN/SN36_6.html",
+        title="SN 36:6 The Arrow",
+        teacher="trans. Thanissaro Bhikkhu",
+        themes="two arrows, feeling",
+        text=text,
+        existing=None,
+    )
+    assert slug == "sn-36-6-the-arrow"
+    md = (library / slug / "transcript.md").read_text()
+    assert md.startswith("# SN 36:6 The Arrow")
+    assert "- Teacher: trans. Thanissaro Bhikkhu" in md
+    assert "- Source: https://www.dhammatalks.org/suttas/SN/SN36_6.html" in md
+    # The header is honest: an extraction, no audio, the page is the authority.
+    assert "- Origin: reading" in md
+    assert "extract" in md
+    assert "## Full Transcript" in md
+    assert "Patience is the antidote." in md
+    # No audio, no transcript.json — a reading has neither.
+    assert not list((library / slug).glob("audio.*"))
+    assert not (library / slug / "transcript.json").exists()
+    index = (library / "INDEX.md").read_text()
+    assert f"## {slug}" in index
+    assert "- **Origin:** reading" in index
+    assert "- **Duration:** ~1 min read" in index
+    assert "- **Themes:** two arrows, feeling" in index
+
+
+def test_ingest_reading_rejects_a_trivial_extraction(tmp_path):
+    library = tmp_path / "library"
+    with pytest.raises(SystemExit) as excinfo:
+        fetch_talk.ingest_reading(
+            library=library,
+            url="https://example.org/x.html",
+            title="X",
+            teacher="Unknown",
+            themes="",
+            text="nothing much",
+            existing=None,
+        )
+    assert "too small" in str(excinfo.value)
+    assert not (library / "x").exists()
+    assert not (library / "INDEX.md").exists()  # nothing indexed
 

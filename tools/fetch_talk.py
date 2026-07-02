@@ -8,6 +8,9 @@
   otherwise download audio and transcribe locally via transcribe_talk.py.
 - Direct audio URLs (.mp3/.m4a/...): download and transcribe.
 - HTML pages (e.g. dhammatalks.org): find the audio link, then as above.
+- Readings (sutta pages — dhammatalks.org/suttas/, suttacentral.net — or
+  any page with no audio link): extract the main text and ingest it as a
+  transcript-only entry. No audio, no transcript.json, one explicit page.
 
 Run with:
     uv run tools/fetch_talk.py <url> --teacher "Ajahn Brahm" --themes "anger, patience"
@@ -181,6 +184,11 @@ def pick_thumbnail_url(info: dict) -> str | None:
     return thumbnails[-1]["url"] if thumbnails else None
 
 
+# URLs that are readings, not recordings (build_shelf keeps a twin — this
+# tool stays standalone): sutta pages ingest as text, never an audio hunt.
+READING_URL_RE = re.compile(r"dhammatalks\.org/suttas/|suttacentral\.net")
+
+
 def classify_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc.lower()
@@ -188,6 +196,8 @@ def classify_url(url: str) -> str:
         return "youtube"
     if parsed.path.lower().endswith(AUDIO_EXTENSIONS):
         return "audio"
+    if READING_URL_RE.search(url):
+        return "reading"
     return "page"
 
 
@@ -201,6 +211,177 @@ def find_audio_link(html: str, base_url: str) -> str | None:
             href = urllib.parse.quote(href, safe="%/:?=&()!$,;'@+*~._-")
             return urllib.parse.urljoin(base_url, href)
     return None
+
+
+# --- readings: text pages ingested as transcript-only entries ------------------
+
+READING_WPM = 200  # a calm reading pace, behind the "~N min read" duration
+
+READING_ORIGIN = (
+    "reading — text extracted from the source page (no audio; "
+    "the page is the authority)"
+)
+
+
+def reading_minutes(words: int) -> int:
+    """An approximate read time in minutes — never zero."""
+    return max(1, round(words / READING_WPM))
+
+
+def fetch_page(url: str) -> str:
+    """One GET, decoded tolerantly — the single network door for pages
+    (and the one seam tests mock)."""
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "second-arrow-study/1.0"}
+    )
+    with urllib.request.urlopen(request) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+_BOILERPLATE_RE = re.compile(
+    r"<(script|style|nav|header|footer|aside|head)\b.*?</\1\s*>", re.I | re.S
+)
+
+# The known reading shapes, most specific first: dhammatalks.org suttas
+# live in <div id="sutta">…</div><!--end:sutta-->; then any <main> or
+# <article>. No match falls back to the whole body minus boilerplate —
+# the largest block of text a simple reader can find.
+_MAIN_BLOCK_PATTERNS = (
+    r'<div[^>]*\bid="sutta"[^>]*>(.*?)</div>\s*<!--\s*end:sutta\s*-->',
+    r"<main\b[^>]*>(.*?)</main\s*>",
+    r"<article\b[^>]*>(.*?)</article\s*>",
+)
+
+
+def html_to_text(fragment: str) -> str:
+    """Block-aware tag stripping: paragraph breaks survive as blank lines."""
+    text = re.sub(r"(?i)<(?:/p|/h[1-6]|/li|/blockquote|/div|br\s*/?)\s*>", "\n\n", fragment)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_module.unescape(text)
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in text.split("\n"):
+        line = " ".join(line.split())
+        if line:
+            current.append(line)
+        elif current:
+            paragraphs.append(" ".join(current))
+            current = []
+    if current:
+        paragraphs.append(" ".join(current))
+    return "\n\n".join(paragraphs)
+
+
+def clean_page_title(title: str) -> str:
+    """'SN 36:6 The Arrow | Sallattha Sutta | sutta on dhammatalks.org'
+    -> 'SN 36:6 The Arrow' — site tails drop away, the name stays."""
+    return (title or "").split("|")[0].strip() or (title or "").strip()
+
+
+def extract_reading(html: str, url: str) -> dict:
+    """{"title", "text"} from a reading page's HTML.
+
+    Honest, dependency-light extraction: boilerplate (scripts, styles,
+    nav, header, footer) is dropped, then the known site shapes are tried
+    (_MAIN_BLOCK_PATTERNS) with the body as the generic fallback. The
+    original page stays the authority — the transcript header downstream
+    says plainly that this is an extraction.
+    """
+    stripped = _BOILERPLATE_RE.sub(" ", html or "")
+    fragment = None
+    for pattern in _MAIN_BLOCK_PATTERNS:
+        match = re.search(pattern, stripped, re.I | re.S)
+        if match:
+            fragment = match.group(1)
+            break
+    if fragment is None:
+        body = re.search(r"<body\b[^>]*>(.*)</body\s*>", stripped, re.I | re.S)
+        fragment = body.group(1) if body else stripped
+    title = clean_page_title(page_title(html) or "") or guess_title_from_filename(
+        Path(urllib.parse.urlparse(url).path).name
+    )
+    return {"title": title, "text": html_to_text(fragment)}
+
+
+_SUTTACENTRAL_URL_RE = re.compile(
+    r"https?://(?:www\.)?suttacentral\.net/([\w.\-]+)/([a-z]{2,3})/([\w.\-]+)"
+)
+
+
+def fetch_suttacentral_reading(url: str) -> dict:
+    """suttacentral.net is a JS app — its pages carry no text. The public
+    bilara API does: /api/bilarasuttas/<uid>/<author>?lang=<lang> answers
+    a segment map plus keys_order. Segments group into paragraphs by
+    their section number; the section-0 headings feed the title.
+    Needs the full URL shape /<uid>/<lang>/<translator>."""
+    match = _SUTTACENTRAL_URL_RE.match(url)
+    if not match:
+        raise SystemExit(
+            "suttacentral.net needs the full sutta URL — "
+            f"https://suttacentral.net/<uid>/<lang>/<translator> (got {url})"
+        )
+    uid, lang, author = match.groups()
+    api = f"https://suttacentral.net/api/bilarasuttas/{uid}/{author}?lang={lang}"
+    data = json.loads(fetch_page(api))
+    segments = data.get("translation_text") or {}
+    order = data.get("keys_order") or sorted(segments)
+    title = ""
+    paragraphs: list[str] = []
+    last_section = None
+    for key in order:
+        piece = (segments.get(key) or "").strip()
+        if not piece:
+            continue
+        section = key.split(":")[-1].split(".")[0]
+        if section == "0":
+            title = piece  # the last heading line wins (the sutta's name)
+            continue
+        if section != last_section:
+            paragraphs.append(piece)
+            last_section = section
+        else:
+            paragraphs[-1] += " " + piece
+    return {"title": title or uid, "text": "\n\n".join(paragraphs)}
+
+
+def fetch_reading(url: str) -> dict:
+    """One reading, fetched and extracted — the site-shape dispatch."""
+    if "suttacentral.net" in urllib.parse.urlparse(url).netloc.lower():
+        return fetch_suttacentral_reading(url)
+    return extract_reading(fetch_page(url), url)
+
+
+def ingest_reading(
+    *, library: Path, url: str, title: str, teacher: str, themes: str,
+    text: str, existing: str | None,
+) -> str:
+    """Write one reading into library/<slug>/: transcript.md only (the
+    honest extraction header), validated like any ingest, then the INDEX
+    entry (Origin: reading, Duration: "~N min read"). Returns the slug."""
+    slug = existing or slugify(title)
+    talk_dir = library / slug
+    talk_dir.mkdir(parents=True, exist_ok=True)
+    (talk_dir / "transcript.md").write_text(
+        render_transcript_markdown(
+            text=text, title=title, teacher=teacher,
+            source_url=url, origin=READING_ORIGIN,
+        ),
+        encoding="utf-8",
+    )
+    ensure_valid_transcript(talk_dir, fresh=existing is None)
+    if existing:
+        return slug
+    update_index(
+        library / "INDEX.md",
+        slug=slug,
+        entry=index_entry(
+            slug=slug, title=title, teacher=teacher, source_url=url,
+            themes=themes or "untagged",
+            duration=f"~{reading_minutes(len(text.split()))} min read",
+            origin="reading", ingested=date.today().isoformat(),
+        ),
+    )
+    return slug
 
 
 def parse_vtt(vtt: str) -> str:
@@ -464,13 +645,29 @@ def transcribe(audio_path: Path, *, talk_dir: Path, title: str, teacher: str, so
         raise SystemExit(f"Transcription produced no transcript.md in {talk_dir}")
 
 
+def _reading_probe(reading: dict, url: str) -> dict:
+    """The probe shape for a reading: kind, title, ~word count, the text
+    itself (carried so the ingest never fetches twice)."""
+    words = len(reading["text"].split())
+    return {
+        "kind": "reading",
+        "title": reading["title"],
+        "teacher": "",
+        "duration": f"~{reading_minutes(words)} min read",
+        "final_url": url,
+        "text": reading["text"],
+        "words": words,
+    }
+
+
 def probe_source(url: str) -> dict:
     """Look before downloading: {kind, title, teacher, duration, final_url}.
 
     YouTube probes via extract_info(download=False); pages are fetched
     once for their <title> and audio link (the link is the final URL);
-    bare audio URLs read their filename. Raises SystemExit when a page
-    has no audio to offer — nothing has been created at this point.
+    bare audio URLs read their filename. A reading URL — or any page
+    with no audio to offer — probes as a reading: title, ~word count,
+    and the extracted text itself. Nothing is created at this point.
     """
     kind = classify_url(url)
     if kind == "youtube":
@@ -482,15 +679,14 @@ def probe_source(url: str) -> dict:
             "duration": meta["duration"],
             "final_url": url,
         }
+    if kind == "reading":
+        return _reading_probe(fetch_reading(url), url)
     if kind == "page":
-        request = urllib.request.Request(
-            url, headers={"User-Agent": "second-arrow-study/1.0"}
-        )
-        with urllib.request.urlopen(request) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        html = fetch_page(url)
         audio_url = find_audio_link(html, url)
         if not audio_url:
-            raise SystemExit(f"No audio link found on page: {url}")
+            # A page with no recording IS a reading — the text itself.
+            return _reading_probe(extract_reading(html, url), url)
         return {
             "kind": "page",
             "title": page_title(html) or guess_title_from_filename(
@@ -612,7 +808,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "url", nargs="?",
-        help="Talk URL: YouTube, direct audio, or a page containing an audio link",
+        help="Source URL: YouTube, direct audio, a page containing an audio "
+             "link, or a reading (sutta/text page — ingested as text)",
     )
     parser.add_argument("--title", help="Talk title (defaults to cleaned metadata or URL filename)")
     parser.add_argument("--teacher", default="", help="Teacher name (defaults to YouTube uploader if known)")
@@ -678,7 +875,9 @@ def main() -> None:
     # title) checks out — a wrong link aborts empty-handed.
     probe = probe_source(args.url)
     print(f"probe: {probe['title']!r}"
+          + (" — reading" if probe["kind"] == "reading" else "")
           + (f" — {probe['teacher']}" if probe['teacher'] else "")
+          + (f" — ~{probe['words']} words" if probe.get("words") else "")
           + (f" — {probe['duration']}" if probe['duration'] else "")
           + f" — {probe['final_url']}")
     if args.expect_title and not titles_match(args.expect_title, probe["title"]):
@@ -689,6 +888,25 @@ def main() -> None:
     if args.probe_only:
         return
 
+    if probe["kind"] == "reading":
+        # A text source: transcript.md only (the extraction, honestly
+        # labeled), no audio, no transcript.json. Explicit and single-item
+        # like every ingest — no links are ever followed from the page.
+        slug = ingest_reading(
+            library=args.library,
+            url=args.url,
+            title=args.title or probe["title"],
+            teacher=args.teacher or "Unknown",
+            themes=args.themes,
+            text=probe["text"],
+            existing=existing,
+        )
+        print(
+            f"Refreshed library/{existing}/ in place"
+            if existing
+            else f"Ingested into library/{slug}/ (reading)"
+        )
+        return
     if kind == "youtube":
         meta = probe_youtube(args.url)
         title = args.title or clean_youtube_title(meta["title"])
