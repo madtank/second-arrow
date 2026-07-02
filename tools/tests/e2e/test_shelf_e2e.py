@@ -86,9 +86,10 @@ def test_page_loads_and_sidebar_shows_the_path(page, shelf_server):
     assert quiet.locator(".nav-state.nav-done").count() == 1
     far = page.locator('#talk-nav a[href="#talk/far-talk"]')
     assert far.locator(".nav-state.nav-next").count() == 1
-    # A queued talk not yet fetched appears muted — but it is a real
-    # link now: a room-in-waiting (see the stub-room test).
-    assert page.locator("#talk-nav li.nav-unfetched a").count() == 1
+    # Queued talks not yet fetched appear muted — but they are real
+    # links now: rooms-in-waiting (see the stub-room tests). One talk
+    # (Anger Issues) and one reading (The Arrow).
+    assert page.locator("#talk-nav li.nav-unfetched a").count() == 2
 
 
 def test_rooms_navigate_by_hash(page, shelf_server):
@@ -553,19 +554,19 @@ def test_moment_chip_seeks_the_player(page, shelf_server):
 
 
 def test_missing_primer_generator_sends_the_canned_ask(page, shelf_server):
-    # far-talk has no primer anywhere: the Primer section still renders,
-    # holding its ✦ invitation.
+    # far-talk (a reading) has no primer anywhere: the Primer section
+    # still renders, holding its ✦ invitation — adapted for a reading.
     _open_shelf(page, shelf_server.base, "#talk/far-talk")
     button = page.wait_for_selector("#talk-far-talk .make-primer")
-    assert "ask the guide to write & speak a primer" in button.inner_text()
+    assert "how to read this" in button.inner_text()
     button.click()
     # The canned ask lands in the conversation as the user's own message…
     page.wait_for_selector(
-        '.chat-msg.chat-user:has-text("write a 60-90 second primer")',
+        '.chat-msg.chat-user:has-text("how to approach the text, what to notice")',
         state="attached",
     )
     page.wait_for_selector(
-        ".chat-msg.chat-user:has-text(\"under '## Primer', speak it to primer.mp3\")",
+        ".chat-msg.chat-user:has-text(\"into the notes under '## Primer'\")",
         state="attached",
     )
     # …and the guide answers through the normal pipeline.
@@ -573,6 +574,10 @@ def test_missing_primer_generator_sends_the_canned_ask(page, shelf_server):
         '.chat-msg.chat-guide:has-text("One breath, then we begin")',
         state="attached",
     )
+    # bare-yt (a talk) keeps the spoken-primer ask.
+    page.evaluate("location.hash = '#talk/bare-yt'")
+    talk_button = page.wait_for_selector("#talk-bare-yt .make-primer")
+    assert "write & speak a primer" in talk_button.inner_text()
 
 
 def test_prompt_chips_show_on_focus_send_and_hide_on_typing(page, shelf_server):
@@ -629,6 +634,99 @@ def test_stub_room_opens_and_offers_the_fetch(page, shelf_server):
         '.chat-msg.chat-guide:has-text("One breath, then we begin")',
         state="attached",
     )
+
+
+def test_stub_room_is_a_decision_point_with_three_doors(page, shelf_server):
+    _open_shelf(page, shelf_server.base, "#talk/queued-anger-issues")
+    page.wait_for_selector("#talk-queued-anger-issues.active")
+    room = page.inner_text("#talk-queued-anger-issues")
+    # The copy invites the choice; the three doors stand together.
+    assert "build it, set it aside, or talk it through" in room
+    assert page.locator("#talk-queued-anger-issues .fetch-stub").count() == 1
+    assert page.locator("#talk-queued-anger-issues .skip-stub").count() == 1
+    assert page.locator("#talk-queued-anger-issues .ask-stub").count() == 1
+    assert "✦ build this room" in room
+    assert "skip — not for me right now" in room
+    assert "ask the guide about this" in room
+    # The reading stub's build door fetches TEXT, and its ask says so.
+    page.evaluate(
+        "location.hash = '#talk/queued-the-arrow'"
+    )
+    page.wait_for_selector(
+        "#talk-queued-the-arrow.active"
+    )
+    reading_room = page.inner_text(
+        "#talk-queued-the-arrow"
+    )
+    assert "this is a reading" in reading_room
+    page.click("#talk-queued-the-arrow .fetch-stub")
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("Please fetch this reading — '
+        'https://www.dhammatalks.org/suttas/SN/SN36_6.html")',
+        state="attached",
+    )
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("how to read this")',
+        state="attached",
+    )
+
+
+def test_skip_sets_aside_instantly_and_the_guide_follows_up(page, shelf_server):
+    study_path = shelf_server.root / "STUDY.md"
+    _open_shelf(
+        page, shelf_server.base, "#talk/queued-the-arrow"
+    )
+    page.wait_for_selector(
+        "#talk-queued-the-arrow.active"
+    )
+    page.click("#talk-queued-the-arrow .skip-stub")
+    # The mark is REAL with no guide involvement: the SERVER moved the
+    # entry to Studied with the set-aside note (the fake brain only ever
+    # streams canned text — it could not have written this).
+    _wait_for_text_in_file(
+        study_path,
+        "- **The Arrow (Sallatha Sutta, SN 36:6)** — (set aside ",
+    )
+    studied = study_path.read_text().split("## Studied")[1].split("## Queued")[0]
+    assert "didn't call right now" in studied
+    # The soft refresh removes the stub room and its sidebar line —
+    # skipped means gone from the queue — and the page lands safely home.
+    page.wait_for_selector(
+        "#talk-queued-the-arrow",
+        state="detached",
+    )
+    page.wait_for_selector("#view-home.active")
+    assert (
+        page.locator(
+            '#talk-nav a[href="#talk/queued-the-arrow"]'
+        ).count()
+        == 0
+    )
+    # THEN the follow-up — the guide's only job — in the user's voice,
+    # answered in the same conversation.
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("I set aside The Arrow (Sallatha Sutta, '
+        'SN 36:6) — it didn\'t call to me right now.")',
+        state="attached",
+    )
+    page.wait_for_selector(
+        '.chat-msg.chat-guide:has-text("One breath, then we begin")',
+        state="attached",
+    )
+
+
+def test_reading_room_renders_the_text_readably(page, shelf_server):
+    # far-talk is a reading (transcript.md only): its room IS the text —
+    # open, readable, with no player and no seek anywhere.
+    _open_shelf(page, shelf_server.base, "#talk/far-talk")
+    page.wait_for_selector("#talk-far-talk.active")
+    text_block = page.wait_for_selector("#talk-far-talk .reading-text")
+    assert text_block.is_visible()
+    assert "Words." in text_block.inner_text()
+    assert "The reading" in page.inner_text("#talk-far-talk")
+    assert page.locator("#talk-far-talk audio").count() == 0
+    assert page.locator("#talk-far-talk .moment-chip").count() == 0
+    assert page.locator("#talk-far-talk .seg").count() == 0
 
 
 # --- busy, visibly: the working line, stop, and the send queue ---------------

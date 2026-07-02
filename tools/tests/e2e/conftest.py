@@ -73,6 +73,7 @@ STUDY_MD = """# Study Memory
 ## Queued
 - **Far Talk (Ajahn Test)** — next up.
 - **Anger Issues (Thanissaro Bhikkhu, 2019)** — not in the library yet.
+- **The Arrow (Sallatha Sutta, SN 36:6)** — read alongside.
 
 ## Open questions
 - What does the second arrow feel like in the body?
@@ -92,6 +93,11 @@ CURRICULUM_MD = """# Cluster 1: Anger & the Second Arrow
 - **Anger Issues — Thanissaro Bhikkhu (2019-05-31, morning talk)** — https://www.dhammatalks.org/audio/morning/2019/190531-anger-issues.html
   A short, direct look at working with anger as it arises.
   Reach for it when anger feels righteous.
+
+## The source teaching
+
+- **The Arrow (Sallatha Sutta, SN 36:6) — trans. Thanissaro Bhikkhu** — https://www.dhammatalks.org/suttas/SN/SN36_6.html
+  The original two-arrows text. Short. Read it once early, return often.
 """
 
 # The anchored-listening artifact: the exact contract CLAUDE.md gives tool
