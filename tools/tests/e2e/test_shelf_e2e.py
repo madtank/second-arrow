@@ -86,8 +86,9 @@ def test_page_loads_and_sidebar_shows_the_path(page, shelf_server):
     assert quiet.locator(".nav-state.nav-done").count() == 1
     far = page.locator('#talk-nav a[href="#talk/far-talk"]')
     assert far.locator(".nav-state.nav-next").count() == 1
-    # A queued talk not yet fetched appears muted, not clickable.
-    assert page.locator("#talk-nav li.nav-unfetched").count() == 1
+    # A queued talk not yet fetched appears muted — but it is a real
+    # link now: a room-in-waiting (see the stub-room test).
+    assert page.locator("#talk-nav li.nav-unfetched a").count() == 1
 
 
 def test_rooms_navigate_by_hash(page, shelf_server):
@@ -425,7 +426,19 @@ def test_mark_as_heard_flips_the_card_in_place(page, shelf_server):
     assert "far-talk" in {entry["slug"] for entry in entries}
 
 
-def test_done_for_now_sends_the_canned_message(page, shelf_server):
+def _wait_for_text_in_file(path, needle, timeout=10.0):
+    """Poll a scratch file for a substring (server-side write, no page
+    hook to wait on) — tight loop, never a blind long sleep."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists() and needle in path.read_text():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{needle!r} never appeared in {path}")
+
+
+def test_done_is_server_first_and_reopen_is_its_inverse(page, shelf_server):
+    study_path = shelf_server.root / "STUDY.md"
     _open_shelf(page, shelf_server.base, "#talk/demon-story")
     page.wait_for_selector("#talk-demon-story.active")
     page.click("#talk-demon-story .done-for-now")
@@ -434,27 +447,49 @@ def test_done_for_now_sends_the_canned_message(page, shelf_server):
     page.wait_for_selector(
         '#talk-demon-story .done-for-now:has-text("✓ done — finding what\'s next…")'
     )
-    assert page.locator("#talk-demon-story .done-for-now").is_disabled()
     page.wait_for_selector(
         '#talk-nav a[href="#talk/demon-story"] .nav-state.nav-done'
     )
-    # The canned ask goes through the normal chat pipeline, in the user's
-    # own voice...
-    page.wait_for_selector(
-        '.chat-msg.chat-user:has-text("I\'m done with Demon Story for now — '
-        'mark it done on the path and line up what\'s next.")',
-        state="attached",
+    # The mark is REAL with no guide involvement: the SERVER moved the
+    # path (the fake brain only ever streams canned text — it could not
+    # have written this) and recorded the listen.
+    _wait_for_text_in_file(
+        study_path, "- **Demon Story** — (done for now — not yet discussed)"
     )
-    # ...and the guide answers in the same conversation.
-    page.wait_for_selector(
-        '.chat-msg.chat-guide:has-text("One breath, then we begin")',
-        state="attached",
-    )
-    # The click also recorded the listen (none existed for demon-story).
     entries = shelf_server.module.load_listening(
         shelf_server.library / ".listening.jsonl"
     )
     assert "demon-story" in {entry["slug"] for entry in entries}
+    # The card flips in place to the done state (soft refresh)...
+    page.wait_for_selector('#talk-demon-story .status-done')
+    # ...and the follow-up — the guide's only job — went through chat in
+    # the user's voice, answered in the same conversation.
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("I\'m done with Demon Story for now — '
+        'the shelf has already marked it done on the path.")',
+        state="attached",
+    )
+    page.wait_for_selector(
+        '.chat-msg.chat-guide:has-text("One breath, then we begin")',
+        state="attached",
+    )
+    # --- the round trip: reopen is the exact inverse, also server-first.
+    page.click("#talk-demon-story .reopen-talk")
+    page.wait_for_selector(
+        '#talk-nav a[href="#talk/demon-story"] .nav-state.nav-next'
+    )
+    _wait_for_text_in_file(study_path, "- **Demon Story** — (reopened ")
+    assert "(done for now — not yet discussed)" not in study_path.read_text().split(
+        "## Studied"
+    )[1].split("## Queued")[0]
+    # Back on the path AND already heard: the card reads "heard — not
+    # closed out yet" with the done button re-armed — the honest state.
+    page.wait_for_selector("#talk-demon-story .status-heard")
+    page.wait_for_selector("#talk-demon-story .done-for-now")
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("I\'ve reopened Demon Story")',
+        state="attached",
+    )
 
 
 def test_artifact_seek_postmessage_drives_the_player(page, shelf_server):
@@ -471,3 +506,100 @@ def test_artifact_seek_postmessage_drives_the_player(page, shelf_server):
         " return a && !a.paused && Math.abs(a.currentTime - 4.5) < 0.5; }"
     )
     assert page.evaluate("window.saPlayingSlug()") == "quiet-mind"
+
+
+def test_moment_chip_seeks_the_player(page, shelf_server):
+    _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+    # The guide's curated moments render as chips in an open details
+    # block (no fold to click first) — the moments are the invitation.
+    chip = page.wait_for_selector(
+        '#talk-quiet-mind .moments[data-slug="quiet-mind"] .moment-chip'
+    )
+    assert "listen from 0:04" in chip.inner_text()
+    assert "how it settles" in chip.inner_text()
+    chip.click()
+    # Exactly a transcript-line click: seek to the stamp and play.
+    page.wait_for_function(
+        f"() => {{ const a = {AUDIO_JS};"
+        " return a && !a.paused && Math.abs(a.currentTime - 4) < 0.5; }"
+    )
+    assert page.evaluate("window.saPlayingSlug()") == "quiet-mind"
+    # The out-of-range fixture moment (12:00 > 9s transcript) never
+    # rendered — grounded chips only.
+    assert page.locator('#talk-quiet-mind .moment-chip[data-start="720"]').count() == 0
+
+
+def test_stub_room_opens_and_offers_the_fetch(page, shelf_server):
+    _open_shelf(page, shelf_server.base)
+    # The queued-but-unfetched entry is a real link now, not a dead end.
+    page.click("#talk-nav li.nav-unfetched a")
+    page.wait_for_selector("#talk-queued-anger-issues.active")
+    room = page.inner_text("#talk-queued-anger-issues")
+    assert "Anger Issues" in room
+    assert "not fetched yet" in room
+    assert "on the path because: A short, direct look" in room
+    assert "downloads are explicit — this fetches one talk" in room
+    # The one primary action sends the canned ingest ask through the
+    # normal (queue-aware) chat pipeline, in the user's own voice.
+    page.click("#talk-queued-anger-issues .fetch-stub")
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("Please fetch Anger Issues '
+        '(Thanissaro Bhikkhu) — curriculum URL '
+        'https://www.dhammatalks.org/audio/morning/2019/190531-anger-issues.html")',
+        state="attached",
+    )
+    page.wait_for_selector(
+        '.chat-msg.chat-guide:has-text("One breath, then we begin")',
+        state="attached",
+    )
+
+
+# --- busy, visibly: the working line, stop, and the send queue ---------------
+
+
+def test_stop_button_ends_a_streaming_turn(page, shelf_server):
+    _open_shelf(page, shelf_server.base)
+    _send_chat(page, "count slowly for me")
+    # The persistent working line appears the moment the turn starts...
+    page.wait_for_selector("#chat-working:not([hidden])")
+    assert "the guide is thinking…" in page.inner_text("#chat-working")
+    # ...and the reply is genuinely streaming when we pull the cord.
+    page.wait_for_selector('.chat-msg.chat-guide:has-text("count 1")')
+    page.click("#chat-stop")
+    # The turn ends with the quiet stopped line; the partial reply stays.
+    page.wait_for_selector(
+        '.chat-msg.chat-system:has-text("— stopped —")', state="attached"
+    )
+    page.wait_for_selector("#chat-working[hidden]", state="attached")
+    bubbles = page.locator(".chat-msg.chat-guide").all_inner_texts()
+    assert any("count 1" in text for text in bubbles)
+    # Never the full canned count: the stream really was cut short.
+    assert not any("count 14" in text for text in bubbles)
+
+
+def test_send_while_busy_queues_visibly_then_delivers(page, shelf_server):
+    _open_shelf(page, shelf_server.base)
+    _send_chat(page, "count slowly for me")
+    page.wait_for_selector('.chat-msg.chat-guide:has-text("count 1")')
+    # A send mid-turn is never dropped: it queues, visibly.
+    page.fill("#chat-input", "and here is my follow-up thought")
+    page.click("#chat-send")
+    page.wait_for_selector("#chat-queued:not([hidden])")
+    note = page.inner_text("#chat-queued")
+    assert "queued — the guide is finishing something" in note
+    assert "and here is my follow-up thought" in note
+    assert (
+        page.locator('.chat-msg.chat-user:has-text("follow-up thought")').count() == 0
+    )
+    # The turn ends (stopped here, for speed) — the queue empties at once.
+    page.click("#chat-stop")
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("and here is my follow-up thought")'
+    )
+    page.wait_for_selector("#chat-queued[hidden]", state="attached")
+    # The queued message got its own real turn and reply.
+    page.wait_for_function(
+        "() => { const gs = document.querySelectorAll('.chat-msg.chat-guide');"
+        " return gs.length && gs[gs.length - 1].textContent"
+        ".includes('One breath, then we begin'); }"
+    )

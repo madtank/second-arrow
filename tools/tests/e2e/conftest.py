@@ -88,6 +88,10 @@ CURRICULUM_MD = """# Cluster 1: Anger & the Second Arrow
 - **Demon Story — Ajahn Brahm (2011, 56 min)** — https://www.youtube.com/watch?v=me7Wm5LOpx0
   The classic story-rich Brahm talk. Reach for it when you want the
   teaching carried by a story instead of an argument.
+
+- **Anger Issues — Thanissaro Bhikkhu (2019-05-31, morning talk)** — https://www.dhammatalks.org/audio/morning/2019/190531-anger-issues.html
+  A short, direct look at working with anger as it arises.
+  Reach for it when anger feels righteous.
 """
 
 # The anchored-listening artifact: the exact contract CLAUDE.md gives tool
@@ -349,7 +353,27 @@ def fake_hermes():
             body = json.loads(self.rfile.read(length)) if length else {}
             captured["chat"].append({"body": body, "headers": dict(self.headers)})
             messages = body.get("messages") or [{}]
-            payload = _hermes_sse_reply(str(messages[-1].get("content") or ""))
+            prompt = str(messages[-1].get("content") or "")
+            if "count slowly" in prompt.lower():
+                # The slow marker: a genuinely streaming turn (~4s) so the
+                # stop button and the busy queue have something to catch.
+                # No Content-Length — the client reads until close.
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                try:
+                    for i in range(15):
+                        frame = "data: " + json.dumps(
+                            {"choices": [{"delta": {"content": f"count {i} "}}]}
+                        ) + "\n\n"
+                        self.wfile.write(frame.encode())
+                        self.wfile.flush()
+                        time.sleep(0.25)
+                    self.wfile.write(b"data: [DONE]\n\n")
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass  # the shelf stopped the turn: expected
+                return
+            payload = _hermes_sse_reply(prompt)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(payload)))
