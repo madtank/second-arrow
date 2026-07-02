@@ -585,7 +585,7 @@ STYLE = """
 # output stays inert text.
 CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 <template id="avatar-guide">
-<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4a8.6 8.6 0 1 0 7 3.6" fill="none" stroke="#a9853f" stroke-width="1.7" stroke-linecap="round"/></svg>
+<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.2 C9.6 18.4 4.9 15.7 4.9 10.7 C4.9 6.6 8 3.6 12 2.9 C16 3.6 19.1 6.6 19.1 10.7 C19.1 15.7 14.4 18.4 12 21.2 Z" fill="none" stroke="#a9853f" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/><path d="M12 5.6 V18.4" fill="none" stroke="#a9853f" stroke-width="1.1" stroke-linecap="round" opacity="0.65"/></svg>
 </template>
 <template id="avatar-user">
 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.4" r="3.4" fill="#7a6a50"/><path d="M4.6 20c1.6-4 5-5.6 7.4-5.6s5.8 1.6 7.4 5.6" fill="none" stroke="#7a6a50" stroke-width="2.4" stroke-linecap="round"/></svg>

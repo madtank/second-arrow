@@ -1020,11 +1020,16 @@ def test_go_button_is_textcontent_only(tmp_path):
 def test_chat_bubbles_carry_avatars_and_run_labels(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # Inline-SVG avatars live in static templates (cloned per message —
-    # never built from message content): an enso for the guide, a small
-    # person for the user.
-    assert re.search(r'<template id="avatar-guide">\s*<svg', html)
+    # never built from message content): a bodhi leaf for the guide (an
+    # enso read as a loading spinner at bubble size — no rings, ever),
+    # a small person for the user.
+    guide = re.search(r'<template id="avatar-guide">\s*<svg.*?</template>', html, re.S)
+    assert guide and guide.group(0).count("<path") == 2  # outline + vein
+    assert "<circle" not in guide.group(0)  # nothing ring-shaped
     assert re.search(r'<template id="avatar-user">\s*<svg', html)
     assert "cloneNode(true)" in html
+    # The real thinking indicator stays text in the bubble, never a ring.
+    assert '"thinking…"' in html and "chat-thinking" in html
     # Speaker labels appear once per run of same-speaker messages.
     assert '"the guide"' in html and '"you"' in html
     assert "chat-run-start" in html
