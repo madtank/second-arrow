@@ -85,6 +85,9 @@ platform_toolsets:
     - clarify
   cron:
     - mcp-second_arrow
+  telegram:
+    - mcp-second_arrow
+    - clarify
 """
 
 # The exact stdio args line MCP_BLOCK writes — the anchor for inserting
@@ -95,6 +98,12 @@ ARGS_LINE = (
 SAMPLING_LINES = "    sampling:\n      enabled: false\n"
 
 CRON_ROW = "  cron:\n    - mcp-second_arrow\n"
+
+# The phone door (Telegram) gets the same wall as every other surface:
+# our MCP toolset + clarify, nothing else. The bot itself is enabled via
+# the profile .env (TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_USERS) — the
+# user's hand; this only pins what that surface may touch.
+TELEGRAM_ROWS = "  telegram:\n    - mcp-second_arrow\n    - clarify\n"
 
 # Named model routes for the api_server platform (undocumented but
 # source-verified; the docs page still calls the per-request model
@@ -184,6 +193,17 @@ def add_cron_pinning(text: str) -> tuple[str, bool]:
     return text[:insert_at] + CRON_ROW + text[insert_at:], True
 
 
+def add_telegram_pinning(text: str) -> tuple[str, bool]:
+    """Add the telegram platform rows to an existing platform_toolsets block."""
+    match = re.search(r"^platform_toolsets:[ \t]*\n((?:[ \t]+\S.*\n)*)", text, re.M)
+    if not match:
+        return text, False
+    if re.search(r"^  telegram:", match.group(1), re.M):
+        return text, False
+    insert_at = match.start(1)
+    return text[:insert_at] + TELEGRAM_ROWS + text[insert_at:], True
+
+
 def add_model_routes(text: str) -> tuple[str, bool]:
     """Append the model_routes platforms block, once.
 
@@ -265,6 +285,11 @@ def main(profile: Path | None = None) -> None:
     text, did = add_cron_pinning(text)
     if did:
         changed.append("platform_toolsets.cron pinned to mcp-second_arrow")
+    text, did = add_telegram_pinning(text)
+    if did:
+        changed.append("platform_toolsets.telegram pinned (phone door, same "
+                       "wall) — enable the bot itself via TELEGRAM_BOT_TOKEN "
+                       "+ TELEGRAM_ALLOWED_USERS in the profile .env")
     text, did = add_model_routes(text)
     if did:
         changed.append("model_routes defined: deep (gpt-5.5/openai-codex), "

@@ -99,6 +99,8 @@ def test_fresh_wiring_includes_the_hardening(tmp_path, capsys):
     # The hardening: sampling off, cron pinned, routes defined.
     assert "sampling:\n      enabled: false" in text
     assert "cron:\n    - mcp-second_arrow" in text
+    # The phone door: telegram pinned to the same wall as every surface.
+    assert "telegram:\n    - mcp-second_arrow\n    - clarify" in text
     assert "model_routes:" in text
     assert "deep:\n          model: gpt-5.5\n          provider: openai-codex" in text
     assert (
@@ -143,7 +145,8 @@ def test_legacy_wired_config_gains_only_the_hardening(tmp_path):
     )
     # cron joins the existing platform_toolsets block, once.
     assert text.count("cron:\n    - mcp-second_arrow") == 1
-    assert "platform_toolsets:\n  cron:\n    - mcp-second_arrow\n  api_server:" in text
+    # telegram joins it too, once, with the same wall.
+    assert text.count("telegram:\n    - mcp-second_arrow\n    - clarify") == 1
     # routes appended once; the untouched .env kept its key.
     assert text.count("model_routes:") == 1
     assert (profile / ".env").read_text().count("API_SERVER_KEY") == 1
@@ -181,7 +184,12 @@ def test_profile_env_override_is_honored(tmp_path, monkeypatch):
 
 def test_helpers_are_no_ops_on_already_hardened_text():
     text = wire.MCP_BLOCK + wire.ROUTES_BLOCK
-    for helper in (wire.add_sampling_off, wire.add_cron_pinning, wire.add_model_routes):
+    for helper in (
+        wire.add_sampling_off,
+        wire.add_cron_pinning,
+        wire.add_telegram_pinning,
+        wire.add_model_routes,
+    ):
         new, did = helper(text)
         assert did is False
         assert new == text
