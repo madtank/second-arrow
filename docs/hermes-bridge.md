@@ -8,7 +8,10 @@ OpenAI-compatible gateway (127.0.0.1:8642) is what the bridge brain in
 `tools/serve_shelf.py` (later work) will talk to; `tools/hermes_probe.py`
 is its startup gate.
 
-Config keys below were verified against the live docs on 2026-07-01:
+Distilled standing reference (endpoints, sessions, model selection,
+security): [docs/hermes-reference.md](hermes-reference.md) — fetched
+2026-07-02. Config keys below were verified against the live docs on
+2026-07-01:
 
 - MCP: <https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp>
 - API server: <https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server>
@@ -17,6 +20,51 @@ Config keys below were verified against the live docs on 2026-07-01:
 - Profiles: <https://hermes-agent.nousresearch.com/docs/reference/profile-commands>
 - SOUL.md: <https://hermes-agent.nousresearch.com/docs/user-guide/features/personality>
 - Security: <https://hermes-agent.nousresearch.com/docs/user-guide/security>
+
+## Wiring paths — do it by hand with the official CLI first
+
+Hermes ships official commands for most of what
+`tools/wire_hermes_profile.py` does; prefer them (they validate as they
+go), and keep the script as the fallback that does everything in one
+sweep. Verified against the CLI reference on 2026-07-02:
+
+```bash
+# 1. Profile (also possible in the app's Profiles pane — section 0)
+hermes profile create second-arrow --clone
+
+# 2. Register our MCP server (writes mcp_servers into the profile config;
+#    --args passes the rest of argv to the stdio command, so put it last)
+hermes -p second-arrow mcp add second_arrow \
+  --command uv --args run /Users/jacob/Git/second-arrow/tools/mcp_second_arrow.py
+hermes -p second-arrow mcp configure second_arrow   # tick exactly our 14 tools
+hermes -p second-arrow mcp test second_arrow        # handshake check
+
+# 3. Model (phase 1) — or the app's Settings → Model pane for this profile
+hermes -p second-arrow config set model.default gpt-5.5
+hermes -p second-arrow config set model.provider openai-codex
+
+# 4. Toolset restriction — interactive per-platform UI
+hermes -p second-arrow tools            # pin api_server+cli to mcp-second_arrow, clarify
+hermes -p second-arrow tools --summary  # confirm
+```
+
+Still manual (no CLI/GUI path exists yet):
+
+- **API server enablement is env-only** ("config.yaml support coming in a
+  future release") — edit the profile `.env` as in section 4;
+  `hermes -p second-arrow config env-path` prints its location.
+- `agent.disabled_toolsets` (section 3) and `platform_toolsets` beyond what
+  `hermes tools` offers — `hermes config edit` or the wire script.
+
+The desktop app covers profile creation (Profiles pane), MCP server
+registration (Settings pane for MCP servers), and the per-profile model
+(Settings → Model). Granular per-tool toggling and toolset pinning in the
+GUI are not documented — use `hermes mcp configure` / `hermes tools`.
+
+After any config change: `/reload-mcp` refreshes MCP servers inside a
+running session, but model/toolset changes want
+`hermes -p second-arrow gateway restart`. Then gate with
+`uv run tools/hermes_probe.py` (section 7).
 
 ## 0. Creating the second-arrow profile
 
@@ -176,12 +224,33 @@ Endpoints the bridge cares about: `POST /v1/chat/completions` (SSE
 streaming), `GET /v1/toolsets`, `GET /health`. Keep the `.env` at
 `chmod 600`; the bridge brain will read the same key from `HERMES_API_KEY`.
 
+Continuity (verified in source, 2026-07-02): send a stable
+`X-Hermes-Session-Id` per thread (`shelf-guide` for the shelf; `ax-<sender>`
+per aX correspondent) with ONLY the new user message — when the header is
+present the server loads history from the profile's state.db and ignores
+body history, preserving tool-call context across turns; the header
+requires the API key and is echoed back on responses. Don't use
+`/v1/responses` chaining for long threads (stored responses cap at 100,
+LRU-evicted). Concurrency: `gateway.api_server.max_concurrent_runs`
+(default 10) returns HTTP 429 over the cap — the bridge should retry with
+backoff and serialize turns within one thread itself.
+
 ## 5. Model phases
+
+Who decides the model (verified 2026-07-02, configuring-models + desktop
+docs): the profile's `config.yaml` `model.default` is the single source of
+truth for the gateway. In the app, set it in **Settings → Model** for this
+profile ("the only place that writes it") — NOT the composer dropdown next
+to the mic, which is "sticky UI state and never touches your default"
+(per-device, app-only). Per-request `model` on the API is accepted but
+ignored for routing, and `GET /v1/models` advertises the profile name
+(`second-arrow`), not the LLM — so anything that wants to *display* the
+model reads this file's `model.default`. Changes apply to the next new
+session; restart the gateway to pick them up.
 
 - **Phase 1 (now):** the profile runs on your existing codex/gpt-5.5
   provider — a hosted brain doing the reasoning, our MCP server doing the
-  reading and the hands. In the app, pick it from the profile's model
-  dropdown; in YAML:
+  reading and the hands. In the app: Settings → Model; in YAML:
 
 ```yaml
 model:
@@ -191,7 +260,7 @@ model:
   api_key: ${CODEX_API_KEY}  # ${VAR} substitution from the profile .env
 ```
 
-- **Phase 2:** switch the model dropdown to local `gemma4:12b` (Ollama's
+- **Phase 2:** switch Settings → Model to local `gemma4:12b` (Ollama's
   OpenAI-compatible endpoint: `provider: custom`,
   `base_url: http://localhost:11434/v1`). Nothing else changes — the
   SOUL.md choreography is written for a small model on purpose.
