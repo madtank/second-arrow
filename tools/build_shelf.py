@@ -485,6 +485,14 @@ STYLE = """
   #chat-toggle { font: inherit; color: #8a7f70; background: none;
                  border: 1px solid #e8e0d3; border-radius: 8px;
                  padding: 0 0.6rem; cursor: pointer; }
+  #chat-minimize { display: none; }
+  .chat-conversation #chat-minimize { display: block; position: absolute;
+                 top: 1rem; right: 1.2rem; font: inherit; font-size: 0.92rem;
+                 color: #5a4d3a; background: #efe7d9; border: none;
+                 border-radius: 999px; padding: 0.5rem 1.2rem;
+                 cursor: pointer; }
+  .chat-conversation #chat-minimize:hover { background: #e7dcc8; }
+  .chat-conversation-mode #now-playing { top: 4.4rem; }
   #guide-chat.chat-docked h2, #guide-chat.chat-docked #chat-brain,
   #guide-chat.chat-docked #chat-messages { display: none; }
   #guide-chat.chat-docked { padding-top: 0.85rem; padding-bottom: 0.85rem; }
@@ -533,6 +541,7 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.4" r="3.4" fill="#7a6a50"/><path d="M4.6 20c1.6-4 5-5.6 7.4-5.6s5.8 1.6 7.4 5.6" fill="none" stroke="#7a6a50" stroke-width="2.4" stroke-linecap="round"/></svg>
 </template>
 <h2>the guide</h2>
+<button type="button" id="chat-minimize" title="back to the page — everything stays as you left it">▾ back to the room</button>
 <p class="meta" id="chat-brain">
 <button type="button" class="brain-pill" data-brain="claude">claude · deep</button>
 <button type="button" class="brain-pill" data-brain="ollama">ollama · offline</button>
@@ -615,6 +624,9 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
     chatState = next;
     panel.classList.remove("chat-docked", "chat-conversation");
     panel.classList.add("chat-" + next);
+    // The capsule steps down under the minimize pill while talking.
+    document.body.classList.toggle(
+      "chat-conversation-mode", next === "conversation");
     chatToggle.textContent = next === "docked" ? "▴" : "▾";
     chatToggle.setAttribute("title",
       next === "docked" ? "open the conversation" : "back to the page");
@@ -623,6 +635,9 @@ CHAT_PANEL = """<section class="card chat-docked" id="guide-chat" hidden>
 
   chatToggle.addEventListener("click", function () {
     setChatState(chatState === "docked" ? "conversation" : "docked");
+  });
+  document.getElementById("chat-minimize").addEventListener("click", function () {
+    setChatState("docked"); // same as Escape: the page is exactly as left
   });
   setChatState("docked");
 

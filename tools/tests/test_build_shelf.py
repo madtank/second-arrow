@@ -1066,3 +1066,16 @@ def test_capsule_hides_only_in_its_own_room(tmp_path):
     # capsule navigating (degrade, never a broken-looking control).
     assert "ytInfo" in html
 
+
+def test_conversation_overlay_has_a_visible_way_down(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # A clearly-labeled minimize pill, pinned top-right of the overlay
+    # (it does not scroll with the list), same action as Escape.
+    assert 'id="chat-minimize"' in html
+    assert "▾ back to the room" in html
+    assert re.search(r"#chat-minimize \{ display: none", html)  # docked: hidden
+    assert ".chat-conversation #chat-minimize" in html  # conversation: pinned
+    # The now-playing capsule steps down in conversation mode so both the
+    # way down and the way to the talk stay visible, never overlapping.
+    assert ".chat-conversation-mode #now-playing" in html
+
