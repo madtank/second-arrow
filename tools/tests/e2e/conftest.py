@@ -143,6 +143,38 @@ def build_scratch_root(root: Path) -> Path:
     (library / "quiet-mind" / "artifacts" / "anchored-listen.html").write_text(
         SEEK_ARTIFACT
     )
+    # A SPOKEN reading with its timing map (speak.py's contract:
+    # reading.mp3 + reading.segments.json): its text is the seek surface.
+    # far-talk must stay text-only — the reading-room tests depend on it.
+    (library / "INDEX.md").write_text(
+        (library / "INDEX.md").read_text()
+        + """
+## spoken-reading
+- **Title:** Spoken Reading
+- **Teacher:** Ajahn Test
+- **Source:** https://example.org/spoken-reading.html
+- **Themes:** patience
+- **Path:** library/spoken-reading/
+"""
+    )
+    spoken = library / "spoken-reading"
+    spoken.mkdir(exist_ok=True)
+    (spoken / "transcript.md").write_text(
+        "# Spoken Reading\n\nQuiet begins. It settles at three.\n"
+    )
+    # Real wav bytes under the .mp3 name: Chromium's demuxer sniffs the
+    # container from content, so the reading player decodes and seeks.
+    write_silent_wav(spoken / "reading.mp3", seconds=10.0)
+    (spoken / "reading.segments.json").write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"start": 0.0, "text": "Quiet begins."},
+                    {"start": 3.0, "text": "It settles at three."},
+                ]
+            }
+        )
+    )
     (root / "STUDY.md").write_text(STUDY_MD)
     (root / "curriculum").mkdir(exist_ok=True)
     (root / "curriculum" / "01-anger.md").write_text(CURRICULUM_MD)

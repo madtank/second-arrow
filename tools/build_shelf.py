@@ -144,6 +144,24 @@ def normalize_segments(data) -> list[dict]:
     return segments
 
 
+def load_reading_segments(talk_dir: Path) -> list[dict]:
+    """A spoken reading's timing map — reading.segments.json, written by
+    speak.py alongside reading.mp3 ({"segments": [{"start", "text"}]}).
+
+    Normalized through the same tolerant normalize_segments as a talk's
+    transcript.json (end defaults to start — chunks carry no end); junk,
+    torn, or missing files read as [] and the room falls back to plain
+    prose. A map recorded before timing maps existed simply isn't there.
+    """
+    path = talk_dir / "reading.segments.json"
+    if not path.exists():
+        return []
+    try:
+        return normalize_segments(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
 def parse_moments(text: str, cap: float | None = None) -> list[dict]:
     """The guide's curated jump-to moments out of a talk's notes.md.
 
@@ -732,8 +750,11 @@ STYLE = """
   .skip-stub:hover { background: #f6f1e7; }
   .skip-stub:disabled { color: #a99e8e; cursor: default; }
   /* The reading room: the text itself is the talk — a comfortable
-     reading measure, no player anywhere. */
+     reading measure, no player anywhere. With a spoken version and its
+     timing map the same measure becomes the seek surface (.seg rows). */
   .reading-text { max-width: 34em; line-height: 1.75; }
+  .player-hint { color: #a99e8e; font-size: 0.85rem; font-style: italic;
+                 margin: 0.3rem 0 0; }
   /* "Listen for": the guide's curated jump-to moments — anchored
      listening chips, each one a transcript-click-shaped seek. */
   .moments { display: flex; flex-direction: column; align-items: flex-start;
@@ -1337,15 +1358,19 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   });
   // "✦ ask the guide to record this reading" — a reading room's Spoken
   // section: listening-first extends to texts, so the speak tool turns
-  // transcript.md into <slug>/reading.mp3 the player can carry.
+  // transcript.md into <slug>/reading.mp3 the player can carry (and
+  // speak.py writes the timing map beside it — the text becomes the
+  // seek surface on the next rebuild).
   document.addEventListener("click", function (event) {
     var button = event.target.closest(".record-reading");
     if (!button) return;
     sendOrQueue("Please record this reading as audio: speak the text of "
       + button.getAttribute("data-title") + " (from its transcript.md, "
       + "skipping the header) with the speak tool to "
-      + button.getAttribute("data-slug") + "/reading.mp3, then rebuild "
-      + "the shelf. Break it into natural sections if it's long.");
+      + button.getAttribute("data-slug")
+      + "/reading.mp3 — the timing map is written "
+      + "automatically alongside, so the text becomes clickable — then "
+      + "rebuild the shelf. Break it into natural sections if it's long.");
   });
   // "✦ ask the guide to start notes for this talk" — the empty Notes
   // section's generator, same uniform pattern.
@@ -3037,6 +3062,20 @@ def render_generator(css: str, title: str, label: str, desc: str) -> str:
     )
 
 
+def render_moment_chips(slug: str, moments: list[dict]) -> str:
+    """Just the chips: one .moments box, each chip a transcript-click-
+    shaped seek (bindRoom wires .moments through the ONE seek path).
+    Spoken readings use this bare — their grounding is the timing map,
+    so the transcript-worded ✦ generators stay off their rooms."""
+    chips = "\n".join(
+        f'<button type="button" class="moment-chip" data-start="{m["start"]:g}">'
+        f'<span class="moment-time">listen from {format_time(m["start"])}</span>'
+        f" — {escape(m['label'])}</button>"
+        for m in moments
+    )
+    return f'<div class="moments" data-slug="{escape(slug)}">\n{chips}\n</div>'
+
+
 def render_moments(slug: str, title: str, moments: list[dict]) -> str:
     """The Transcript block's front layer: anchored listening first.
 
@@ -3049,15 +3088,9 @@ def render_moments(slug: str, title: str, moments: list[dict]) -> str:
     transcript.json — callers only render this layer when it exists.
     """
     if moments:
-        chips = "\n".join(
-            f'<button type="button" class="moment-chip" data-start="{m["start"]:g}">'
-            f'<span class="moment-time">listen from {format_time(m["start"])}</span>'
-            f" — {escape(m['label'])}</button>"
-            for m in moments
-        )
         return (
-            f'<div class="moments" data-slug="{escape(slug)}">\n{chips}\n</div>\n'
-            '<p class="gen-more">'
+            render_moment_chips(slug, moments)
+            + '\n<p class="gen-more">'
             f'<button type="button" class="more-moments" data-title="{escape(title)}">'
             "✦ more like this</button></p>"
         )
@@ -3148,6 +3181,7 @@ def render_card(
     reach: str | None,
     listened: dict | None = None,
     state: str | None = None,
+    reading_segments: list[dict] | None = None,
 ) -> str:
     slug = talk["slug"]
     title = talk.get("title", slug)
@@ -3248,6 +3282,14 @@ def render_card(
             f'data-slug="{escape(slug)}" '
             f'src="{escape(slug)}/{escape(spoken)}"></audio>'
         )
+        if reading_segments:
+            # The timing map made the text a seek surface — say so here,
+            # under the player, in the home view's own words. Only when
+            # the map really parsed: this line never promises a dead click.
+            parts.append(
+                '<p class="player-hint">the text follows the voice — '
+                "click any line to be there</p>"
+            )
     elif files["audio"]:
         parts.append('<p class="player-label">The talk</p>')
         parts.append(
@@ -3505,12 +3547,22 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     for talk in talks:
         talk_dir = library / talk["slug"]
         files = probe(talk_dir) if talk_dir.is_dir() else probe(library / "_missing_")
+        reading = is_reading(files, talk)
+        # A spoken reading's timing map (speak.py writes it alongside
+        # reading.mp3): with both present and parseable, the reading's
+        # text becomes the seek surface. The map means nothing without
+        # its recording — no player, nothing to seek.
+        reading_segments = (
+            load_reading_segments(talk_dir)
+            if reading and files["reading_mp3"]
+            else []
+        )
         card = [render_card(talk, files, reach.get(talk.get("source", "")),
                             listened=listening.get(talk["slug"]),
-                            state=states.get(talk["slug"]))]
+                            state=states.get(talk["slug"]),
+                            reading_segments=reading_segments)]
         slug = escape(talk["slug"])
         title = talk.get("title", talk["slug"])
-        reading = is_reading(files, talk)
         notes_text = (
             (talk_dir / "notes.md").read_text() if files["notes_md"] else ""
         )
@@ -3621,11 +3673,40 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 + "\n</details>"
             )
         if not segments and files["transcript_md"]:
-            transcript = md_to_html((talk_dir / "transcript.md").read_text())
-            if reading:
+            if reading and reading_segments:
+                # A spoken reading with its timing map: the segments ARE
+                # the text — same reading measure, but every line is a
+                # .seg in a .seg-transcript box, so bindRoom's ONE seek
+                # path and highlight-on-play carry it with zero new JS.
+                # Moments (## Moments) become valid here, grounded in the
+                # map's range; the transcript-worded ✦ generators stay off.
+                cap = max(
+                    (seg["end"] for seg in reading_segments), default=0
+                ) or (duration_to_seconds(talk.get("duration", "")) or 0)
+                reading_moments = parse_moments(notes_text, cap=cap)
+                moments_block = (
+                    f"{render_moment_chips(slug, reading_moments)}\n"
+                    if reading_moments
+                    else ""
+                )
+                rows = "\n".join(
+                    f'<p class="seg" data-start="{seg["start"]:g}">'
+                    f'<span class="seg-time">{format_time(seg["start"])}</span> '
+                    f"{escape(seg['text'])}</p>"
+                    for seg in reading_segments
+                )
+                card.append(
+                    "<details open><summary>The reading</summary>\n"
+                    f"{moments_block}"
+                    f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
+                    f'<div class="seg-transcript reading-text" data-slug="{slug}">\n'
+                    f"{rows}\n</div>\n</details>"
+                )
+            elif reading:
                 # A reading room: the text itself IS the talk — open and
                 # prominent at a comfortable reading measure, no scroll
                 # cage, the raw file still a click away.
+                transcript = md_to_html((talk_dir / "transcript.md").read_text())
                 card.append(
                     "<details open><summary>The reading</summary>\n"
                     f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'
@@ -3636,6 +3717,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                 # alone opened as one wall of unformatted text. Transcripts
                 # run long, so the rendered copy lives in a scrollable box,
                 # with the raw file still a click away.
+                transcript = md_to_html((talk_dir / "transcript.md").read_text())
                 card.append(
                     "<details><summary>Transcript</summary>\n"
                     f'<p class="raw-link"><a href="{slug}/transcript.md">open raw file &rarr;</a></p>\n'

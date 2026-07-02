@@ -2552,12 +2552,14 @@ def test_reading_room_without_spoken_version_offers_the_recorder(tmp_path):
     assert "✦ ask the guide to record this reading" in far_card
     assert "a spoken version — listen to it like a talk" in far_card
     assert "<audio" not in far_card
-    # The canned ask (JS): speak transcript.md to <slug>/reading.mp3.
+    # The canned ask (JS): speak transcript.md to <slug>/reading.mp3 —
+    # and say what rides along: the timing map that makes the text click.
     assert 'event.target.closest(".record-reading")' in html
     assert 'sendOrQueue("Please record this reading as audio: speak the text of "' in html
     assert "skipping the header) with the speak tool to " in html
-    assert "/reading.mp3, then rebuild " in html
-    assert "Break it into natural sections if it's long." in html
+    assert "/reading.mp3 — the timing map is written " in html
+    assert "automatically alongside, so the text becomes clickable — then " in html
+    assert "rebuild the shelf. Break it into natural sections if it's long." in html
     # Talks never grow a recorder — they already speak.
     bare_card = re.search(
         r'<section class="card view" id="talk-bare-yt">.*?</section>', html, re.S
@@ -2594,3 +2596,124 @@ def test_reading_with_audio_mp3_and_reading_origin_stays_a_reading(tmp_path):
     far_card = _far_card(html)
     assert "read ✓ 2026-07-02" in far_card
     assert "listened-replay" in far_card
+
+
+# --- spoken readings with a timing map: the text itself click-seeks -------------
+
+
+def _spoken_reading(library, segments=None):
+    """far-talk gains a spoken version, optionally with its timing map."""
+    (library / "far-talk" / "reading.mp3").write_bytes(b"\x00")
+    if segments is not None:
+        (library / "far-talk" / "reading.segments.json").write_text(
+            json.dumps({"segments": segments})
+        )
+
+
+SEGMENTS = [
+    {"start": 0.0, "text": "Quiet begins & <opens>."},
+    {"start": 6.5, "text": "It settles."},
+]
+
+
+def test_spoken_reading_with_timing_map_renders_click_to_seek_text(tmp_path):
+    library = _make_library(tmp_path)
+    _spoken_reading(library, SEGMENTS)
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    # Still the reading room — same summary, same measure — but the text
+    # is now the seek surface: the ONE .seg-transcript/.seg markup, so
+    # bindRoom's existing click path and highlight-on-play just work.
+    assert "<details open><summary>The reading</summary>" in far_card
+    box = re.search(
+        r'<div class="seg-transcript reading-text" data-slug="far-talk">', far_card
+    )
+    assert box, "clickable reading text missing"
+    assert '<div class="reading-text">' not in far_card  # replaced, not doubled
+    seg = re.search(r'<p class="seg" data-start="6.5">.*?</p>', far_card)
+    assert seg and '<span class="seg-time">0:06</span>' in seg.group(0)
+    # The segments ARE the text, escaped.
+    assert "Quiet begins &amp; &lt;opens&gt;." in far_card
+    assert "It settles." in far_card
+    assert 'href="far-talk/transcript.md"' in far_card  # raw file, one click
+    # No scroll cage — the reading keeps its open measure.
+    assert "scroll-box" not in far_card
+    # The room copy under the spoken player says the text now clicks.
+    assert "The reading, spoken — recorded by the guide" in far_card
+    assert (
+        '<p class="player-hint">the text follows the voice — '
+        "click any line to be there</p>" in far_card
+    )
+
+
+def test_spoken_reading_with_junk_timing_map_falls_back_to_prose(tmp_path):
+    library = _make_library(tmp_path)
+    _spoken_reading(library)
+    (library / "far-talk" / "reading.segments.json").write_text("{torn")
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    # Tolerant: junk reads as no map — the plain prose block, no seeks,
+    # and no copy promising clicks that would not land.
+    assert '<div class="reading-text">' in far_card
+    assert "seg-transcript" not in far_card
+    assert "player-hint" not in far_card
+    assert "<p>Words.</p>" in far_card
+
+
+def test_spoken_reading_without_timing_map_stays_prose(tmp_path):
+    library = _make_library(tmp_path)
+    _spoken_reading(library)  # recorded before timing maps existed
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    assert '<div class="reading-text">' in far_card
+    assert "seg-transcript" not in far_card
+    assert "player-hint" not in far_card
+
+
+def test_timing_map_without_a_recording_stays_prose(tmp_path):
+    # A map with no reading.mp3 has nothing to seek — the text stays prose.
+    library = _make_library(tmp_path)
+    (library / "far-talk" / "reading.segments.json").write_text(
+        json.dumps({"segments": SEGMENTS})
+    )
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    assert '<div class="reading-text">' in far_card
+    assert "seg-transcript" not in far_card
+
+
+def test_moments_on_a_spoken_reading_validate_against_the_map(tmp_path):
+    library = _make_library(tmp_path)
+    _spoken_reading(library, SEGMENTS)
+    (library / "far-talk" / "notes.md").write_text(
+        "# Notes\n\nGood one.\n\n## Moments\n\n"
+        "- 0:05 — where it lands\n"
+        "- 12:00 — past the recording's end\n"
+    )
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    # Grounded in reading.segments.json: the in-range moment renders as a
+    # chip, the out-of-range one silently drops (same rule as talks).
+    chips = re.search(r'<div class="moments" data-slug="far-talk">', far_card)
+    assert chips, "moments chips missing on the spoken reading"
+    assert 'data-start="5"' in far_card
+    assert 'data-start="720"' not in far_card
+    assert "listen from 0:05" in far_card
+    # No transcript.json-grounded generators on a reading: the ✦ and the
+    # "more like this" asks both speak transcript language.
+    assert "mark-moments" not in far_card
+    assert "more-moments" not in far_card
+
+
+def test_text_only_reading_gets_no_moments_even_with_a_moments_section(tmp_path):
+    # No spoken version, no timing map: nothing to ground a seek in —
+    # a ## Moments section renders nothing (never a dead chip).
+    library = _make_library(tmp_path)
+    (library / "far-talk" / "notes.md").write_text(
+        "# Notes\n\n## Moments\n\n- 0:05 — nowhere to jump\n"
+    )
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    assert "moment-chip" not in far_card
+    assert "mark-moments" not in far_card
+    assert '<div class="reading-text">' in far_card

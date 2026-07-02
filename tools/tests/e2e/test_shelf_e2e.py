@@ -743,6 +743,33 @@ def test_reading_room_renders_the_text_readably(page, shelf_server):
     )
 
 
+def test_spoken_reading_text_click_seeks_the_reading_player(page, shelf_server):
+    # spoken-reading carries reading.mp3 + reading.segments.json: its text
+    # renders as click-to-seek segments — open on arrival, no sub-expander,
+    # still at the reading measure — and a click rides the ONE seek path.
+    _open_shelf(page, shelf_server.base, "#talk/spoken-reading")
+    page.wait_for_selector("#talk-spoken-reading.active")
+    box = page.wait_for_selector(
+        '#talk-spoken-reading .seg-transcript.reading-text[data-slug="spoken-reading"]'
+    )
+    assert box.is_visible()
+    seg = page.wait_for_selector('#talk-spoken-reading .seg[data-start="3"]')
+    assert seg.is_visible()
+    assert "It settles at three." in seg.inner_text()
+    # The spoken player carries the room copy that the text now clicks.
+    assert "click any line to be there" in page.inner_text("#talk-spoken-reading")
+    seg.click()
+    audio_js = (
+        "document.querySelector("
+        "'audio.talk-audio[data-slug=\"spoken-reading\"]')"
+    )
+    page.wait_for_function(
+        f"() => {{ const a = {audio_js};"
+        " return a && !a.paused && Math.abs(a.currentTime - 3.0) < 0.5; }"
+    )
+    assert page.evaluate("window.saIsPlaying()")
+
+
 # --- busy, visibly: the working line, stop, and the send queue ---------------
 
 
