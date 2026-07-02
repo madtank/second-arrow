@@ -188,7 +188,10 @@ def test_own_messages_are_ignored():
 
 
 def test_housekeeping_events_are_ignored():
-    for name in ("connected", "keepalive", "ping", "heartbeat"):
+    # connected/bootstrap/identity_bootstrap/ping are the shapes observed
+    # live on paxai.app; bootstrap carries historical posts and MUST be
+    # ignored or reconnects would replay old conversations.
+    for name in ("connected", "keepalive", "ping", "heartbeat", "bootstrap", "identity_bootstrap"):
         assert ax.extract_mention(name, {"sender": "x", "content": "@second-arrow"}, AGENT) is None
 
 
@@ -260,6 +263,50 @@ def test_extract_reply_session_not_found_is_distinct():
 
 
 # --- aX message-send tool discovery ------------------------------------------
+
+# Trimmed from the REAL inputSchema of the consolidated `messages` tool on
+# "aX Platform MCP v3 3.3.1" (tools/list, observed live 2026-07). Sending
+# lives behind the action discriminator; message_id targets edit/delete,
+# reply_to is the threading field.
+AX_V3_MESSAGES_SCHEMA = {
+    "additionalProperties": False,
+    "type": "object",
+    "required": ["action"],
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["check", "send", "ask_ax", "draft", "react", "edit", "delete"],
+        },
+        "content": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+        "message_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+        "reply_to": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+        "limit": {"type": "integer", "default": 10},
+        "wait": {"type": "boolean", "default": False},
+        "bypass": {"type": "boolean", "default": False},
+        "reason": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+    },
+}
+
+AX_V3_TOOL_NAMES = ["whoami", "messages", "tasks", "agents", "spaces", "context", "search"]
+
+
+def test_pick_send_tool_prefers_consolidated_messages_tool():
+    # the live aX v3 surface: send lives inside `messages`
+    assert ax.pick_send_tool(AX_V3_TOOL_NAMES) == "messages"
+    # exact match wins even when a legacy-shaped name is also present
+    assert ax.pick_send_tool(["messages_send", "messages"]) == "messages"
+
+
+def test_build_send_args_consolidated_v3_reply():
+    mention = {"sender": "alice", "message_id": "m1", "space_id": "s1", "text": "hi"}
+    args = ax.build_send_args(AX_V3_MESSAGES_SCHEMA, "the reply", mention)
+    # action=send + content, threaded via reply_to; nothing else sprayed in
+    assert args == {"action": "send", "content": "the reply", "reply_to": "m1"}
+
+
+def test_build_send_args_consolidated_v3_without_message_id():
+    args = ax.build_send_args(AX_V3_MESSAGES_SCHEMA, "hello", {"sender": "bob"})
+    assert args == {"action": "send", "content": "hello"}
 
 
 def test_pick_send_tool_prefers_message_send_names():

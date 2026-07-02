@@ -19,9 +19,12 @@ Subcommands
               you can see the identity and which aX tools exist.
     listen    the bridge loop: GET /api/sse/messages (SSE, bearer auth),
               on a mention -> POST to the local guide, reply via the aX
-              MCP message-send tool (discovered at runtime via tools/list
-              — aX does not document the tool name, so we log what we
-              find). Reconnects with capped exponential backoff; Ctrl-C
+              MCP send tool discovered at runtime via tools/list. On the
+              live aX Platform MCP v3 that is the consolidated `messages`
+              tool ({"action": "send", "content": ..., "reply_to": ...});
+              a name heuristic covers older/other servers, and what was
+              found is logged. Reconnects with capped exponential backoff;
+              Ctrl-C
               exits cleanly. --dry-run logs what WOULD be sent instead
               of sending.
 
@@ -212,8 +215,19 @@ def decode_event_data(data: str) -> dict:
 
 # --- mention extraction ------------------------------------------------------
 
+# Observed live (2026-07): connected, bootstrap, identity_bootstrap on
+# connect, then ping every ~15s. `bootstrap` carries historical posts —
+# ignoring it is what keeps a reconnect from replaying old conversations.
 HOUSEKEEPING_EVENTS = frozenset(
-    {"connected", "keepalive", "ping", "heartbeat", "bootstrap", "open"}
+    {
+        "connected",
+        "keepalive",
+        "ping",
+        "heartbeat",
+        "bootstrap",
+        "identity_bootstrap",
+        "open",
+    }
 )
 _SENDER_KEYS = ("sender", "sender_name", "from", "author", "agent_name", "user")
 _TEXT_KEYS = ("content", "text", "body", "message")
@@ -358,10 +372,16 @@ _SPACE_KEYS = ("space_id", "space")
 def pick_send_tool(names: list[str]) -> str | None:
     """The aX tool that sends a chat message, out of a tools/list.
 
-    aX doesn't document the name, so we discover it: a name qualifies
-    when its tokens include both a message word and a send word
-    (messages_send, send_message, post_message, messages.send, ...).
+    aX MCP v3 (verified live: "aX Platform MCP v3 3.3.1") consolidates
+    the surface into seven tools — whoami, messages, tasks, agents,
+    spaces, context, search — and sending lives INSIDE the `messages`
+    tool behind an `action` discriminator, so an exact `messages` match
+    wins. Older/other servers fall back to the name heuristic: tokens
+    must include both a message word and a send word (messages_send,
+    send_message, post_message, messages.send, ...).
     """
+    if "messages" in names:
+        return "messages"
     for name in names:
         tokens = set(re.split(r"[^a-z0-9]+", name.lower()))
         if tokens & _MESSAGE_TOKENS and tokens & _SEND_TOKENS:
@@ -372,11 +392,24 @@ def pick_send_tool(names: list[str]) -> str | None:
 def build_send_args(schema: dict, reply: str, mention: dict) -> dict:
     """Arguments for the discovered send tool, fitted to its inputSchema.
 
-    The reply lands in the first content-ish property; the mention's
-    message_id/space_id ride along when the schema has somewhere to put
-    them. Raises ValueError when the schema has no content-ish property
-    at all (then it isn't the send tool we thought it was).
+    Consolidated v3 shape first: when the schema's `action` enum
+    contains "send", the args are {"action": "send", "content": reply}
+    plus `reply_to` = the mention's message id (the live v3 schema's
+    threading field — its `message_id` property targets edit/delete,
+    not replies, so it is deliberately NOT used here).
+
+    Otherwise the flat legacy fit: the reply lands in the first
+    content-ish property; the mention's message_id/space_id ride along
+    when the schema has somewhere to put them. Raises ValueError when
+    the schema has no content-ish property at all (then it isn't the
+    send tool we thought it was).
     """
+    action_enum = ((schema.get("properties") or {}).get("action") or {}).get("enum") or []
+    if "send" in action_enum:
+        args = {"action": "send", "content": reply}
+        if mention.get("message_id") and "reply_to" in schema["properties"]:
+            args["reply_to"] = str(mention["message_id"])
+        return args
     properties = schema.get("properties") or {}
     content_key = next((k for k in _CONTENT_KEYS if k in properties), None)
     if content_key is None:

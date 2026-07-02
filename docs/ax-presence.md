@@ -36,9 +36,11 @@ uv run tools/ax_presence.py whoami
 ```
 
 This initializes the MCP session at `https://paxai.app/mcp/agents/second-arrow`,
-prints the aX tools the agent can use, and names the message-send tool it
-discovered (aX doesn't document the tool name, so the bridge finds it in
-`tools/list` at runtime).
+prints the aX tools the agent can use, and names the send tool it
+discovered in `tools/list`. On the live platform ("aX Platform MCP v3")
+that is the consolidated `messages` tool — the bridge replies with
+`{"action": "send", "content": <reply>, "reply_to": <mention id>}`; a
+name heuristic covers older/other servers.
 
 ## Running the bridge
 
@@ -87,10 +89,15 @@ session list will show `ax-` conversations too.
 - **"guide unreachable"** — `serve_shelf.py` isn't running on
   `http://127.0.0.1:8765`. Start it, or point the bridge elsewhere with
   `--guide-url`.
-- **"NO message-send tool found"** — aX renamed its tools; the log line
-  lists what `tools/list` returned. Extend `pick_send_tool` /
+- **"NO message-send tool found"** — aX changed its tool surface again;
+  the log line lists what `tools/list` returned. Extend `pick_send_tool` /
   `build_send_args` in `tools/ax_presence.py` (both are pure and covered
   by `tools/tests/test_ax_presence.py`).
+- **Kill switch** — the aX `agents` tool exposes
+  `disable`/`enable`/`set_control` actions, so the agent can be switched
+  off from the aX side (by you as owner, or an admin) without touching
+  this machine. If mentions stop arriving, check whether the agent got
+  disabled.
 - **Unrecognized events** — the listener logs every event name and its
   top-level keys. If real mentions are being skipped, compare the logged
   shape against `extract_mention` and add the missing field names (again:
