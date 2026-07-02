@@ -362,6 +362,45 @@ def test_think_filter_unclosed_think_yields_nothing():
     assert think.flush() == ""
 
 
+# --- resolve_brain (per-request brain switch) -----------------------------
+
+
+def test_resolve_brain_falls_back_to_default_when_unrequested():
+    available = {"claude": True, "ollama": True}
+    assert serve_shelf.resolve_brain(None, "claude", available) == "claude"
+    assert serve_shelf.resolve_brain("", "ollama", available) == "ollama"
+
+
+def test_resolve_brain_honours_an_available_request():
+    available = {"claude": True, "ollama": True}
+    assert serve_shelf.resolve_brain("ollama", "claude", available) == "ollama"
+    assert serve_shelf.resolve_brain("claude", "ollama", available) == "claude"
+
+
+def test_resolve_brain_unknown_name_is_a_400():
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.resolve_brain("gpt", "claude", {"claude": True, "ollama": True})
+    assert excinfo.value.status == 400
+    assert "gpt" in excinfo.value.message
+
+
+def test_resolve_brain_unavailable_request_is_a_503_with_a_hint():
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.resolve_brain("ollama", "claude", {"claude": True, "ollama": False})
+    assert excinfo.value.status == 503
+    assert "ollama serve" in excinfo.value.message
+    with pytest.raises(serve_shelf.BrainError) as excinfo:
+        serve_shelf.resolve_brain("claude", "ollama", {"claude": False, "ollama": True})
+    assert excinfo.value.status == 503
+
+
+def test_resolve_brain_default_skips_the_availability_gate():
+    # The server default is not second-guessed: probes can be stale, and
+    # the brain itself reports a proper error if it is really down.
+    available = {"claude": True, "ollama": False}
+    assert serve_shelf.resolve_brain(None, "ollama", available) == "ollama"
+
+
 def test_resolve_ollama_model_prefers_configured_then_falls_back():
     installed = ["llama3.2:latest", "qwen3:latest"]
     assert serve_shelf.resolve_ollama_model("qwen3", installed) == "qwen3:latest"

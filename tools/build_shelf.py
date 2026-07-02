@@ -134,6 +134,14 @@ STYLE = """
   .chat-user { background: #efe7d9; margin-left: 2.5rem; }
   .chat-guide { background: #f6f1e7; margin-right: 2.5rem; }
   .chat-thinking { color: #a99e8e; font-style: italic; }
+  .chat-system { background: none; text-align: center; color: #a99e8e;
+                 font-size: 0.8rem; font-style: italic; padding: 0; }
+  #chat-brain { display: flex; gap: 0.4rem; }
+  .brain-pill { font: inherit; font-size: 0.8rem; color: #5a4d3a;
+                background: none; border: 1px solid #e8e0d3;
+                border-radius: 999px; padding: 0.15rem 0.7rem; cursor: pointer; }
+  .brain-pill.brain-active { background: #efe7d9; border-color: #d8cbb4; }
+  .brain-pill:disabled { opacity: 0.4; cursor: default; }
   #chat-form { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
   #chat-form textarea { flex: 1; font: inherit; color: inherit; resize: vertical;
                         background: #fffdf9; border: 1px solid #e8e0d3;
@@ -148,11 +156,16 @@ STYLE = """
 # The panel starts hidden and only appears when /health answers — so the
 # static file:// shelf keeps working unchanged. Guide replies stream in as
 # chunked plain text (fetch + ReadableStream); errors before the stream
-# starts arrive as JSON. Replies are rendered with textContent (never
-# innerHTML): model output stays inert text.
+# starts arrive as JSON. The pill toggle picks which brain each message is
+# sent to (per-request "brain" field), driven by /health's availability
+# map. Replies are rendered with textContent (never innerHTML): model
+# output stays inert text.
 CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
 <h2>the guide</h2>
-<p class="meta" id="chat-brain"></p>
+<p class="meta" id="chat-brain">
+<button type="button" class="brain-pill" data-brain="claude">claude · deep</button>
+<button type="button" class="brain-pill" data-brain="ollama">ollama · offline</button>
+</p>
 <div id="chat-messages"></div>
 <form id="chat-form">
 <textarea id="chat-input" rows="2" placeholder="Where are you right now?"></textarea>
@@ -167,7 +180,9 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
   var form = document.getElementById("chat-form");
   var input = document.getElementById("chat-input");
   var send = document.getElementById("chat-send");
+  var pills = document.querySelectorAll("#chat-brain .brain-pill");
   var history = [];
+  var brain = null; // which brain the next message goes to (/health default)
 
   function add(role, text) {
     var div = document.createElement("div");
@@ -178,10 +193,33 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     return div;
   }
 
+  function markActive() {
+    pills.forEach(function (pill) {
+      pill.classList.toggle(
+        "brain-active", pill.getAttribute("data-brain") === brain);
+    });
+  }
+
   fetch("/health").then(function (r) { return r.json(); }).then(function (h) {
     if (!h.ok) return;
-    document.getElementById("chat-brain").textContent =
-      "listening · brain: " + h.brain;
+    brain = h.brain;
+    var brains = h.brains || {};
+    pills.forEach(function (pill) {
+      var name = pill.getAttribute("data-brain");
+      if (brains[name] === false) { // an older server omits the map
+        pill.disabled = true;
+        pill.title = name === "ollama"
+          ? "start ollama serve" : "claude CLI not found";
+      }
+      pill.addEventListener("click", function () {
+        if (pill.disabled || name === brain) return;
+        brain = name;
+        markActive();
+        add("system", "— switched to " + name
+          + (name === "ollama" ? " (offline)" : " (deep)") + " —");
+      });
+    });
+    markActive();
     panel.hidden = false;
   }).catch(function () { /* static file:// shelf — panel stays hidden */ });
 
@@ -198,7 +236,7 @@ CHAT_PANEL = """<section class="card" id="guide-chat" hidden>
     fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: history })
+      body: JSON.stringify({ messages: history, brain: brain })
     }).then(function (r) {
       var type = r.headers.get("content-type") || "";
       if (!r.ok || type.indexOf("application/json") !== -1) {

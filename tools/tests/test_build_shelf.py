@@ -167,3 +167,11 @@ def test_chat_js_renders_replies_as_text_never_html(tmp_path):
     # Model output must be rendered inert: textContent + pre-wrap only.
     assert "textContent" in html
     assert "innerHTML" not in html
+
+
+def test_chat_panel_has_brain_toggle_pills(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    assert 'data-brain="claude"' in html
+    assert 'data-brain="ollama"' in html
+    assert "claude · deep" in html
+    assert "ollama · offline" in html

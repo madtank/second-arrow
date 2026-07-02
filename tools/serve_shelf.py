@@ -11,8 +11,12 @@ so importing it is fast, in-process, and fails loudly if it breaks.
 
 Routes:
     GET  /          the shelf page (library/shelf.html, freshly rebuilt)
-    GET  /health    {"ok": true, "brain": "claude"|"ollama"}
-    POST /api/chat  {"messages": [{"role", "content"}, ...]} -> streamed reply
+    GET  /health    {"ok": true, "brain": <default>, "brains": {name: available}}
+    POST /api/chat  {"messages": [...], "brain": "claude"|"ollama"?} -> streamed
+                    reply. "brain" is optional and per-request (the panel's
+                    toggle); it falls back to the server's --brain default,
+                    unknown names are a 400. Claude session continuity is
+                    kept across switches (ollama turns don't touch it).
     /<talk>/...     library/ served statically (Range supported, audio seeks)
 
 Chat replies stream as chunked plain text (`text/plain; charset=utf-8`,
@@ -51,6 +55,7 @@ import argparse
 import importlib.util
 import json
 import re
+import shutil
 import subprocess
 import threading
 import urllib.error
@@ -390,6 +395,32 @@ def resolve_ollama_model(configured: str, installed: list[str]) -> str:
     return installed[0] if installed else configured
 
 
+BRAIN_HINTS = {
+    "claude": "the claude CLI is not on PATH — install Claude Code",
+    "ollama": "run `ollama serve` and try again",
+}
+
+
+def resolve_brain(requested, default: str, available: dict) -> str:
+    """Pick the brain for one chat turn (the panel's per-request toggle).
+
+    No request falls back to the server default, un-second-guessed (probes
+    can be stale; the default brain reports its own failures properly).
+    An unknown name is a 400; an explicitly requested but unavailable
+    brain is a 503 with a hint. Raises BrainError for both.
+    """
+    if not requested:
+        return default
+    if requested not in BRAIN_HINTS:
+        names = " or ".join(f'"{name}"' for name in BRAIN_HINTS)
+        raise BrainError(400, f"Unknown brain {requested!r} — use {names}.")
+    if not available.get(requested, True):
+        raise BrainError(
+            503, f"The {requested} brain is not available — {BRAIN_HINTS[requested]}."
+        )
+    return requested
+
+
 # --- shelf + library ----------------------------------------------------
 
 
@@ -424,6 +455,24 @@ def load_transcripts(library: Path) -> dict[str, str]:
 # --- the two brains (both stream) ----------------------------------------
 
 STREAM_BROKE = "the stream broke off here. Ask again and I'll pick it back up."
+
+
+def probe_brains(ollama_timeout: float = 1.0) -> dict:
+    """Cheap availability map for /health and the panel's brain toggle.
+
+    claude: is the CLI on PATH (instant). ollama: does /api/tags answer
+    within ~1s (connection-refused on localhost fails immediately, so a
+    stopped Ollama doesn't stall the probe).
+    """
+    available = {"claude": shutil.which("claude") is not None, "ollama": False}
+    try:
+        with urllib.request.urlopen(
+            OLLAMA_URL + "/api/tags", timeout=ollama_timeout
+        ):
+            available["ollama"] = True
+    except (urllib.error.URLError, OSError, TimeoutError):
+        pass
+    return available
 
 
 def _spawn_claude(prompt: str, session_id: str | None) -> subprocess.Popen:
@@ -612,7 +661,7 @@ def create_app(brain: str, ollama_model: str):
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "brain": brain}
+        return {"ok": True, "brain": brain, "brains": probe_brains()}
 
     @app.post("/api/chat")
     def chat(body: dict):
@@ -633,7 +682,10 @@ def create_app(brain: str, ollama_model: str):
                 status_code=422,
             )
         try:
-            if brain == "claude":
+            chosen = resolve_brain(body.get("brain"), brain, probe_brains())
+            if chosen == "claude":
+                # `state` belongs to claude alone: ollama turns in between
+                # never touch it, so the claude session survives switches.
                 stream = stream_claude(messages, state)
             else:
                 stream = stream_ollama(messages, ollama_model, LIBRARY)
@@ -643,7 +695,7 @@ def create_app(brain: str, ollama_model: str):
         return StreamingResponse(
             stream,
             media_type="text/plain; charset=utf-8",
-            headers={"X-Brain": brain},
+            headers={"X-Brain": chosen},
         )
 
     # Mounted last so /, /health, /api/chat win; everything else — primers,
