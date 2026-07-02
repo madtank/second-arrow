@@ -1553,7 +1553,7 @@ a tools-capable local model (for example: ollama pull qwen3)."""
 _FETCH_TEXT_FIELDS = (("title", "--title"), ("teacher", "--teacher"), ("themes", "--themes"))
 
 
-def validate_tool_call(name: str, args) -> list[str]:
+def validate_tool_call(name: str, args, library: Path | None = None) -> list[str]:
     """Turn a model's tool call into a safe argv list, or raise ValueError.
 
     This is the entire safety boundary for ollama agency: exact tool
@@ -1595,7 +1595,25 @@ def validate_tool_call(name: str, args) -> list[str]:
         out_name = args.get("out_name")
         if not isinstance(out_name, str):
             raise ValueError("out_name must be a string")
-        slug = re.sub(r"[^a-z0-9]+", "-", out_name.lower()).strip("-")
+        lib = library if library is not None else LIBRARY
+        # A trailing .mp3 is the intent, not part of the name.
+        base = re.sub(r"\.mp3\s*$", "", out_name, flags=re.I)
+        parts = [p for p in base.split("/") if p.strip()]
+        if len(parts) == 2 and ".." not in base:
+            # <talk>/<name>.mp3 — nest into an EXISTING talk folder so the
+            # room can show the player (reading.mp3, primer.mp3, custom-*).
+            talk = re.sub(r"[^a-z0-9]+", "-", parts[0].lower()).strip("-")
+            name = re.sub(r"[^a-z0-9]+", "-", parts[1].lower()).strip("-")
+            if not talk or not name:
+                raise ValueError("out_name must contain letters or digits")
+            if not (lib / talk).is_dir():
+                raise ValueError(
+                    f"no talk '{talk}' in the library — out_name may nest "
+                    "only into an existing talk folder"
+                )
+            return ["uv", "run", "tools/speak.py", "--text", text,
+                    "-o", f"library/{talk}/{name}.mp3"]
+        slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
         if not slug:
             raise ValueError("out_name must contain letters or digits")
         return ["uv", "run", "tools/speak.py", "--text", text, "-o", f"library/{slug}.mp3"]

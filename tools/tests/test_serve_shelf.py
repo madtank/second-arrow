@@ -562,8 +562,32 @@ def test_validate_tool_call_speak_sanitizes_out_name():
     )
     assert argv[-1] == "library/etc-x.mp3"
     assert ".." not in argv[-1]
+    # A trailing .mp3 is the intent, not part of the name — no -mp3.mp3.
     argv = serve_shelf.validate_tool_call("speak", {"text": "hi", "out_name": "a.b.mp3"})
-    assert argv[-1] == "library/a-b-mp3.mp3"
+    assert argv[-1] == "library/a-b.mp3"
+
+
+def test_validate_tool_call_speak_nests_into_an_existing_talk(tmp_path):
+    # The real-world case: the guide asks for <slug>/reading.mp3 so the
+    # reading room can show the player. One level, existing talk only.
+    (tmp_path / "the-arrow").mkdir()
+    argv = serve_shelf.validate_tool_call(
+        "speak",
+        {"text": "hi", "out_name": "the-arrow/reading.mp3"},
+        library=tmp_path,
+    )
+    assert argv[-1] == "library/the-arrow/reading.mp3"
+    # Unknown talk folder: refuse loudly instead of silently flattening.
+    with pytest.raises(ValueError):
+        serve_shelf.validate_tool_call(
+            "speak", {"text": "hi", "out_name": "no-such-talk/reading.mp3"},
+            library=tmp_path,
+        )
+    # Deeper paths and traversal still collapse to a flat library slug.
+    argv = serve_shelf.validate_tool_call(
+        "speak", {"text": "hi", "out_name": "../../etc/passwd"}, library=tmp_path
+    )
+    assert argv[-1] == "library/etc-passwd.mp3"
 
 
 def test_validate_tool_call_speak_rejects_bad_args():
