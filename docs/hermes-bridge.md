@@ -56,6 +56,23 @@ Still manual (no CLI/GUI path exists yet):
   `hermes -p second-arrow config env-path` prints its location.
 - `agent.disabled_toolsets` (section 3) and `platform_toolsets` beyond what
   `hermes tools` offers — `hermes config edit` or the wire script.
+- The wire script's v0.18 hardening (all idempotent, no CLI equivalents):
+  `mcp_servers.second_arrow.sampling.enabled: false` (MCP sampling is
+  default-ON in v0.18 — our server never asks for inference, so off),
+  `platform_toolsets.cron: [mcp-second_arrow]` (0.18 layers MCP toolsets
+  onto cron jobs; the cron default is the full `hermes-cli` bundle), and a
+  `model_routes` block naming two per-request routes for the shelf's
+  picker — `deep` (gpt-5.5 / openai-codex) and `local` (gemma4:12b via the
+  local-Ollama custom endpoint). model_routes is source-verified but
+  undocumented — see hermes-reference §3.
+
+After the gateway is wired and probed, install the nightly prep (a
+durable cron job on the gateway, section 8):
+
+```bash
+HERMES_API_KEY=<your API_SERVER_KEY> uv run tools/hermes_cron_setup.py
+uv run tools/hermes_cron_setup.py --dry-run   # inspect the job JSON first
+```
 
 The desktop app covers profile creation (Profiles pane), MCP server
 registration (Settings pane for MCP servers), and the per-profile model
@@ -303,5 +320,25 @@ HERMES_API_KEY=<your API_SERVER_KEY> uv run /Users/jacob/Git/second-arrow/tools/
 
 The probe exits 0 only when the exposed toolsets ⊆
 `{mcp-second_arrow, clarify}`; otherwise it exits 1 listing the excess.
-The bridge brain will run the same gate at startup and refuse to talk to
-an over-provisioned gateway.
+The bridge brain runs the same gate (it imports the probe's logic) and
+refuses to talk to an over-provisioned gateway.
+
+## 8. Nightly prep — a durable cron job in the gateway
+
+`tools/hermes_cron_setup.py` (user-run, idempotent) installs ONE job
+named `nightly-prep` on the running gateway over REST `/api/jobs`
+(hermes-reference §7): 03:23 daily, **pinned** to gpt-5.5/openai-codex
+(the `deep` route's pair — unpinned jobs snapshot the global default and
+fail closed when it changes, so re-run this script after any deliberate
+model switch), `enabled_toolsets: ["mcp-second_arrow"]` (exactly our 14
+tools), delivery `local` with a `[SILENT]` final line (files under the
+profile's `cron/output/`, no platform pings). The prompt is data-only:
+notes + primers for already-queued, already-fetched talks; never an
+ingest that isn't a curriculum URL already queued; no artifacts
+overnight; Queued-annotation-only STUDY.md edits.
+
+On success the script writes `library/.prep-cron.json`
+(`{installed_at, schedule}`) — the marker `serve_shelf`'s `/health`
+surfaces on the shelf's begin-here machinery card. The marker means
+"this script ran"; the job itself lives in the gateway
+(`hermes -p second-arrow cron list` to see it).
