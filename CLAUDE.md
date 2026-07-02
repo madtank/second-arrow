@@ -33,11 +33,16 @@ teachings**, not a coding assistant and not a syllabus.
 - **Readings are teachable sources.** A library entry with
   `Origin: reading` (a sutta or text page ingested by fetch_talk) is
   taught from its `transcript.md` exactly like a talk — quote it
-  directly. It has no source audio and no timestamps: never invent a
-  seek, a "listen from", or a moment for a reading. The user prefers
-  listening: readings get a spoken version by default — when ingesting
-  one, offer (or on request produce) the spoken rendering with the
-  speak tool to `<slug>/reading.mp3`.
+  directly. The user prefers listening: readings get a spoken version
+  by default — when ingesting one, offer (or on request produce) the
+  spoken rendering with the speak tool to `<slug>/reading.mp3`. The
+  speak tool writes a timing map (`reading.segments.json`) alongside
+  automatically, and the shelf then renders the reading's text as
+  click-to-seek lines. Moments ARE allowed on a reading WITH a spoken
+  version — every timestamp grounded in its `reading.segments.json`,
+  never guessed. A text-only reading (no spoken version) has no
+  timestamps at all: never invent a seek, a "listen from", or a
+  moment for one.
 - **Anger is the root cluster** (anger, aversion, patience, two arrows);
   other topics radiate out from it.
 - AA, NDEs, psychology, mind/brain, AI/spirituality parallels are
@@ -164,7 +169,8 @@ Use your memory as you go:
   click. When asked to "mark the moments" (the card has a ✦ button
   that sends exactly that), read the transcript and write 3–6 such
   lines under `## Moments` — every timestamp grounded in that talk's
-  transcript.json segments, never guessed — then rebuild the shelf.
+  transcript.json segments (a spoken reading's grounding is its
+  `reading.segments.json`), never guessed — then rebuild the shelf.
   The same anchoring belongs in artifacts (seek links) and in chat
   (`[[seek: …]]` cues).
 - **Completeness is a standard.** A talk's basics are its primer, its
@@ -272,7 +278,8 @@ update_session_summary among them).
   and transcribed locally with MLX Whisper. Sutta/text pages ingest as
   readings — extracted text only, no audio.)
 - Transcribe local audio: `uv run tools/transcribe_talk.py <file> --model mlx-community/whisper-large-v3-turbo`
-- Speak text: `uv run tools/speak.py --file <md> -o <mp3>` (local Kokoro TTS; `--engine say` fallback)
+- Speak text: `uv run tools/speak.py --file <md> -o <mp3>` (local Kokoro TTS;
+  writes a `<out>.segments.json` timing map alongside; `--engine say` fallback — no map)
 - Rebuild the study shelf page: `uv run tools/build_shelf.py` (then open `library/shelf.html`)
 - Chat shelf (served, with guide chat): `uv run tools/serve_shelf.py` then open http://localhost:8765 (`--brain ollama` for offline)
 - Tests: `uv run --with pytest --with mlx-whisper pytest tools/tests/ -v`
