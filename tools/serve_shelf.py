@@ -441,6 +441,25 @@ def record_listened(library: Path, slug, at: str | None = None) -> bool:
     return True
 
 
+def mark_listened(library: Path, slug, at: str | None = None) -> dict:
+    """The ONE write path behind POST /api/listened — the player's
+    automatic completion report and the room's manual "mark as heard"
+    button both land here. Records via record_listened (log + notes,
+    deduped, ValueError on a bad slug), then rebuilds the shelf page so
+    the sidebar's heard ring is already in the next fetch, and returns
+    the new state (last completion + the rebuilt page's mtime, which the
+    page adopts so the version poll doesn't double-refresh)."""
+    recorded = record_listened(library, slug, at=at)
+    if recorded:
+        rebuild_shelf(library)
+    return {
+        "ok": True,
+        "recorded": recorded,
+        "last": last_listened(load_listening(library / ".listening.jsonl"), slug),
+        "shelf_mtime": shelf_mtime(library),
+    }
+
+
 def artifact_path(library: Path, slug: str, name: str) -> Path:
     """The pinned path of one artifact, or ValueError — the single wall
     for both the write path and the render routes.
@@ -2773,12 +2792,13 @@ def create_app(brain: str, ollama_model: str):
 
     @app.post("/api/listened")
     def api_listened(body: dict):
-        # The page reports a completed listen; the library remembers.
+        # A completed listen — the player's automatic report and the
+        # card's manual "mark as heard" / "done for now" doors all land
+        # on the ONE write path (log + notes + shelf rebuild + state).
         try:
-            recorded = record_listened(LIBRARY, body.get("slug"))
+            return mark_listened(LIBRARY, body.get("slug"))
         except ValueError as error:
             return JSONResponse({"error": str(error)}, status_code=400)
-        return {"ok": True, "recorded": recorded}
 
     def artifact_response(slug: str, name: str):
         """One artifact behind the CSP wall; a clean 404 on any miss."""

@@ -1587,6 +1587,68 @@ def test_record_listened_keeps_existing_notes_content(tmp_path):
     assert notes.index("My takeaways") < notes.index("## Listening")
 
 
+def _markable_library(tmp_path):
+    """A library mark_listened can rebuild: INDEX.md plus the talk dir."""
+    library = tmp_path / "library"
+    (library / "patience").mkdir(parents=True)
+    (library / "INDEX.md").write_text(
+        "# Library Index\n\n## patience\n"
+        "- **Title:** Patience\n"
+        "- **Teacher:** Thanissaro Bhikkhu\n"
+        "- **Source:** https://example.org/patience.html\n"
+        "- **Themes:** patience\n"
+        "- **Path:** library/patience/\n"
+    )
+    return library
+
+
+def test_mark_listened_records_rebuilds_and_returns_state(tmp_path):
+    # The ONE write path behind POST /api/listened — the player's
+    # automatic report and the manual "mark as heard" button both land
+    # here: log + notes via record_listened, then a shelf rebuild so the
+    # next fetch already carries the heard mark.
+    library = _markable_library(tmp_path)
+    state = serve_shelf.mark_listened(
+        library, "patience", at="2026-07-02T06:00:00+00:00"
+    )
+    assert state["ok"] is True
+    assert state["recorded"] is True
+    assert state["last"] == "2026-07-02T06:00:00+00:00"
+    assert state["shelf_mtime"] == serve_shelf.shelf_mtime(library)
+    # Exactly the automatic path's side effects — shared, not mirrored.
+    entries = serve_shelf.load_listening(library / ".listening.jsonl")
+    assert entries == [{"slug": "patience", "at": "2026-07-02T06:00:00+00:00"}]
+    assert "## Listening" in (library / "patience" / "notes.md").read_text()
+    # The rebuilt page already carries the completed listen on the card.
+    shelf = (library / "shelf.html").read_text()
+    assert "listened ✓ 2026-07-02" in shelf
+    assert 'class="mark-heard"' not in shelf  # the manual door closed
+
+
+def test_mark_listened_already_listened_is_idempotent(tmp_path):
+    library = _markable_library(tmp_path)
+    serve_shelf.mark_listened(library, "patience", at="2026-07-02T06:00:00+00:00")
+    mtime = serve_shelf.shelf_mtime(library)
+    # Within the dedupe window: ok, nothing re-recorded, no rebuild churn.
+    state = serve_shelf.mark_listened(
+        library, "patience", at="2026-07-02T06:20:00+00:00"
+    )
+    assert state["ok"] is True
+    assert state["recorded"] is False
+    assert state["last"] == "2026-07-02T06:00:00+00:00"  # the real state
+    assert serve_shelf.shelf_mtime(library) == mtime
+    assert len(serve_shelf.load_listening(library / ".listening.jsonl")) == 1
+
+
+def test_mark_listened_rejects_bad_slugs(tmp_path):
+    library = _markable_library(tmp_path)
+    for bad in ("../evil", "no-such-talk", "", None):
+        with pytest.raises(ValueError):
+            serve_shelf.mark_listened(library, bad)
+    assert not (library / ".listening.jsonl").exists()
+    assert not (library / "shelf.html").exists()  # no rebuild on a miss
+
+
 def test_load_listening_tolerates_garbage(tmp_path):
     path = tmp_path / ".listening.jsonl"
     path.write_text(
