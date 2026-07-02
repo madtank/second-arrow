@@ -159,6 +159,11 @@ def _make_library(tmp_path):
     far = library / "far-talk"
     far.mkdir()
     (far / "transcript.md").write_text("# Far Talk\n\nWords.\n")
+    (library / ".listening.jsonl").write_text(
+        '{"slug": "quiet-mind", "at": "2026-06-30T10:00:00+00:00"}\n'
+        "{torn line\n"
+        '{"slug": "quiet-mind", "at": "2026-07-02T06:00:00+00:00"}\n'
+    )
     demon = library / "demon-story"
     demon.mkdir()
     (demon / "thumbnail.jpg").write_bytes(b"\xff\xd8\xff")
@@ -1168,4 +1173,56 @@ def test_sidebar_collapser_persists_and_spares_mobile(tmp_path):
     # mobile drawer (☰) keeps its own behavior untouched.
     assert "@media (min-width: 721px)" in html
     assert re.search(r"@media \(max-width: 720px\) \{[^@]*#sidebar-collapse \{ display: none;", html, re.S)
+
+
+# --- listened: the shelf remembers what finished ------------------------------
+
+
+def test_listening_summary_loader_tolerates_garbage(tmp_path):
+    library = _make_library(tmp_path)
+    summary = build_shelf.load_listening(library)
+    assert summary == {"quiet-mind": {"count": 2, "last": "2026-07-02T06:00:00+00:00"}}
+    (library / ".listening.jsonl").unlink()
+    assert build_shelf.load_listening(library) == {}
+
+
+def test_card_shows_listened_state_when_completed(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # quiet-mind has finished at least once: a quiet line with the date
+    # and a replay affordance (replay starts fresh — position was cleared).
+    line = re.search(r'<p class="listened-line"[^>]*>.*?</p>', html, re.S)
+    assert line, "listened line missing"
+    assert "listened ✓ 2026-07-02" in line.group(0)
+    assert 'class="listened-replay" data-slug="quiet-mind"' in line.group(0)
+    # Talks never finished carry no such line.
+    far_card = re.search(r'<section class="card view" id="talk-far-talk">.*?</section>', html, re.S)
+    assert "listened-line" not in far_card.group(0)
+
+
+def test_completion_detection_js_markers(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # One POST per talk per page-load; the server dedupes besides.
+    assert '"/api/listened"' in html
+    assert "function reportListened(slug)" in html
+    assert "reportedListened" in html
+    # Local audio reports on ended and via the near-end clear; YouTube via
+    # playerState 0 or ≥98% of duration (before the save throttle).
+    assert "playerState === 0" in html
+    assert "0.98" in html
+    # Static shelf: the POST just fails quietly.
+    assert "the server remembers next time" in html
+
+
+# --- capsule expand: chat steps aside ------------------------------------------
+
+
+def test_capsule_expand_docks_the_chat_first(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The chat panel hands LAYOUT a dock hook...
+    assert "window.saDockChat = function" in html
+    # ...and going to the playing talk uses it BEFORE navigating, so the
+    # room is visible (and still playing) the moment the hash lands.
+    go = re.search(r"function goToNowPlaying\(\) \{[\s\S]*?\n  \}", html).group(0)
+    assert "saDockChat" in go
+    assert go.index("saDockChat") < go.index("location.hash")
 

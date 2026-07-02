@@ -1520,3 +1520,101 @@ def test_pick_ollama_model_remembers_the_choice():
     with pytest.raises(serve_shelf.BrainError):
         serve_shelf.pick_ollama_model("mystery", state, "qwen3", installed)
     assert state["ollama_model"] == "gemma4:12b"
+
+
+# --- listened: the shelf remembers what finished -------------------------------
+
+
+def _listening_library(tmp_path):
+    library = tmp_path / "library"
+    (library / "patience").mkdir(parents=True)
+    return library
+
+
+def test_record_listened_appends_log_and_notes(tmp_path):
+    library = _listening_library(tmp_path)
+    ok = serve_shelf.record_listened(library, "patience", at="2026-07-02T06:00:00+00:00")
+    assert ok is True
+    entries = serve_shelf.load_listening(library / ".listening.jsonl")
+    assert entries == [{"slug": "patience", "at": "2026-07-02T06:00:00+00:00"}]
+    notes = (library / "patience" / "notes.md").read_text()
+    assert "## Listening" in notes
+    assert "- listened to the end — 2026-07-02" in notes
+
+
+def test_record_listened_dedupes_within_the_hour(tmp_path):
+    library = _listening_library(tmp_path)
+    assert serve_shelf.record_listened(library, "patience", at="2026-07-02T06:00:00+00:00")
+    # Same talk again within the hour: ignored (refresh loops, double events).
+    assert serve_shelf.record_listened(library, "patience", at="2026-07-02T06:40:00+00:00") is False
+    assert len(serve_shelf.load_listening(library / ".listening.jsonl")) == 1
+    # A later listen is a real second listen.
+    assert serve_shelf.record_listened(library, "patience", at="2026-07-02T08:30:00+00:00") is True
+    entries = serve_shelf.load_listening(library / ".listening.jsonl")
+    assert len(entries) == 2
+    # The notes heading is created once; each real listen adds one line.
+    notes = (library / "patience" / "notes.md").read_text()
+    assert notes.count("## Listening") == 1
+    assert notes.count("- listened to the end") == 2
+
+
+def test_record_listened_rejects_bad_slugs(tmp_path):
+    library = _listening_library(tmp_path)
+    for bad in ("../evil", "no-such-talk", "", None, 42, ".chat"):
+        with pytest.raises(ValueError):
+            serve_shelf.record_listened(library, bad)
+    assert not (library / ".listening.jsonl").exists()
+
+
+def test_record_listened_keeps_existing_notes_content(tmp_path):
+    library = _listening_library(tmp_path)
+    notes_path = library / "patience" / "notes.md"
+    notes_path.write_text("# Notes\n\n## My takeaways\n\n- patience is not grim.\n")
+    serve_shelf.record_listened(library, "patience", at="2026-07-02T06:00:00+00:00")
+    notes = notes_path.read_text()
+    assert "- patience is not grim." in notes  # nothing clobbered
+    assert notes.index("My takeaways") < notes.index("## Listening")
+
+
+def test_load_listening_tolerates_garbage(tmp_path):
+    path = tmp_path / ".listening.jsonl"
+    path.write_text(
+        '{"slug": "patience", "at": "2026-07-02T06:00:00+00:00"}\n'
+        "{torn line\n"
+        '"just a string"\n'
+        '{"slug": 5, "at": "x"}\n'
+        '{"slug": "demons", "at": "2026-07-01T10:00:00+00:00"}\n'
+    )
+    entries = serve_shelf.load_listening(path)
+    assert [e["slug"] for e in entries] == ["patience", "demons"]
+    assert serve_shelf.load_listening(tmp_path / "missing.jsonl") == []
+
+
+def test_last_listened_picks_the_most_recent(tmp_path):
+    entries = [
+        {"slug": "patience", "at": "2026-07-01T10:00:00+00:00"},
+        {"slug": "patience", "at": "2026-07-02T06:00:00+00:00"},
+        {"slug": "demons", "at": "2026-06-30T10:00:00+00:00"},
+    ]
+    assert serve_shelf.last_listened(entries, "patience") == "2026-07-02T06:00:00+00:00"
+    assert serve_shelf.last_listened(entries, "demons") == "2026-06-30T10:00:00+00:00"
+    assert serve_shelf.last_listened(entries, "unheard") is None
+    assert serve_shelf.last_listened([], "patience") is None
+
+
+def test_ambient_prefix_carries_listened_completion():
+    titles = {"patience": "Patience"}
+    line = serve_shelf.ambient_prefix(
+        "patience", titles, session_id="s-1",
+        listened_last="2026-07-02T06:00:00+00:00",
+    )
+    assert "[session: s-1]" in line
+    assert '"Patience"' in line
+    assert "listened to this talk to the end" in line
+    assert "2026-07-02" in line
+    # Without a completion, the prefix is unchanged byte-for-byte.
+    assert serve_shelf.ambient_prefix("patience", titles, session_id="s-1") == (
+        serve_shelf.ambient_prefix("patience", titles, session_id="s-1", listened_last=None)
+    )
+    assert "listened" not in serve_shelf.ambient_prefix("patience", titles)
+

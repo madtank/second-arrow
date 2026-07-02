@@ -63,6 +63,36 @@ def format_time(seconds) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def load_listening(library: Path) -> dict[str, dict]:
+    """slug -> {"count", "last"} from library/.listening.jsonl (tolerant).
+
+    The server writes it (POST /api/listened); the shelf renders it as a
+    quiet "listened ✓" line. Corrupt lines and a missing file read as
+    silence, never an error.
+    """
+    path = library / ".listening.jsonl"
+    if not path.exists():
+        return {}
+    summary: dict[str, dict] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        slug, at = record.get("slug"), record.get("at")
+        if not isinstance(slug, str) or not isinstance(at, str):
+            continue
+        entry = summary.setdefault(slug, {"count": 0, "last": ""})
+        entry["count"] += 1
+        entry["last"] = max(entry["last"], at)
+    return summary
+
+
 def normalize_segments(data) -> list[dict]:
     """[{"start", "end", "text"}] from a transcript.json of either shape.
 
@@ -382,6 +412,10 @@ STYLE = """
   .path-next { color: #a99e8e; }
   .path-parked { color: #c2b8a6; }
   .player-label { margin: 1rem 0 0.3rem; font-size: 0.9rem; color: #6d5f4b; }
+  .listened-line { margin: 0.4rem 0 0; color: #8a9a70; font-size: 0.85rem; }
+  .listened-replay { font: inherit; font-size: 0.85rem; color: #7a6a50;
+                     background: none; border: none; padding: 0;
+                     cursor: pointer; text-decoration: underline; }
   audio { width: 100%; }
   .source-link { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem;
                  background: #efe7d9; border-radius: 8px; color: #5a4d3a;
@@ -703,6 +737,9 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   document.getElementById("chat-open").addEventListener("click", function () {
     setChatState("conversation"); // open without sending
   });
+  // The now-playing capsule (its own closure) asks the chat to step
+  // aside before it navigates to the playing talk's room.
+  window.saDockChat = function () { setChatState("docked"); };
   document.getElementById("chat-minimize").addEventListener("click", function () {
     setChatState("docked"); // same as Escape: the page is exactly as left
   });
@@ -1144,6 +1181,9 @@ LAYOUT_SCRIPT = """<script>
   }
 
   function savePos(slug, t, duration) {
+    if (duration && duration - t < 15) {
+      reportListened(slug); // within a breath of the end counts
+    }
     try {
       if (duration && duration - t < 15) localStorage.removeItem(posKey(slug));
       else if (t > 1) localStorage.setItem(posKey(slug), String(Math.floor(t)));
@@ -1235,6 +1275,30 @@ LAYOUT_SCRIPT = """<script>
     } catch (e) { /* mute channel: the capsule still navigates */ }
   }
 
+  // --- completion: tell the shelf a talk finished ------------------------
+  var reportedListened = {}; // one POST per talk per page load
+  function reportListened(slug) {
+    if (reportedListened[slug]) return;
+    reportedListened[slug] = true;
+    fetch("/api/listened", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: slug }),
+    }).catch(function () { /* static shelf: the server remembers next time */ });
+  }
+
+  document.querySelectorAll(".listened-replay").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var slug = button.getAttribute("data-slug");
+      var audio = document.querySelector(
+        'audio.talk-audio[data-slug="' + slug + '"]');
+      if (audio) { audio.play(); return; }
+      var holder = document.querySelector(
+        '.yt-embed[data-slug="' + slug + '"]');
+      if (holder) mountFrame(holder, 0);
+    });
+  });
+
   function pauseOthers(slug) {
     // One voice at a time: whoever starts, everyone else goes quiet.
     document.querySelectorAll("audio.talk-audio").forEach(function (audio) {
@@ -1289,7 +1353,12 @@ LAYOUT_SCRIPT = """<script>
   }
 
   function goToNowPlaying() {
-    if (nowPlaying) location.hash = "#talk/" + nowPlaying.slug;
+    if (!nowPlaying) return;
+    // Chat steps aside FIRST, so the room (and the still-playing video)
+    // is visible the moment the hash lands.
+    if (window.saDockChat) window.saDockChat();
+    location.hash = "#talk/" + nowPlaying.slug;
+    updateCapsule();
   }
   npBody.addEventListener("click", goToNowPlaying);
   npExpand.addEventListener("click", goToNowPlaying);
@@ -1378,6 +1447,7 @@ LAYOUT_SCRIPT = """<script>
       }
     });
     audio.addEventListener("ended", function () {
+      reportListened(slug); // it played to the end
       if (nowPlaying && nowPlaying.slug === slug) {
         nowPlaying = null;
         updateCapsule();
@@ -1439,6 +1509,11 @@ LAYOUT_SCRIPT = """<script>
     if (!data || data.event !== "infoDelivery" || !data.info) return;
     var slug = data.id;
     if (!ytMounted[slug] || typeof data.info.currentTime !== "number") return;
+    if (data.info.playerState === 0
+        || (data.info.duration
+            && data.info.currentTime >= data.info.duration * 0.98)) {
+      reportListened(slug); // ended, or within 2% of it
+    }
     if (nowPlaying && nowPlaying.slug === slug) {
       nowPlaying.ytInfo = true; // the command channel is alive
       nowPlaying.time = data.info.currentTime;
@@ -1457,7 +1532,7 @@ LAYOUT_SCRIPT = """<script>
 </script>"""
 
 
-def render_card(talk: dict, files: dict, reach: str | None) -> str:
+def render_card(talk: dict, files: dict, reach: str | None, listened: dict | None = None) -> str:
     slug = talk["slug"]
     parts = [
         f'<section class="card view" id="talk-{escape(slug)}">',
@@ -1514,6 +1589,14 @@ def render_card(talk: dict, files: dict, reach: str | None) -> str:
                 f'<a class="source-link" href="{escape(source)}" target="_blank" '
                 'rel="noopener">Listen at the source &rarr;</a>'
             )
+    if listened and listened.get("last"):
+        # Finished at least once: say so quietly. Replay simply plays —
+        # the resume position was cleared at the end, so it starts fresh.
+        parts.append(
+            f'<p class="listened-line">listened ✓ {escape(listened["last"][:10])}'
+            f' · <button type="button" class="listened-replay" '
+            f'data-slug="{escape(slug)}">replay</button></p>'
+        )
     return "\n".join(parts)
 
 
@@ -1628,6 +1711,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     path_strip = render_path_strip(path)  # the home view's small summary
     talks = parse_index((library / "INDEX.md").read_text())
     states, unfetched = talk_states(path, talks)
+    listening = load_listening(library)
     curriculum_view = render_curriculum(library.parent / "curriculum", talks)
     curriculum_link = (
         '\n<a class="begin-link" href="#curriculum">curriculum</a>'
@@ -1638,7 +1722,8 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     for talk in talks:
         talk_dir = library / talk["slug"]
         files = probe(talk_dir) if talk_dir.is_dir() else probe(library / "_missing_")
-        card = [render_card(talk, files, reach.get(talk.get("source", "")))]
+        card = [render_card(talk, files, reach.get(talk.get("source", "")),
+                            listened=listening.get(talk["slug"]))]
         slug = escape(talk["slug"])
         if files["primer_md"]:
             primer = md_to_html((talk_dir / "primer.md").read_text())

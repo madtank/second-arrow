@@ -32,6 +32,11 @@ Routes:
                     recorded the turn.
     GET  /api/sessions  {"sessions": [{id,title,summary,updated}...]}, newest
                     first — kept for tooling; the panel no longer shows it.
+    POST /api/listened  {"slug"} — the page reports a completed listen;
+                    appended to library/.listening.jsonl (deduped within
+                    the hour) and to the talk's notes.md under
+                    "## Listening". Feeds the card's "listened ✓" state
+                    and the ambient wrap-up bridge.
     GET  /api/models  installed Ollama models for the panel's picker:
                     {"models": [{name, tools, size_gb}...], "current": name}
                     (tools per /api/show capabilities; 503 when Ollama is
@@ -154,6 +159,9 @@ ARTIFACT_CSP = (
     "img-src 'self' data:; media-src 'self'; frame-ancestors 'self'; "
     "form-action 'none'; base-uri 'none'"
 )
+LISTENING_PATH = LIBRARY / ".listening.jsonl"  # private, gitignored
+LISTEN_DEDUPE_SECONDS = 3600  # refresh loops / double events fold into one
+
 ARTIFACT_HEADERS = {
     "Content-Security-Policy": ARTIFACT_CSP,
     "X-Content-Type-Options": "nosniff",
@@ -275,25 +283,110 @@ def pick_chunks_for_view(
 
 
 def ambient_prefix(
-    view: str | None, titles: dict[str, str], session_id: str | None = None
+    view: str | None,
+    titles: dict[str, str],
+    session_id: str | None = None,
+    listened_last: str | None = None,
 ) -> str:
     """Prompt lines for what's on screen: the session id and the open talk.
 
     titles maps slug -> display title (from INDEX.md). The talk line
     teaches the claude brain what "he" and "this talk" refer to; the
     session line tells it which conversation update_session_summary
-    should retitle. Either part may be absent.
+    should retitle; listened_last (most recent completion, ISO) lets the
+    guide bridge naturally toward wrap-up. Any part may be absent.
     """
     lines = []
     if session_id:
         lines.append(f"[session: {session_id}]")
     if view and view in titles:
+        completion = (
+            f" (The user has listened to this talk to the end — most "
+            f"recently {listened_last[:10]}.)"
+            if listened_last
+            else ""
+        )
         lines.append(
             f'[The user currently has "{titles[view]}" open on the shelf — its '
             f"transcript is library/{view}/transcript.md. Treat it as the ambient "
-            'context; "he/this talk" refers to it.]'
+            f'context; "he/this talk" refers to it.{completion}]'
         )
     return "\n".join(lines)
+
+
+# --- listened: the shelf remembers what finished ------------------------------
+
+
+def load_listening(path: Path) -> list[dict]:
+    """[{slug, at}] from .listening.jsonl — corrupt lines skipped."""
+    if not path.exists():
+        return []
+    entries: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(record, dict)
+            and isinstance(record.get("slug"), str)
+            and isinstance(record.get("at"), str)
+        ):
+            entries.append({"slug": record["slug"], "at": record["at"]})
+    return entries
+
+
+def last_listened(entries: list[dict], slug: str) -> str | None:
+    """The most recent completion stamp for a talk, or None."""
+    stamps = [e["at"] for e in entries if e["slug"] == slug]
+    return max(stamps) if stamps else None
+
+
+def _append_listening_note(notes_path: Path, date_str: str) -> None:
+    """One quiet line under "## Listening" (heading created once)."""
+    line = f"- listened to the end — {date_str}"
+    text = notes_path.read_text(encoding="utf-8") if notes_path.exists() else ""
+    match = re.search(r"## Listening\n+", text)
+    if match:
+        text = text[: match.end()] + line + "\n" + text[match.end() :]
+    else:
+        base = text.rstrip("\n")
+        text = (base + "\n\n" if base else "") + "## Listening\n\n" + line + "\n"
+    notes_path.write_text(text, encoding="utf-8")
+
+
+def record_listened(library: Path, slug, at: str | None = None) -> bool:
+    """A talk finished: log it and note it. Returns False when deduped.
+
+    slug must be an existing talk folder. Completions of the same talk
+    within LISTEN_DEDUPE_SECONDS fold into one (refresh loops, doubled
+    events). Each real completion appends {slug, at} to .listening.jsonl
+    and one line to the talk's notes.md under "## Listening" — both
+    private paths the guide already reads.
+    """
+    if not isinstance(slug, str) or not TALK_SLUG_RE.fullmatch(slug):
+        raise ValueError(f"invalid talk slug {slug!r}")
+    if not (library / slug).is_dir():
+        raise ValueError(f"no talk {slug!r} in the library")
+    stamp = at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    log_path = library / ".listening.jsonl"
+    previous = last_listened(load_listening(log_path), slug)
+    if previous:
+        try:
+            gap = (
+                datetime.fromisoformat(stamp) - datetime.fromisoformat(previous)
+            ).total_seconds()
+            if 0 <= gap < LISTEN_DEDUPE_SECONDS:
+                return False
+        except ValueError:
+            pass  # a garbled stamp never blocks a real completion
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"slug": slug, "at": stamp}) + "\n")
+    _append_listening_note(library / slug / "notes.md", stamp[:10])
+    return True
 
 
 def artifact_path(library: Path, slug: str, name: str) -> Path:
@@ -1986,6 +2079,15 @@ def create_app(brain: str, ollama_model: str):
         turns = load_history(session_turns_path(SESSIONS_DIR, sid), HISTORY_LIMIT)
         return {"session": sid, "turns": turns}
 
+    @app.post("/api/listened")
+    def api_listened(body: dict):
+        # The page reports a completed listen; the library remembers.
+        try:
+            recorded = record_listened(LIBRARY, body.get("slug"))
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+        return {"ok": True, "recorded": recorded}
+
     def artifact_response(slug: str, name: str):
         """One artifact behind the CSP wall; a clean 404 on any miss."""
         try:
@@ -2071,9 +2173,18 @@ def create_app(brain: str, ollama_model: str):
         state = {"session_id": meta.get("claude_session_id")}
         try:
             if chosen == "claude":
-                # The prefix names the session (for update_session_summary)
-                # and the open talk (the ambient context).
-                prefix = ambient_prefix(view, load_talk_titles(LIBRARY), session_id=sid)
+                # The prefix names the session (for update_session_summary),
+                # the open talk (ambient context), and whether that talk has
+                # been listened to the end (the bridge toward wrap-up).
+                heard = (
+                    last_listened(load_listening(LISTENING_PATH), view)
+                    if view
+                    else None
+                )
+                prefix = ambient_prefix(
+                    view, load_talk_titles(LIBRARY),
+                    session_id=sid, listened_last=heard,
+                )
                 stream = stream_claude(messages, state, prefix=prefix)
             else:
                 stream = stream_ollama(
