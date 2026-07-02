@@ -47,6 +47,26 @@ Routes:
                     the hour) and to the talk's notes.md under
                     "## Listening". Feeds the card's "listened ✓" state
                     and the ambient wrap-up bridge.
+    POST /api/unheard  {"slug"} — "mark unheard — come back to this":
+                    appends a retraction {slug, at, retract: true} to the
+                    same append-only log (latest entry wins), annotates
+                    the talk's notes ("flagged to revisit"), rebuilds.
+                    The path (done) state is untouched.
+    POST /api/done  {"slug"} — "✓ Done with this talk", server-first:
+                    records the listen if absent, moves the talk from
+                    Queued to Studied on STUDY.md with a "(done for now —
+                    not yet discussed)" one-liner, rebuilds the shelf.
+                    Instant, idempotent, no LLM — the guide's follow-up
+                    ("what's next") is a separate queued chat message.
+    POST /api/reopen  {"slug"} — the exact inverse: Studied → Queued
+                    with a "(reopened <date>)" one-liner + rebuild.
+                    Reopening a not-done talk is a clean no-op.
+    POST /api/chat/stop  {"session"?} — abort that episode's in-flight
+                    turn (default: the current episode): the claude
+                    subprocess is killed / the hermes or ollama stream
+                    is closed; the partial reply stays in history ending
+                    with a quiet "— stopped —" line. 404 when nothing is
+                    streaming.
     GET  /api/models  installed Ollama models for the settings picker:
                     {"models": [{name, tools, size_gb}...], "current": name}
                     (tools per /api/show capabilities; 503 when Ollama is
@@ -381,7 +401,12 @@ def ambient_prefix(
 
 
 def load_listening(path: Path) -> list[dict]:
-    """[{slug, at}] from .listening.jsonl — corrupt lines skipped."""
+    """[{slug, at, retract}] from .listening.jsonl — corrupt lines skipped.
+
+    The log is append-only: a listen is {slug, at}; "mark unheard" appends
+    a retraction {slug, at, retract: true} instead of rewriting history.
+    Readers apply latest-entry-wins (see last_listened).
+    """
     if not path.exists():
         return []
     entries: list[dict] = []
@@ -398,19 +423,31 @@ def load_listening(path: Path) -> list[dict]:
             and isinstance(record.get("slug"), str)
             and isinstance(record.get("at"), str)
         ):
-            entries.append({"slug": record["slug"], "at": record["at"]})
+            entries.append(
+                {
+                    "slug": record["slug"],
+                    "at": record["at"],
+                    "retract": record.get("retract") is True,
+                }
+            )
     return entries
 
 
 def last_listened(entries: list[dict], slug: str) -> str | None:
-    """The most recent completion stamp for a talk, or None."""
-    stamps = [e["at"] for e in entries if e["slug"] == slug]
-    return max(stamps) if stamps else None
+    """The most recent completion stamp for a talk, or None.
+
+    Latest entry wins: a retraction newer than every listen reads as
+    not-heard; a listen after a retraction counts again.
+    """
+    mine = [e for e in entries if e["slug"] == slug]
+    if not mine:
+        return None
+    latest = max(mine, key=lambda e: e["at"])
+    return None if latest.get("retract") else latest["at"]
 
 
-def _append_listening_note(notes_path: Path, date_str: str) -> None:
+def _append_listening_note(notes_path: Path, line: str) -> None:
     """One quiet line under "## Listening" (heading created once)."""
-    line = f"- listened to the end — {date_str}"
     text = notes_path.read_text(encoding="utf-8") if notes_path.exists() else ""
     match = re.search(r"## Listening\n+", text)
     if match:
@@ -448,7 +485,9 @@ def record_listened(library: Path, slug, at: str | None = None) -> bool:
             pass  # a garbled stamp never blocks a real completion
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"slug": slug, "at": stamp}) + "\n")
-    _append_listening_note(library / slug / "notes.md", stamp[:10])
+    _append_listening_note(
+        library / slug / "notes.md", f"- listened to the end — {stamp[:10]}"
+    )
     return True
 
 
@@ -467,6 +506,254 @@ def mark_listened(library: Path, slug, at: str | None = None) -> dict:
         "ok": True,
         "recorded": recorded,
         "last": last_listened(load_listening(library / ".listening.jsonl"), slug),
+        "shelf_mtime": shelf_mtime(library),
+    }
+
+
+def record_unheard(library: Path, slug, at: str | None = None) -> bool:
+    """"Mark unheard — come back to this": retract a talk's heard state.
+
+    Appends {slug, at, retract: true} to the append-only log (latest
+    entry wins — see last_listened) and one quiet "flagged to revisit"
+    line to the talk's notes.md. Returns False when the talk isn't heard
+    right now (nothing to retract — idempotent). ValueError on a bad
+    slug, same wall as record_listened.
+    """
+    if not isinstance(slug, str) or not TALK_SLUG_RE.fullmatch(slug):
+        raise ValueError(f"invalid talk slug {slug!r}")
+    if not (library / slug).is_dir():
+        raise ValueError(f"no talk {slug!r} in the library")
+    log_path = library / ".listening.jsonl"
+    if last_listened(load_listening(log_path), slug) is None:
+        return False
+    stamp = at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"slug": slug, "at": stamp, "retract": True}) + "\n"
+        )
+    _append_listening_note(
+        library / slug / "notes.md", f"- flagged to revisit — {stamp[:10]}"
+    )
+    return True
+
+
+def mark_unheard(library: Path, slug, at: str | None = None) -> dict:
+    """The write path behind POST /api/unheard — record_unheard, then a
+    shelf rebuild so the card and sidebar read not-heard, returning the
+    new state the page adopts (mirror of mark_listened)."""
+    retracted = record_unheard(library, slug, at=at)
+    if retracted:
+        rebuild_shelf(library)
+    return {
+        "ok": True,
+        "retracted": retracted,
+        "last": last_listened(load_listening(library / ".listening.jsonl"), slug),
+        "shelf_mtime": shelf_mtime(library),
+    }
+
+
+# --- done / reopen: the path move is the server's, instantly ----------------
+#
+# The card buttons used to ASK the guide to move the talk on STUDY.md —
+# a press could silently vanish while the guide was busy. Now the server
+# performs the move itself (instant, idempotent, no LLM), and the guide
+# only gets the conversational follow-through.
+
+DONE_NOTE = "(done for now — not yet discussed)"
+
+_STUDY_SKELETON = """# Study Memory
+
+## Where we are
+
+## Studied
+
+## Queued
+
+## Open questions
+"""
+
+
+def _study_item_name(line: str) -> str:
+    """A path item's display name: its **bold** span, else the text before
+    the first " — " or ": " separator (build_shelf.parse_study's rule)."""
+    item = line[2:].strip()
+    bold = re.match(r"\*\*(.+?)\*\*", item)
+    return (bold.group(1) if bold else re.split(r" — |: ", item)[0]).strip().rstrip(".")
+
+
+def _section_bounds(lines: list[str], name: str) -> tuple[int, int] | None:
+    """(heading_index, end) of a `## <name>` section, or None. `end` is
+    the index of the next heading (any level) or EOF."""
+    start = None
+    for i, line in enumerate(lines):
+        heading = re.match(r"#{2,} (.+)", line)
+        if heading and heading.group(1).strip().lower() == name:
+            start = i
+            break
+    if start is None:
+        return None
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith("#"):
+        end += 1
+    return start, end
+
+
+def _move_on_path(
+    study_text: str, title: str, dst: str, item_line: str, add_when_absent: bool
+) -> tuple[str, bool]:
+    """Move `title` between STUDY.md's Studied and Queued lists.
+
+    Pure and idempotent: already in `dst` returns the text unchanged;
+    absent from both lists it is appended to `dst` only when
+    add_when_absent. The four-section shape is kept — a missing dst
+    section is created in its canonical place (Studied before Queued,
+    Queued after Studied); empty text starts from the four-section
+    skeleton. Matching uses build_shelf.normalize_title, the same key
+    the sidebar uses. Returns (new_text, changed).
+    """
+    normalize = load_build_shelf().normalize_title
+    target = normalize(title)
+    text = study_text if (study_text or "").strip() else _STUDY_SKELETON
+    lines = text.splitlines()
+    src = "queued" if dst == "studied" else "studied"
+
+    section = None
+    src_span = None  # (start, end) of the matching src item + wrapped lines
+    for i, line in enumerate(lines):
+        heading = re.match(r"#{2,} (.+)", line)
+        if heading:
+            name = heading.group(1).strip().lower()
+            section = name if name in ("studied", "queued") else None
+            continue
+        if section is None or not line.startswith("- "):
+            continue
+        if normalize(_study_item_name(line)) != target:
+            continue
+        if section == dst:
+            return study_text, False  # already there — idempotent
+        if src_span is None:
+            end = i + 1  # wrapped continuation lines ride along
+            while (
+                end < len(lines)
+                and lines[end].strip()
+                and not lines[end].startswith(("- ", "#"))
+            ):
+                end += 1
+            src_span = (i, end)
+
+    if src_span is None and not add_when_absent:
+        return study_text, False  # nothing to move — a clean no-op
+    if src_span:
+        del lines[src_span[0] : src_span[1]]
+
+    bounds = _section_bounds(lines, dst)
+    if bounds is None:
+        anchor = _section_bounds(lines, src)
+        if dst == "studied":
+            at = anchor[0] if anchor else len(lines)  # Studied before Queued
+        else:
+            at = anchor[1] if anchor else len(lines)  # Queued after Studied
+        if at == len(lines) and lines and lines[-1].strip():
+            lines.append("")
+        heading_text = "Studied" if dst == "studied" else "Queued"
+        lines[at:at] = [f"## {heading_text}", "", item_line, ""]
+    else:
+        # Insert at the end of the section's items (trailing blank lines
+        # stay where they were, before the next heading).
+        start, end = bounds
+        while end > start + 1 and not lines[end - 1].strip():
+            end -= 1
+        lines.insert(end, item_line)
+    return "\n".join(lines) + "\n", True
+
+
+def mark_done_on_path(study_text: str, title: str) -> tuple[str, bool]:
+    """Queued → Studied with the "(done for now — not yet discussed)"
+    one-liner. A talk on neither list is appended to Studied (done is
+    done). Returns (new_text, changed)."""
+    return _move_on_path(
+        study_text,
+        title,
+        "studied",
+        f"- **{title}** — {DONE_NOTE}",
+        add_when_absent=True,
+    )
+
+
+def mark_reopened_on_path(
+    study_text: str, title: str, date_str: str | None = None
+) -> tuple[str, bool]:
+    """The exact inverse: Studied → Queued with a "(reopened <date>)"
+    one-liner. A talk not on the Studied list is a clean no-op — there
+    is nothing to reopen. Returns (new_text, changed)."""
+    date_str = date_str or datetime.now(timezone.utc).date().isoformat()
+    return _move_on_path(
+        study_text,
+        title,
+        "queued",
+        f"- **{title}** — (reopened {date_str})",
+        add_when_absent=False,
+    )
+
+
+def mark_done(library: Path, slug) -> dict:
+    """The ONE write path behind POST /api/done — instant, idempotent,
+    no LLM involved.
+
+    Records the listen if the talk has none on record (record_listened —
+    log + notes), moves the talk from Queued to Studied on STUDY.md with
+    the "(done for now — not yet discussed)" one-liner (mark_done_on_path),
+    rebuilds the shelf when anything changed, and returns the state the
+    page adopts. The guide's only job afterwards is the what's-next
+    conversation — the path move already happened here.
+    """
+    if not isinstance(slug, str) or not TALK_SLUG_RE.fullmatch(slug):
+        raise ValueError(f"invalid talk slug {slug!r}")
+    if not (library / slug).is_dir():
+        raise ValueError(f"no talk {slug!r} in the library")
+    log_path = library / ".listening.jsonl"
+    recorded = False
+    if not last_listened(load_listening(log_path), slug):
+        recorded = record_listened(library, slug)
+    title = load_talk_titles(library).get(slug, slug)
+    study_path = library.parent / "STUDY.md"
+    study_text = study_path.read_text(encoding="utf-8") if study_path.exists() else ""
+    new_text, moved = mark_done_on_path(study_text, title)
+    if moved:
+        study_path.write_text(new_text, encoding="utf-8")
+    if recorded or moved:
+        rebuild_shelf(library)
+    return {
+        "ok": True,
+        "recorded": recorded,
+        "moved": moved,
+        "last": last_listened(load_listening(log_path), slug),
+        "shelf_mtime": shelf_mtime(library),
+    }
+
+
+def mark_reopen(library: Path, slug) -> dict:
+    """The ONE write path behind POST /api/reopen — mark_done's exact
+    inverse, instant and idempotent.
+
+    Moves the talk from Studied back to Queued on STUDY.md with a
+    "(reopened <date>)" one-liner and rebuilds the shelf; reopening a
+    talk that isn't done is a clean no-op {ok: true}. The listen record
+    is untouched — reopening questions the path, not the hearing."""
+    if not isinstance(slug, str) or not TALK_SLUG_RE.fullmatch(slug):
+        raise ValueError(f"invalid talk slug {slug!r}")
+    if not (library / slug).is_dir():
+        raise ValueError(f"no talk {slug!r} in the library")
+    title = load_talk_titles(library).get(slug, slug)
+    study_path = library.parent / "STUDY.md"
+    study_text = study_path.read_text(encoding="utf-8") if study_path.exists() else ""
+    new_text, moved = mark_reopened_on_path(study_text, title)
+    if moved:
+        study_path.write_text(new_text, encoding="utf-8")
+        rebuild_shelf(library)
+    return {
+        "ok": True,
+        "moved": moved,
         "shelf_mtime": shelf_mtime(library),
     }
 
@@ -2402,6 +2689,87 @@ def hermes_tool_progress_line(name: str) -> str:
     return TOOL_PROGRESS.get(short, "— working… —")
 
 
+# --- stopping a turn: one kill switch per in-flight episode -----------------
+#
+# The page's ▢ stop button lands on POST /api/chat/stop {session}; the
+# server aborts the turn's transport — the claude subprocess is killed,
+# the hermes/ollama HTTP stream is closed — and the brain generator,
+# seeing its handle stopped, ends the reply with one quiet "— stopped —"
+# narrative line instead of the broken-stream apology. Whatever text
+# already streamed stays in history (record_stream records it as usual).
+
+STOPPED_LINE = "\n— stopped —\n"
+
+
+class TurnHandle:
+    """One in-flight chat turn's kill switch.
+
+    Brains attach closers (kill this subprocess, close this stream) as
+    they open transports; stop() runs them all and flips `stopped` so the
+    generator can end with the stopped line. An attach AFTER stop runs
+    the closer immediately — a stop can never race past a late transport
+    (the ollama tool loop opens a new stream per round).
+    """
+
+    def __init__(self) -> None:
+        self.stopped = False
+        self._closers: list = []
+        self._lock = threading.Lock()
+
+    def attach(self, closer) -> None:
+        with self._lock:
+            if not self.stopped:
+                self._closers.append(closer)
+                return
+        self._run(closer)
+
+    @staticmethod
+    def _run(closer) -> None:
+        try:
+            closer()
+        except Exception:  # noqa: BLE001 — a dead transport is already stopped
+            pass
+
+    def stop(self) -> bool:
+        """Abort the turn. Returns False when it was already stopped."""
+        with self._lock:
+            if self.stopped:
+                return False
+            self.stopped = True
+            closers, self._closers = self._closers, []
+        for closer in closers:
+            self._run(closer)
+        return True
+
+
+# One handle per episode: the page serializes its own sends (busy turns
+# queue client-side), so a session never has two turns in flight.
+_TURN_HANDLES: dict[str, TurnHandle] = {}
+_TURN_HANDLES_GUARD = threading.Lock()
+
+
+def register_turn(session_id: str) -> TurnHandle:
+    handle = TurnHandle()
+    with _TURN_HANDLES_GUARD:
+        _TURN_HANDLES[session_id] = handle
+    return handle
+
+
+def release_turn(session_id: str, handle: TurnHandle) -> None:
+    with _TURN_HANDLES_GUARD:
+        if _TURN_HANDLES.get(session_id) is handle:
+            del _TURN_HANDLES[session_id]
+
+
+def stop_turn(session_id) -> bool:
+    """Stop the named session's in-flight turn; False when none is."""
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    with _TURN_HANDLES_GUARD:
+        handle = _TURN_HANDLES.get(session_id)
+    return handle.stop() if handle else False
+
+
 # --- the three brains (all stream) ----------------------------------------
 
 STREAM_BROKE = "the stream broke off here. Ask again and I'll pick it back up."
@@ -2484,7 +2852,7 @@ def _drain_claude(proc: subprocess.Popen, state: dict):
     return emitted, finished and proc.returncode == 0
 
 
-def stream_claude(messages: list[dict], state: dict, prefix: str = ""):
+def stream_claude(messages: list[dict], state: dict, prefix: str = "", handle=None):
     """Start a claude turn; return a generator of reply-text chunks.
 
     `prefix` (the ambient-context line) rides at the top of the outgoing
@@ -2492,7 +2860,9 @@ def stream_claude(messages: list[dict], state: dict, prefix: str = ""):
     can't even start. Mid-stream failures degrade gracefully: a resume
     that dies before producing text is retried fresh with folded history
     (resume has proved flaky); anything else keeps what arrived and
-    appends one apology.
+    appends one apology. `handle` (a TurnHandle) lets /api/chat/stop
+    kill the subprocess: a stopped turn ends with the quiet stopped
+    line, never the apology, never the retry.
     """
 
     def with_prefix(prompt: str) -> str:
@@ -2501,9 +2871,14 @@ def stream_claude(messages: list[dict], state: dict, prefix: str = ""):
     session_id = state.get("session_id")
     prompt = messages[-1]["content"] if session_id else history_prompt(messages)
     proc = _spawn_claude(with_prefix(prompt), session_id)
+    if handle:
+        handle.attach(proc.kill)
 
     def generate():
         emitted, ok = yield from _drain_claude(proc, state)
+        if handle and handle.stopped:
+            yield STOPPED_LINE
+            return
         if not ok and not emitted and session_id:
             state["session_id"] = None  # retry fresh with folded history
             try:
@@ -2511,7 +2886,12 @@ def stream_claude(messages: list[dict], state: dict, prefix: str = ""):
             except BrainError as error:
                 yield f"The guide is out of reach — {error.message}"
                 return
+            if handle:
+                handle.attach(retry.kill)
             emitted, ok = yield from _drain_claude(retry, state)
+            if handle and handle.stopped:
+                yield STOPPED_LINE
+                return
         if not ok:
             yield ("\n\n— " if emitted else "The guide is out of reach — ") + STREAM_BROKE
         elif not emitted:
@@ -2587,6 +2967,7 @@ def stream_ollama(
     library: Path,
     view: str | None = None,
     session_id: str | None = None,
+    handle=None,
 ):
     """Start an Ollama turn; return a generator of reply-text chunks.
 
@@ -2673,6 +3054,16 @@ def stream_ollama(
             "Ollama stopped answering mid-conversation — "
             "check `ollama serve` and try again.",
         )
+    if handle:
+        handle.attach(response.close)
+
+    def open_round(round_payload):
+        # Each tool round opens a fresh stream; the stop handle must be
+        # able to close whichever one is live.
+        next_response = _open_ollama_chat(round_payload)
+        if handle:
+            handle.attach(next_response.close)
+        return next_response
 
     def dispatch_tool(argv: list[str]) -> tuple[bool, str]:
         """run_tool, plus the in-process tools: write_artifact and
@@ -2710,7 +3101,7 @@ def stream_ollama(
                 response,
                 payload["messages"],
                 model,
-                _open_ollama_chat,
+                open_round,
                 dispatch_tool,
                 tools=OLLAMA_TOOLS if has_tools else None,
             ):
@@ -2719,7 +3110,10 @@ def stream_ollama(
             if not emitted:
                 yield f"Ollama ({model}) returned an empty reply — try again."
         except (json.JSONDecodeError, ValueError, urllib.error.URLError, OSError, TimeoutError):
-            yield ("\n\n— " if emitted else "The guide is out of reach — ") + STREAM_BROKE
+            if handle and handle.stopped:
+                yield STOPPED_LINE
+            else:
+                yield ("\n\n— " if emitted else "The guide is out of reach — ") + STREAM_BROKE
 
     return generate()
 
@@ -2785,6 +3179,7 @@ def stream_hermes(
     model_alias: str | None = None,
     base: str | None = None,
     api_key: str | None = None,
+    handle=None,
 ):
     """Start a hermes turn; return a generator of reply-text chunks.
 
@@ -2820,6 +3215,8 @@ def stream_hermes(
     lock.acquire()  # released when the stream ends (generate's finally)
     try:
         response = _open_hermes_chat(body, key, session_id, base=base)
+        if handle:
+            handle.attach(response.close)
     except BaseException:
         lock.release()
         raise
@@ -2846,10 +3243,15 @@ def stream_hermes(
                     if parsed["done"]:
                         finished = True
                         break
-        except (urllib.error.URLError, OSError, TimeoutError):
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+            # ValueError is what reading a stop-closed response raises;
+            # a gateway hiccup lands here too and gets the apology below.
             finished = False
         finally:
             lock.release()
+        if handle and handle.stopped:
+            yield STOPPED_LINE
+            return
         if not finished:
             yield ("\n\n— " if emitted else "The guide is out of reach — ") + STREAM_BROKE
         elif not emitted:
@@ -2991,6 +3393,37 @@ def create_app(brain: str, ollama_model: str):
         except ValueError as error:
             return JSONResponse({"error": str(error)}, status_code=400)
 
+    @app.post("/api/unheard")
+    def api_unheard(body: dict):
+        # "mark unheard — come back to this": an append-only retraction
+        # (latest entry wins) + a notes annotation + a rebuild. Done is
+        # a PATH state and stays untouched — reopening goes through the
+        # card's own reopen door.
+        try:
+            return mark_unheard(LIBRARY, body.get("slug"))
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+
+    @app.post("/api/done")
+    def api_done(body: dict):
+        # "✓ Done with this talk", server-first: record the listen if
+        # absent, move Queued → Studied on STUDY.md, rebuild — instant,
+        # idempotent, no LLM. The guide only gets the what's-next
+        # conversation afterwards (a queued chat message, page-side).
+        try:
+            return mark_done(LIBRARY, body.get("slug"))
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+
+    @app.post("/api/reopen")
+    def api_reopen(body: dict):
+        # The exact inverse: Studied → Queued with a "(reopened <date>)"
+        # note. Idempotent; reopening a not-done talk is a clean no-op.
+        try:
+            return mark_reopen(LIBRARY, body.get("slug"))
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+
     def artifact_response(slug: str, name: str):
         """One artifact behind the CSP wall; a clean 404 on any miss."""
         try:
@@ -3084,6 +3517,9 @@ def create_app(brain: str, ollama_model: str):
         # switching sessions switches threads; ollama turns never touch it.
         meta = load_session_meta(session_meta_path(SESSIONS_DIR, sid))
         state = {"session_id": meta.get("claude_session_id")}
+        # The turn's kill switch: /api/chat/stop {session} aborts it. One
+        # per episode — the page queues its own sends while busy.
+        handle = register_turn(sid)
         try:
             if chosen in ("claude", "hermes"):
                 # The prefix names the session (for update_session_summary),
@@ -3099,7 +3535,9 @@ def create_app(brain: str, ollama_model: str):
                     session_id=sid, listened_last=heard,
                 )
                 if chosen == "claude":
-                    stream = stream_claude(messages, state, prefix=prefix)
+                    stream = stream_claude(
+                        messages, state, prefix=prefix, handle=handle
+                    )
                 else:
                     # Per-request model = a route alias picked in the UI;
                     # anything non-string is quietly no-alias (the gateway
@@ -3110,27 +3548,53 @@ def create_app(brain: str, ollama_model: str):
                         sid,
                         prefix=prefix,
                         model_alias=alias if isinstance(alias, str) and alias else None,
+                        handle=handle,
                     )
             else:
                 stream = stream_ollama(
-                    messages, model, LIBRARY, view=view, session_id=sid
+                    messages, model, LIBRARY, view=view, session_id=sid,
+                    handle=handle,
                 )
         except BrainError as error:
+            release_turn(sid, handle)
             return JSONResponse({"error": error.message}, status_code=error.status)
+
+        def released(inner):
+            # The kill switch lives exactly as long as the stream.
+            try:
+                yield from inner
+            finally:
+                release_turn(sid, handle)
+
         # Chunked plain text: each chunk is a raw reply fragment (no framing).
         return StreamingResponse(
-            record_stream(
-                stream,
-                messages[-1]["content"],
-                chosen,
-                state,
-                turns_path=session_turns_path(SESSIONS_DIR, sid),
-                meta_path=session_meta_path(SESSIONS_DIR, sid),
-                view=view,
+            released(
+                record_stream(
+                    stream,
+                    messages[-1]["content"],
+                    chosen,
+                    state,
+                    turns_path=session_turns_path(SESSIONS_DIR, sid),
+                    meta_path=session_meta_path(SESSIONS_DIR, sid),
+                    view=view,
+                )
             ),
             media_type="text/plain; charset=utf-8",
             headers={"X-Brain": chosen, "X-Session": sid},
         )
+
+    @app.post("/api/chat/stop")
+    def chat_stop(body: dict):
+        # The page's ▢ stop: abort the named episode's in-flight turn.
+        # The partial reply stays in history with a "— stopped —" line
+        # (the brain generator appends it when it sees the stop).
+        sid = body.get("session")
+        sid = sid if isinstance(sid, str) and sid else current["sid"]
+        if not sid or not stop_turn(sid):
+            return JSONResponse(
+                {"error": "no reply is streaming right now"}, status_code=404
+            )
+        return {"ok": True, "session": sid}
 
     # Mounted last so /, /health, /api/chat win; everything else — primers,
     # talk audio, transcripts — is served straight from library/ with Range

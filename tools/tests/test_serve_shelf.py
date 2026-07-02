@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1594,7 +1595,9 @@ def test_record_listened_appends_log_and_notes(tmp_path):
     ok = serve_shelf.record_listened(library, "patience", at="2026-07-02T06:00:00+00:00")
     assert ok is True
     entries = serve_shelf.load_listening(library / ".listening.jsonl")
-    assert entries == [{"slug": "patience", "at": "2026-07-02T06:00:00+00:00"}]
+    assert entries == [
+        {"slug": "patience", "at": "2026-07-02T06:00:00+00:00", "retract": False}
+    ]
     notes = (library / "patience" / "notes.md").read_text()
     assert "## Listening" in notes
     assert "- listened to the end — 2026-07-02" in notes
@@ -1664,7 +1667,9 @@ def test_mark_listened_records_rebuilds_and_returns_state(tmp_path):
     assert state["shelf_mtime"] == serve_shelf.shelf_mtime(library)
     # Exactly the automatic path's side effects — shared, not mirrored.
     entries = serve_shelf.load_listening(library / ".listening.jsonl")
-    assert entries == [{"slug": "patience", "at": "2026-07-02T06:00:00+00:00"}]
+    assert entries == [
+        {"slug": "patience", "at": "2026-07-02T06:00:00+00:00", "retract": False}
+    ]
     assert "## Listening" in (library / "patience" / "notes.md").read_text()
     # The rebuilt page already carries the completed listen on the card.
     shelf = (library / "shelf.html").read_text()
@@ -2503,3 +2508,267 @@ def test_ollama_url_env_override_and_default(monkeypatch):
     monkeypatch.delenv("OLLAMA_URL")
     module = _load_fresh_module(monkeypatch)
     assert module.OLLAMA_URL == "http://localhost:11434"
+
+
+# --- unheard: an append-only retraction, latest entry wins --------------------
+
+
+def test_last_listened_latest_entry_wins_across_retractions():
+    entries = [
+        {"slug": "patience", "at": "2026-07-01T10:00:00+00:00", "retract": False},
+        {"slug": "patience", "at": "2026-07-02T10:00:00+00:00", "retract": True},
+    ]
+    # The newest word is a retraction: not heard.
+    assert serve_shelf.last_listened(entries, "patience") is None
+    # A listen after the retraction counts again.
+    entries.append(
+        {"slug": "patience", "at": "2026-07-03T10:00:00+00:00", "retract": False}
+    )
+    assert (
+        serve_shelf.last_listened(entries, "patience") == "2026-07-03T10:00:00+00:00"
+    )
+
+
+def test_record_unheard_appends_retraction_and_notes(tmp_path):
+    library = _listening_library(tmp_path)
+    serve_shelf.record_listened(library, "patience", at="2026-07-01T10:00:00+00:00")
+    ok = serve_shelf.record_unheard(library, "patience", at="2026-07-02T10:00:00+00:00")
+    assert ok is True
+    entries = serve_shelf.load_listening(library / ".listening.jsonl")
+    # Append-only: the listen stays, the retraction rides after it.
+    assert entries == [
+        {"slug": "patience", "at": "2026-07-01T10:00:00+00:00", "retract": False},
+        {"slug": "patience", "at": "2026-07-02T10:00:00+00:00", "retract": True},
+    ]
+    assert serve_shelf.last_listened(entries, "patience") is None
+    notes = (library / "patience" / "notes.md").read_text()
+    assert "- flagged to revisit — 2026-07-02" in notes
+    # The heard state can come BACK: a later listen records fresh (the
+    # dedupe window keys off the retracted state, which reads not-heard).
+    assert serve_shelf.record_listened(
+        library, "patience", at="2026-07-02T10:30:00+00:00"
+    )
+
+
+def test_record_unheard_without_a_listen_is_a_no_op(tmp_path):
+    library = _listening_library(tmp_path)
+    assert serve_shelf.record_unheard(library, "patience") is False
+    assert not (library / ".listening.jsonl").exists()
+    with pytest.raises(ValueError):
+        serve_shelf.record_unheard(library, "../evil")
+    with pytest.raises(ValueError):
+        serve_shelf.record_unheard(library, "not-a-talk")
+
+
+def test_mark_unheard_rebuilds_and_returns_state(tmp_path):
+    library = _markable_library(tmp_path)
+    serve_shelf.mark_listened(library, "patience", at="2026-07-01T10:00:00+00:00")
+    assert "listened ✓" in (library / "shelf.html").read_text()
+    state = serve_shelf.mark_unheard(
+        library, "patience", at="2026-07-02T10:00:00+00:00"
+    )
+    assert state["ok"] is True
+    assert state["retracted"] is True
+    assert state["last"] is None
+    assert state["shelf_mtime"] == serve_shelf.shelf_mtime(library)
+    # The rebuilt card reads not-heard again: the manual door is back.
+    shelf = (library / "shelf.html").read_text()
+    assert "listened ✓" not in shelf
+    assert 'class="mark-heard"' in shelf
+    # Idempotent: retracting an already-not-heard talk changes nothing.
+    again = serve_shelf.mark_unheard(library, "patience")
+    assert again["ok"] is True and again["retracted"] is False
+
+
+# --- done / reopen: the server moves the path itself ---------------------------
+
+DONE_PATH_STUDY = """# Study Memory
+
+## Where we are
+- Root cluster.
+
+## Studied
+- **Old Talk** — what landed: kindness.
+
+## Queued
+- **Patience (Thanissaro Bhikkhu)** — next up,
+  a wrapped continuation line.
+- **Far Talk** — after that.
+
+## Open questions
+- What is the second arrow?
+"""
+
+
+def test_mark_done_on_path_moves_queued_to_studied():
+    new_text, changed = serve_shelf.mark_done_on_path(DONE_PATH_STUDY, "Patience")
+    assert changed is True
+    # The wrapped item left the queue whole...
+    assert "next up" not in new_text
+    assert "wrapped continuation" not in new_text
+    # ...and landed in Studied with the not-yet-discussed note, after
+    # the items already there.
+    studied = new_text.split("## Studied")[1].split("## Queued")[0]
+    assert "- **Patience** — (done for now — not yet discussed)" in studied
+    assert studied.index("Old Talk") < studied.index("Patience")
+    # The four-section shape survives, other content untouched.
+    for heading in ("## Where we are", "## Studied", "## Queued", "## Open questions"):
+        assert heading in new_text
+    assert "- **Far Talk** — after that." in new_text
+    assert "What is the second arrow?" in new_text
+
+
+def test_mark_done_on_path_is_idempotent_and_tolerant():
+    once, _ = serve_shelf.mark_done_on_path(DONE_PATH_STUDY, "Patience")
+    twice, changed = serve_shelf.mark_done_on_path(once, "Patience")
+    assert changed is False and twice == once
+    # Matching is normalize_title's: the STUDY.md spelling with the
+    # teacher parenthetical meets the INDEX.md display title.
+    _, changed = serve_shelf.mark_done_on_path(once, "Patience | Thanissaro Bhikkhu")
+    assert changed is False
+    # A talk on neither list is appended to Studied — done is done.
+    text, changed = serve_shelf.mark_done_on_path(DONE_PATH_STUDY, "Surprise Talk")
+    assert changed is True
+    assert "- **Surprise Talk** — (done for now — not yet discussed)" in (
+        text.split("## Studied")[1].split("## Queued")[0]
+    )
+    # Empty text starts from the four-section skeleton.
+    text, changed = serve_shelf.mark_done_on_path("", "Patience")
+    assert changed is True
+    for heading in ("## Where we are", "## Studied", "## Queued", "## Open questions"):
+        assert heading in text
+
+
+def test_mark_reopened_on_path_is_the_exact_inverse():
+    done_text, _ = serve_shelf.mark_done_on_path(DONE_PATH_STUDY, "Patience")
+    reopened, changed = serve_shelf.mark_reopened_on_path(
+        done_text, "Patience", date_str="2026-07-02"
+    )
+    assert changed is True
+    queued = reopened.split("## Queued")[1].split("## Open questions")[0]
+    assert "- **Patience** — (reopened 2026-07-02)" in queued
+    assert "Patience" not in reopened.split("## Studied")[1].split("## Queued")[0]
+    # Idempotent: already queued is unchanged.
+    again, changed = serve_shelf.mark_reopened_on_path(reopened, "Patience")
+    assert changed is False and again == reopened
+    # Reopening a talk that isn't done is a clean no-op — nothing to move.
+    same, changed = serve_shelf.mark_reopened_on_path(DONE_PATH_STUDY, "Mystery")
+    assert changed is False and same == DONE_PATH_STUDY
+
+
+def test_mark_done_records_moves_and_rebuilds(tmp_path):
+    library = _markable_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_PATH_STUDY)
+    state = serve_shelf.mark_done(library, "patience")
+    assert state["ok"] is True
+    assert state["recorded"] is True  # no listen existed: one recorded
+    assert state["moved"] is True
+    assert state["last"] is not None
+    assert state["shelf_mtime"] == serve_shelf.shelf_mtime(library)
+    study = (tmp_path / "STUDY.md").read_text()
+    assert "- **Patience** — (done for now — not yet discussed)" in study
+    assert "next up" not in study
+    # The rebuilt shelf already shows the ✓ (no guide involved anywhere).
+    shelf = (library / "shelf.html").read_text()
+    assert '<span class="nav-state nav-done">✓</span>' in shelf
+    assert "listened ✓" in shelf
+
+
+def test_mark_done_is_idempotent_and_respects_existing_listens(tmp_path):
+    library = _markable_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_PATH_STUDY)
+    serve_shelf.mark_listened(library, "patience", at="2026-07-01T10:00:00+00:00")
+    state = serve_shelf.mark_done(library, "patience")
+    # Heard already: the listen is NOT re-recorded, only the path moves.
+    assert state["recorded"] is False and state["moved"] is True
+    assert state["last"] == "2026-07-01T10:00:00+00:00"
+    entries = serve_shelf.load_listening(library / ".listening.jsonl")
+    assert len(entries) == 1
+    study_after_first = (tmp_path / "STUDY.md").read_text()
+    # Second click: nothing changes anywhere, the answer stays ok.
+    again = serve_shelf.mark_done(library, "patience")
+    assert again["ok"] is True
+    assert again["recorded"] is False and again["moved"] is False
+    assert (tmp_path / "STUDY.md").read_text() == study_after_first
+    with pytest.raises(ValueError):
+        serve_shelf.mark_done(library, "no-such-talk")
+
+
+def test_mark_reopen_moves_studied_back_to_queued(tmp_path):
+    library = _markable_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(DONE_PATH_STUDY)
+    serve_shelf.mark_done(library, "patience")
+    state = serve_shelf.mark_reopen(library, "patience")
+    assert state["ok"] is True and state["moved"] is True
+    assert state["shelf_mtime"] == serve_shelf.shelf_mtime(library)
+    study = (tmp_path / "STUDY.md").read_text()
+    queued = study.split("## Queued")[1].split("## Open questions")[0]
+    assert re.search(r"- \*\*Patience\*\* — \(reopened \d{4}-\d{2}-\d{2}\)", queued)
+    # The rebuilt sidebar reads → again for it, and the listen survives —
+    # reopening questions the path, not the hearing.
+    shelf = (library / "shelf.html").read_text()
+    assert '<span class="nav-state nav-next">→</span>' in shelf
+    assert serve_shelf.last_listened(
+        serve_shelf.load_listening(library / ".listening.jsonl"), "patience"
+    )
+    # Idempotent / not-done: clean no-ops.
+    again = serve_shelf.mark_reopen(library, "patience")
+    assert again["ok"] is True and again["moved"] is False
+    with pytest.raises(ValueError):
+        serve_shelf.mark_reopen(library, "../evil")
+
+
+# --- stopping a turn: the kill switch --------------------------------------
+
+
+def test_turn_handle_runs_closers_once_and_late_attaches_immediately():
+    handle = serve_shelf.TurnHandle()
+    killed = []
+    handle.attach(lambda: killed.append("first"))
+    assert handle.stopped is False
+    assert handle.stop() is True
+    assert killed == ["first"]
+    # Stop is one-shot...
+    assert handle.stop() is False
+    assert killed == ["first"]
+    # ...and a transport opened AFTER the stop dies immediately (the
+    # ollama tool loop opens a new stream per round).
+    handle.attach(lambda: killed.append("late"))
+    assert killed == ["first", "late"]
+
+
+def test_turn_handle_tolerates_broken_closers():
+    handle = serve_shelf.TurnHandle()
+    ran = []
+
+    def boom():
+        raise OSError("already gone")
+
+    handle.attach(boom)
+    handle.attach(lambda: ran.append("ok"))
+    assert handle.stop() is True  # one dead transport never blocks the rest
+    assert ran == ["ok"]
+
+
+def test_turn_registry_stops_only_the_live_handle():
+    sid = "stop-test-session"
+    assert serve_shelf.stop_turn(sid) is False  # nothing in flight
+    handle = serve_shelf.register_turn(sid)
+    assert serve_shelf.stop_turn(sid) is True
+    assert handle.stopped is True
+    assert serve_shelf.stop_turn(sid) is False  # already stopped
+    serve_shelf.release_turn(sid, handle)
+    assert serve_shelf.stop_turn(sid) is False
+    # Releasing a superseded handle never evicts the newer one.
+    first = serve_shelf.register_turn(sid)
+    second = serve_shelf.register_turn(sid)
+    serve_shelf.release_turn(sid, first)
+    assert serve_shelf.stop_turn(sid) is True and second.stopped
+    serve_shelf.release_turn(sid, second)
+    assert serve_shelf.stop_turn(sid) is False
+
+
+def test_stop_turn_rejects_junk_sessions():
+    assert serve_shelf.stop_turn(None) is False
+    assert serve_shelf.stop_turn("") is False
+    assert serve_shelf.stop_turn(123) is False
