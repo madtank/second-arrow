@@ -865,9 +865,13 @@ STYLE = """
   .artifact-collapse { display: none; }
   .artifact-item.expanded .artifact-collapse { display: block;
       position: fixed; top: calc(2vh + 10px); right: calc(2vw + 10px);
-      z-index: 3; font: inherit; font-size: 0.85rem; color: #5a4d3a;
+      z-index: 4; font: inherit; font-size: 0.85rem; color: #5a4d3a;
       background: #faf7f2; border: 1px solid #e0d5c0;
-      border-radius: 999px; padding: 0.25rem 0.9rem; cursor: pointer; }
+      border-radius: 999px; padding: 0.25rem 0.9rem; cursor: pointer;
+      box-shadow: 0 2px 10px rgba(60, 56, 51, 0.25); }
+  .artifact-collapse:hover { background: #efe7d9; }
+  /* Immersion owns the screen: the page behind must not scroll. */
+  body.artifact-immersed { overflow: hidden; }
   details { margin-top: 1rem; border-top: 1px solid #f0e9dd; padding-top: 0.75rem; }
   summary { cursor: pointer; color: #8a7f70; font-size: 0.95rem; }
   .raw-link { font-size: 0.85rem; margin: 0.5rem 0 0.3rem; }
@@ -2147,6 +2151,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   function collapseArtifacts() {
     var expanded = document.querySelectorAll(".artifact-item.expanded");
     expanded.forEach(function (item) { item.classList.remove("expanded"); });
+    document.body.classList.remove("artifact-immersed");
     return expanded.length > 0;
   }
 
@@ -2156,10 +2161,17 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     if (expand) {
       var item = expand.closest(".artifact-item");
       collapseArtifacts(); // expanding another collapses the first
-      if (item) item.classList.add("expanded");
+      if (item) {
+        item.classList.add("expanded");
+        document.body.classList.add("artifact-immersed"); // scroll lock
+      }
       return;
     }
-    if (event.target.closest(".artifact-collapse")) collapseArtifacts();
+    if (event.target.closest(".artifact-collapse")) { collapseArtifacts(); return; }
+    // A click on the scrim (the expanded item itself, outside the frame
+    // and buttons) closes the immersion — the obvious way out.
+    var scrim = event.target.closest(".artifact-item.expanded");
+    if (scrim && event.target === scrim) collapseArtifacts();
   });
 
   // Safe mini-markdown for COMPLETED guide bubbles: **bold**, *italic*,

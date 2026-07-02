@@ -830,6 +830,18 @@ def test_artifact_expands_in_place_by_class_alone(tmp_path):
     swap = re.search(r"function swapShelf\(doc\) \{[\s\S]*?\n  \}", html)
     assert swap and ".artifact-item.expanded" in swap.group(0)
     assert "innerHTML" not in html
+    # Immersion owns the screen: the page behind must not scroll, the ✕
+    # paints ABOVE the frame (the frame is appended after the button, so
+    # equal z-indexes buried it — user-verified), and a scrim click is
+    # the obvious way out.
+    assert "body.artifact-immersed { overflow: hidden; }" in html
+    assert 'document.body.classList.add("artifact-immersed")' in html
+    assert 'document.body.classList.remove("artifact-immersed")' in html
+    collapse_css = re.search(
+        r"\.artifact-item\.expanded \.artifact-collapse \{[^}]+\}", html
+    )
+    assert collapse_css and "z-index: 4" in collapse_css.group(0)
+    assert "event.target === scrim" in html
 
 
 def test_version_check_honors_the_media_fingerprint(tmp_path):
