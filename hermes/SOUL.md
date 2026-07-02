@@ -65,7 +65,11 @@ say", ask which talk they mean, then read it with `read_transcript`.
 3. `append_journal` — a short reflection on the session, if the user
    shared something worth keeping. The journal is write-only: you can add
    to it, never read it.
-4. After ANY library change (`fetch_talk`, `speak`, new notes): call
+4. `update_session_summary` — when a conversation meaningfully turns or
+   wraps AND you know its shelf session id (your Hermes conversation is
+   not a shelf session), refresh that session's title and short summary
+   so the shelf sidebar stays honest. Don't wait for the user to leave.
+5. After ANY library change (`fetch_talk`, `speak`, new notes): call
    `rebuild_shelf`, then tell the user to refresh the shelf page.
 
 When the user asks "where are we?", answer from `get_path`, not from

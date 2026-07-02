@@ -131,6 +131,8 @@ STATE_PATH = CHAT_DIR / "state.json"
 SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # no dot-files, no slashes
 SUMMARY_TIMEOUT = 120  # seconds for the one-shot leave-summary call
 SEARCH_LIMIT = 8  # sessions returned by search_sessions
+SESSION_TITLE_MAX = 80  # caps for update_session_summary (sidebar-sized)
+SESSION_SUMMARY_MAX = 300
 
 # Interactive artifacts: guide-written single-file HTML pages, rendered
 # behind two walls — a sandboxed iframe (allow-scripts only, so a null
@@ -266,20 +268,26 @@ def pick_chunks_for_view(
     return (lead + rest)[:k]
 
 
-def ambient_prefix(view: str | None, titles: dict[str, str]) -> str:
-    """One prompt line naming the talk open on the shelf, or "".
+def ambient_prefix(
+    view: str | None, titles: dict[str, str], session_id: str | None = None
+) -> str:
+    """Prompt lines for what's on screen: the session id and the open talk.
 
-    titles maps slug -> display title (from INDEX.md). The line teaches the
-    claude brain what "he" and "this talk" refer to, and where the
-    transcript lives.
+    titles maps slug -> display title (from INDEX.md). The talk line
+    teaches the claude brain what "he" and "this talk" refer to; the
+    session line tells it which conversation update_session_summary
+    should retitle. Either part may be absent.
     """
-    if not view or view not in titles:
-        return ""
-    return (
-        f'[The user currently has "{titles[view]}" open on the shelf — its '
-        f"transcript is library/{view}/transcript.md. Treat it as the ambient "
-        'context; "he/this talk" refers to it.]'
-    )
+    lines = []
+    if session_id:
+        lines.append(f"[session: {session_id}]")
+    if view and view in titles:
+        lines.append(
+            f'[The user currently has "{titles[view]}" open on the shelf — its '
+            f"transcript is library/{view}/transcript.md. Treat it as the ambient "
+            'context; "he/this talk" refers to it.]'
+        )
+    return "\n".join(lines)
 
 
 def artifact_path(library: Path, slug: str, name: str) -> Path:
@@ -385,6 +393,10 @@ CHAT_BASH_SCOPES = (
     "uv run tools/speak.py",
     "uv run tools/build_shelf.py",
     "uv run tools/search_history.py",
+    # Session sidecars live under library/.chat/ — deliberately OUTSIDE the
+    # write scopes above — so summary freshness goes through this reviewed
+    # CLI (same validation as the ollama/MCP tool) instead of raw Edit.
+    "uv run tools/update_session_summary.py",
 )
 
 # Read-only reach beyond the repo: current-world questions (teacher news,
@@ -786,6 +798,27 @@ OLLAMA_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_session_summary",
+            "description": (
+                "Update THIS conversation's title and short summary in the "
+                "sidebar — do it when the conversation meaningfully turns "
+                "or wraps, don't wait for the user to leave. The current "
+                "session id is given in your instructions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "the current session id"},
+                    "title": {"type": "string", "description": "at most 80 chars"},
+                    "summary": {"type": "string", "description": "one or two short sentences, at most 300 chars"},
+                },
+                "required": ["session_id", "title", "summary"],
+            },
+        },
+    },
 ]
 
 TOOL_PROGRESS = {
@@ -794,10 +827,11 @@ TOOL_PROGRESS = {
     "speak": "— recording the audio… —",
     "search_history": "— searching past conversations… —",
     "write_artifact": "— writing the page… —",
+    "update_session_summary": "— updating the session title… —",
 }
 
 AGENCY_TOOLS_NOTE = """\
-You can act, sparingly, through five tools:
+You can act, sparingly, through six tools:
 - fetch_talk: ingest ONE talk from a URL the user explicitly gave
   (captioned YouTube preferred). Never invent or guess URLs.
 - rebuild_shelf: regenerate the shelf page after any library change,
@@ -808,6 +842,8 @@ You can act, sparingly, through five tools:
 - write_artifact: when the user asks for something interactive (a
   practice page, a timer, a reflection card), write ONE self-contained
   HTML page — inline CSS/JS only, nothing external — then rebuild_shelf.
+- update_session_summary: when the conversation meaningfully turns or
+  wraps, refresh this session's sidebar title and short summary.
 Only use a tool when the user asks for the thing it does."""
 
 AGENCY_NO_TOOLS_NOTE = """\
@@ -886,6 +922,24 @@ def validate_tool_call(name: str, args) -> list[str]:
                 "one light self-contained page"
             )
         return ["write_artifact", slug, art_name, html]
+    if name == "update_session_summary":
+        sid = args.get("session_id")
+        title, summary = args.get("title"), args.get("summary")
+        if not isinstance(sid, str) or not SESSION_ID_RE.fullmatch(sid):
+            raise ValueError(f"invalid session id {sid!r}")
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > SESSION_TITLE_MAX:
+            raise ValueError(f"title must be 1..{SESSION_TITLE_MAX} chars of plain text")
+        if (
+            not isinstance(summary, str)
+            or not summary.strip()
+            or len(summary.strip()) > SESSION_SUMMARY_MAX
+        ):
+            raise ValueError(
+                f"summary must be 1..{SESSION_SUMMARY_MAX} chars of plain text"
+            )
+        # In-process like write_artifact: dispatched through the full
+        # update_session_summary validation again (existence included).
+        return ["update_session_summary", sid, title, summary]
     raise ValueError(f"unknown tool {name!r}")
 
 
@@ -1123,6 +1177,40 @@ def update_session_meta(
     meta["talks"] = talks
     if claude_session_id:
         meta["claude_session_id"] = claude_session_id
+    save_session_meta(meta_path, meta)
+    return meta
+
+
+def update_session_summary(
+    sessions_dir: Path, session_id, title, summary
+) -> dict:
+    """Set a session's title + summary anytime — freshness as a tool.
+
+    Callable by whichever mind is holding the conversation (claude via
+    the CLI wrapper, ollama via the tool loop, the MCP server directly),
+    so the sidebar doesn't wait for the session to be LEFT. The session
+    id must be well-formed and exist; title/summary are capped at
+    sidebar size. Everything else in the sidecar (talks, claude thread,
+    created stamp) is preserved; only `updated` moves.
+    """
+    if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError(f"invalid session id {session_id!r}")
+    if not session_turns_path(sessions_dir, session_id).exists():
+        raise ValueError(f"no session {session_id!r}")
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > SESSION_TITLE_MAX:
+        raise ValueError(f"title must be 1..{SESSION_TITLE_MAX} chars of plain text")
+    if (
+        not isinstance(summary, str)
+        or not summary.strip()
+        or len(summary.strip()) > SESSION_SUMMARY_MAX
+    ):
+        raise ValueError(f"summary must be 1..{SESSION_SUMMARY_MAX} chars of plain text")
+    meta_path = session_meta_path(sessions_dir, session_id)
+    meta = load_session_meta(meta_path)
+    meta.setdefault("id", session_id)
+    meta["title"] = title.strip()
+    meta["summary"] = summary.strip()
+    meta["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     save_session_meta(meta_path, meta)
     return meta
 
@@ -1643,7 +1731,11 @@ def run_tool(argv: list[str], timeout: int = TOOL_TIMEOUT) -> tuple[bool, str]:
 
 
 def stream_ollama(
-    messages: list[dict], configured_model: str, library: Path, view: str | None = None
+    messages: list[dict],
+    configured_model: str,
+    library: Path,
+    view: str | None = None,
+    session_id: str | None = None,
 ):
     """Start an Ollama turn; return a generator of reply-text chunks.
 
@@ -1689,6 +1781,12 @@ def stream_ollama(
     chunks = pick_chunks_for_view(
         messages[-1]["content"], load_transcripts(library), view_title, k=4
     )
+    agency = AGENCY_TOOLS_NOTE if has_tools else AGENCY_NO_TOOLS_NOTE
+    if has_tools and session_id:
+        agency += (
+            f"\nThis conversation's session id is {session_id}"
+            " (for update_session_summary)."
+        )
     payload = build_ollama_payload(
         trim_history(messages),
         model,
@@ -1697,7 +1795,7 @@ def stream_ollama(
         chunks,
         stream=True,
         tools=OLLAMA_TOOLS if has_tools else None,
-        agency=AGENCY_TOOLS_NOTE if has_tools else AGENCY_NO_TOOLS_NOTE,
+        agency=agency,
     )
     try:  # urlopen returns once headers arrive; the body then streams NDJSON
         response = _open_ollama_chat(payload)
@@ -1709,11 +1807,12 @@ def stream_ollama(
         )
 
     def dispatch_tool(argv: list[str]) -> tuple[bool, str]:
-        """run_tool, plus the one in-process tool: write_artifact.
+        """run_tool, plus the in-process tools: write_artifact and
+        update_session_summary.
 
-        Its marker argv never reaches a subprocess — the write goes
-        through artifact_path/write_artifact (the same wall as the
-        validation that produced the argv).
+        Their marker argvs never reach a subprocess — execution goes
+        through the same walls (artifact_path/write_artifact,
+        update_session_summary) that shaped the validation.
         """
         if argv and argv[0] == "write_artifact":
             try:
@@ -1725,6 +1824,12 @@ def stream_ollama(
                 f"Wrote {rel}. Now call rebuild_shelf, then tell the user "
                 "to refresh the page."
             )
+        if argv and argv[0] == "update_session_summary":
+            try:
+                meta = update_session_summary(SESSIONS_DIR, argv[1], argv[2], argv[3])
+            except ValueError as error:
+                return False, f"update_session_summary rejected: {error}"
+            return True, f"Session {argv[1]} is now titled {meta['title']!r}."
         return run_tool(argv)
 
     def generate():
@@ -1914,10 +2019,14 @@ def create_app(brain: str, ollama_model: str):
         state = {"session_id": meta.get("claude_session_id")}
         try:
             if chosen == "claude":
-                prefix = ambient_prefix(view, load_talk_titles(LIBRARY))
+                # The prefix names the session (for update_session_summary)
+                # and the open talk (the ambient context).
+                prefix = ambient_prefix(view, load_talk_titles(LIBRARY), session_id=sid)
                 stream = stream_claude(messages, state, prefix=prefix)
             else:
-                stream = stream_ollama(messages, model, LIBRARY, view=view)
+                stream = stream_ollama(
+                    messages, model, LIBRARY, view=view, session_id=sid
+                )
         except BrainError as error:
             return JSONResponse({"error": error.message}, status_code=error.status)
         # Chunked plain text: each chunk is a raw reply fragment (no framing).

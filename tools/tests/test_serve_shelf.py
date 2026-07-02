@@ -146,6 +146,7 @@ def test_chat_allowed_tools_covers_memory_scopes_and_reviewed_tools_only():
         "Bash(uv run tools/speak.py:*)",
         "Bash(uv run tools/build_shelf.py:*)",
         "Bash(uv run tools/search_history.py:*)",
+        "Bash(uv run tools/update_session_summary.py:*)",
         "WebSearch",  # read-only: current-world questions (teacher news, links)
         "WebFetch",
     }
@@ -1189,14 +1190,117 @@ def test_validate_tool_call_search_history():
             serve_shelf.validate_tool_call("search_history", {"q": bad})
 
 
-def test_ollama_tools_cover_the_five_reviewed_hands():
+def test_ollama_tools_cover_the_six_reviewed_hands():
     names = {tool["function"]["name"] for tool in serve_shelf.OLLAMA_TOOLS}
     assert names == {
-        "fetch_talk", "rebuild_shelf", "speak", "search_history", "write_artifact",
+        "fetch_talk", "rebuild_shelf", "speak", "search_history",
+        "write_artifact", "update_session_summary",
     }
-    for name in ("search_history", "write_artifact"):
+    for name in ("search_history", "write_artifact", "update_session_summary"):
         assert name in serve_shelf.TOOL_PROGRESS
         assert name in serve_shelf.AGENCY_TOOLS_NOTE
+
+
+# --- update_session_summary: freshness as a tool ------------------------------
+
+
+def test_update_session_summary_writes_meta_preserving_fields(tmp_path):
+    _write_session(
+        tmp_path, "s1", [("user", "hi")],
+        {"id": "s1", "title": "old", "summary": "", "talks": ["patience"],
+         "claude_session_id": "c-1", "created": "2026-07-01T00:00:00+00:00",
+         "updated": "2026-07-01T00:00:00+00:00"},
+    )
+    meta = serve_shelf.update_session_summary(
+        tmp_path, "s1", "  Bricks and walls  ",
+        " Seeing whole people, not two bad bricks. ",
+    )
+    assert meta["title"] == "Bricks and walls"
+    assert meta["summary"] == "Seeing whole people, not two bad bricks."
+    # Everything else in the sidecar survives; only `updated` moves.
+    assert meta["talks"] == ["patience"]
+    assert meta["claude_session_id"] == "c-1"
+    assert meta["created"] == "2026-07-01T00:00:00+00:00"
+    assert meta["updated"] != "2026-07-01T00:00:00+00:00"
+    on_disk = serve_shelf.load_session_meta(tmp_path / "s1.json")
+    assert on_disk["title"] == "Bricks and walls"
+
+
+def test_update_session_summary_validation_matrix(tmp_path):
+    _write_session(tmp_path, "s1", [("user", "hi")], {"id": "s1"})
+    update = serve_shelf.update_session_summary
+    with pytest.raises(ValueError, match="invalid session id"):
+        update(tmp_path, "../evil", "t", "s")
+    with pytest.raises(ValueError, match="invalid session id"):
+        update(tmp_path, 42, "t", "s")
+    with pytest.raises(ValueError, match="no session"):
+        update(tmp_path, "missing", "t", "s")
+    for bad_title in ("", "   ", "x" * 81, 7):
+        with pytest.raises(ValueError):
+            update(tmp_path, "s1", bad_title, "s")
+    for bad_summary in ("", "   ", "x" * 301, None):
+        with pytest.raises(ValueError):
+            update(tmp_path, "s1", "t", bad_summary)
+    # Exactly at the caps is fine.
+    meta = update(tmp_path, "s1", "x" * 80, "y" * 300)
+    assert len(meta["title"]) == 80 and len(meta["summary"]) == 300
+
+
+def test_validate_tool_call_update_session_summary_marker():
+    argv = serve_shelf.validate_tool_call(
+        "update_session_summary",
+        {"session_id": "abc-1", "title": "Bricks", "summary": "Whole people."},
+    )
+    # In-process like write_artifact: execution goes through the full
+    # update_session_summary validation again (existence included).
+    assert argv == ["update_session_summary", "abc-1", "Bricks", "Whole people."]
+    base = {"session_id": "abc-1", "title": "T", "summary": "S"}
+    for field, bad in (
+        ("session_id", "../x"),
+        ("session_id", 5),
+        ("title", ""),
+        ("title", "x" * 81),
+        ("summary", ""),
+        ("summary", "x" * 301),
+    ):
+        with pytest.raises(ValueError):
+            serve_shelf.validate_tool_call("update_session_summary", {**base, field: bad})
+
+
+def test_update_session_summary_cli_round_trip(tmp_path):
+    _write_session(tmp_path, "s1", [("user", "hi")], {"id": "s1", "claude_session_id": "c-1"})
+    script = MODULE_PATH.parent / "update_session_summary.py"
+    subprocess.run(
+        [sys.executable, str(script), "--sessions-dir", str(tmp_path),
+         "s1", "Bricks and walls", "Seeing whole people."],
+        check=True, capture_output=True, text=True,
+    )
+    meta = serve_shelf.load_session_meta(tmp_path / "s1.json")
+    assert meta["title"] == "Bricks and walls"
+    assert meta["summary"] == "Seeing whole people."
+    assert meta["claude_session_id"] == "c-1"  # preserved through the CLI
+    # A rejection exits nonzero with the reason on stderr.
+    bad = subprocess.run(
+        [sys.executable, str(script), "--sessions-dir", str(tmp_path),
+         "no-such-session", "t", "s"],
+        capture_output=True, text=True,
+    )
+    assert bad.returncode != 0
+    assert "no session" in bad.stderr.lower()
+
+
+def test_ambient_prefix_carries_the_session_id():
+    titles = {"patience": "Patience"}
+    both = serve_shelf.ambient_prefix("patience", titles, session_id="abc-1")
+    assert "[session: abc-1]" in both
+    assert '"Patience"' in both
+    # The session line rides even without an open talk...
+    assert serve_shelf.ambient_prefix(None, titles, session_id="abc-1") == "[session: abc-1]"
+    # ...and its absence keeps the old behavior byte-for-byte.
+    assert serve_shelf.ambient_prefix(None, titles) == ""
+    assert serve_shelf.ambient_prefix("patience", titles) == (
+        serve_shelf.ambient_prefix("patience", titles, session_id=None)
+    )
 
 
 # --- the model picker (/api/models + per-request "model") --------------------

@@ -102,13 +102,19 @@ You also have four reviewed tools — and only these, no other commands:
   this and tell the user to refresh the page.
 - `uv run tools/search_history.py <words>` — grep past conversations
   when the user refers to something you discussed before.
+- `uv run tools/update_session_summary.py <session-id> "<title>" "<summary>"`
+  — when the conversation meaningfully turns or wraps, refresh this
+  session's sidebar title (≤80 chars) and summary (≤300). The current
+  session id is in the `[session: ...]` line at the top of your prompt.
+  Don't wait for the user to leave.
 
 WebSearch/WebFetch are for current-world questions — teacher news,
 checking a link the user pasted. Teachings still enter the library only
 through an explicit fetch the user asked for.
 
 The Ollama brain's memory is whatever the server feeds it, plus the same
-search_history recall tool.
+reviewed tools (search_history recall, write_artifact,
+update_session_summary among them).
 
 ## Tools
 

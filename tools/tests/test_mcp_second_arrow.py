@@ -44,6 +44,8 @@ EXPECTED_TOOLS = {
     "update_path", "update_notes", "append_journal",
     # interactive pages (sandboxed + CSP-walled on the shelf)
     "write_artifact",
+    # session freshness (shelf sessions; mainly future use from Hermes)
+    "update_session_summary",
 }
 
 
@@ -65,7 +67,7 @@ def space(tmp_path, monkeypatch):
 
 def test_the_tool_table_is_exactly_the_expected_set():
     assert set(mod.TOOL_HANDLERS) == EXPECTED_TOOLS
-    assert len(mod.TOOL_HANDLERS) == len(EXPECTED_TOOLS) == 13
+    assert len(mod.TOOL_HANDLERS) == len(EXPECTED_TOOLS) == 14
     # The journal is write-only by design: hosted models see what tools
     # return, so no tool reads journal/ back.
     assert not any("journal" in name and name != "append_journal"
@@ -424,3 +426,36 @@ def test_write_artifact_rejects_escapes_and_junk(space):
     big = "x" * (serve_shelf.ARTIFACT_MAX_BYTES + 1)
     result = handler("anger-eating-demons", "big.html", big)
     assert "rejected" in result.lower() and "cap" in result.lower()
+
+
+# --- update_session_summary: shelf-session freshness --------------------------
+
+
+def test_update_session_summary_tool_updates_the_sidecar(space):
+    sessions = space / "library" / ".chat" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "s1.jsonl").write_text('{"role": "user", "content": "hi"}\n')
+    (sessions / "s1.json").write_text(
+        json.dumps({"id": "s1", "title": "old", "summary": "", "claude_session_id": "c-1"})
+    )
+    result = mod.TOOL_HANDLERS["update_session_summary"](
+        "s1", "Bricks and walls", "Seeing whole people."
+    )
+    assert "Bricks and walls" in result
+    meta = json.loads((sessions / "s1.json").read_text())
+    assert meta["title"] == "Bricks and walls"
+    assert meta["summary"] == "Seeing whole people."
+    assert meta["claude_session_id"] == "c-1"  # sidecar fields preserved
+
+
+def test_update_session_summary_tool_rejects_bad_input(space):
+    handler = mod.TOOL_HANDLERS["update_session_summary"]
+    for sid, title, summary in (
+        ("../evil", "t", "s"),
+        ("no-such-session", "t", "s"),
+        ("s1", "", "s"),  # no session dir at all yet — still a message
+        ("s1", "x" * 81, "s"),
+    ):
+        result = handler(sid, title, summary)
+        assert "rejected" in result.lower(), (sid, title)
+    assert not list(space.rglob("*.json"))  # nothing written by rejections

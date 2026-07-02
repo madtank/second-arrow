@@ -256,15 +256,35 @@ def test_parse_study_ignores_other_sections_and_wrapped_lines():
 
 
 def test_parse_study_tolerates_missing_sections_and_empty_text():
-    assert build_shelf.parse_study("") == {"studied": [], "queued": []}
-    assert build_shelf.parse_study("# Just a title\n\nprose\n") == {
-        "studied": [],
-        "queued": [],
-    }
+    empty = {"studied": [], "queued": [], "parked": []}
+    assert build_shelf.parse_study("") == empty
+    assert build_shelf.parse_study("# Just a title\n\nprose\n") == empty
     assert build_shelf.parse_study("## Queued\n- **Next Talk** — soon.\n") == {
         "studied": [],
         "queued": ["Next Talk"],
+        "parked": [],
     }
+
+
+def test_parse_study_sets_parked_queued_items_aside():
+    text = """## Studied
+- **Patience**: landed; we parked the sutta question for later.
+
+## Queued
+- **Anger Issues (Thanissaro Bhikkhu)** — next up; not in the library yet.
+- **Anger Eating Demons (Ajahn Brahm)** — parked, no obligation: most of
+  it heard, it can call back whenever.
+- **Sparked Joy** — the word inside another word does not count.
+"""
+    path = build_shelf.parse_study(text)
+    # "parked" in a queued item's note moves it aside — a queued state...
+    assert path["parked"] == ["Anger Eating Demons (Ajahn Brahm)"]
+    assert path["queued"] == [
+        "Anger Issues (Thanissaro Bhikkhu)",
+        "Sparked Joy",
+    ]
+    # ...but a studied talk mentioning the word stays studied.
+    assert path["studied"] == ["Patience"]
 
 
 def test_render_shelf_shows_path_strip_when_study_md_exists(tmp_path):
@@ -295,6 +315,103 @@ def test_render_shelf_path_strip_escapes_names(tmp_path):
     )
     html = build_shelf.render_shelf(library, {})
     assert "✓ Quiet &lt;Talk&gt; &amp; Friends" in html
+    assert "<Talk>" not in html
+
+
+# --- the sidebar IS the path (merged talks list) ----------------------------
+
+
+def test_normalize_title_tolerates_suffixes():
+    nt = build_shelf.normalize_title
+    # STUDY.md's parenthetical suffixes and INDEX's "| Teacher" tails both
+    # collapse away, so the two spellings of one talk meet in the middle.
+    assert nt("Anger Eating Demons (Ajahn Brahm)") == nt("Anger Eating Demons")
+    assert nt("Dealing with people that irritate us | Ajahn Brahm") == nt(
+        "Dealing with people that irritate us (Ajahn Brahm, 4 min)"
+    )
+    assert nt("Patience") == "patience"
+    assert nt("Quiet Mind & <Friends>") == "quiet mind friends"
+    assert nt("") == ""
+
+
+def test_talk_states_maps_slugs_and_surfaces_unfetched():
+    talks = [
+        {"slug": "quiet-mind", "title": "Quiet Mind & <Friends>"},
+        {"slug": "far-talk", "title": "Far Talk"},
+        {"slug": "demon-story", "title": "Demon Story"},
+    ]
+    path = {
+        "studied": ["Quiet Mind & <Friends> (Ajahn Test)"],
+        "queued": [
+            "Far Talk (Ajahn Test, 4 min)",
+            "Anger Issues (Thanissaro Bhikkhu, 2019)",
+        ],
+        "parked": ["Demon Story (Ajahn Brahm)"],
+    }
+    states, unfetched = build_shelf.talk_states(path, talks)
+    assert states == {
+        "quiet-mind": "studied",
+        "far-talk": "queued",
+        "demon-story": "parked",
+    }
+    # A queued talk with no library match is the visible path ahead.
+    assert unfetched == ["Anger Issues (Thanissaro Bhikkhu, 2019)"]
+    # No STUDY.md: everything unmarked, nothing phantom.
+    empty = {"studied": [], "queued": [], "parked": []}
+    assert build_shelf.talk_states(empty, talks) == ({}, [])
+
+
+SIDEBAR_STUDY = """# Study Memory
+
+## Studied
+- **Quiet Mind & <Friends>** (Ajahn Test): landed.
+
+## Queued
+- **Far Talk (Ajahn Test)** — next up.
+- **Anger Issues (Thanissaro Bhikkhu, 2019)** — not in the library yet.
+- **Demon Story (Ajahn Brahm)** — parked, no obligation.
+"""
+
+
+def test_sidebar_talks_list_is_the_path(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(SIDEBAR_STUDY)
+    html = build_shelf.render_shelf(library, {})
+    sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
+    # State marks ride inline on the talk entries.
+    quiet = re.search(r'<li><a href="#talk/quiet-mind">.*?</a></li>', sidebar, re.S).group(0)
+    assert '<span class="nav-state nav-done">✓</span>' in quiet
+    far = re.search(r'<li><a href="#talk/far-talk">.*?</a></li>', sidebar, re.S).group(0)
+    assert '<span class="nav-state nav-next">→</span>' in far
+    demon = re.search(r'<li><a href="#talk/demon-story">.*?</a></li>', sidebar, re.S).group(0)
+    assert '<span class="nav-tag">parked</span>' in demon
+    # A queued talk not yet in the library appears muted and unclickable.
+    unfetched = re.search(r'<li class="nav-unfetched">.*?</li>', sidebar, re.S).group(0)
+    assert "Anger Issues (Thanissaro Bhikkhu, 2019)" in unfetched
+    assert "not fetched yet" in unfetched
+    assert "<a " not in unfetched
+    # The separate sidebar path strip is gone — the list IS the path...
+    assert 'class="path-strip"' not in sidebar
+    assert "The path" not in sidebar
+    # ...while the home view keeps its small summary strip.
+    assert html.count('class="path-strip"') == 1
+
+
+def test_sidebar_without_study_md_is_unmarked(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
+    assert "nav-state" not in sidebar
+    assert "nav-unfetched" not in sidebar
+    assert 'href="#talk/quiet-mind"' in sidebar  # talks still listed
+
+
+def test_sidebar_escapes_unfetched_names(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(
+        "## Queued\n- **Sneaky <Talk> & Co** — not here yet.\n"
+    )
+    html = build_shelf.render_shelf(library, {})
+    assert "Sneaky &lt;Talk&gt; &amp; Co" in html
     assert "<Talk>" not in html
 
 
@@ -426,6 +543,9 @@ def test_chat_panel_speaks_sessions_and_ambient_view(tmp_path):
     assert "X-Session" in html
     # Every chat POST carries the ambient view (the open talk's slug).
     assert "currentView" in html
+    # After each completed turn the sessions list is refetched, so titles
+    # and summaries the guide just updated appear immediately.
+    assert "fresh summaries" in html
 
 
 def test_render_shelf_lists_artifacts_behind_the_sandbox_contract(tmp_path):

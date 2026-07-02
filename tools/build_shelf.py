@@ -113,41 +113,91 @@ def md_to_html(text: str) -> str:
 
 
 def parse_study(text: str) -> dict:
-    """Pull the path out of STUDY.md: {"studied": [names], "queued": [names]}.
+    """Pull the path out of STUDY.md: studied / queued / parked name lists.
 
     Tolerant by design (STUDY.md is hand- and guide-edited): missing
     sections or plain prose give empty lists. Only top-level `- ` items
     inside `## Studied` / `## Queued` count; an item's name is its leading
     **bold** span, else the text before the first " — " or ": "
-    separator. Wrapped continuation lines are ignored.
+    separator. Wrapped continuation lines are ignored. A QUEUED item whose
+    first-line note says "parked" is a state, not a section — it goes to
+    "parked" (set aside, no obligation) instead of the queue.
     """
-    path: dict = {"studied": [], "queued": []}
+    path: dict = {"studied": [], "queued": [], "parked": []}
     section = None
     for line in text.splitlines():
         heading = re.match(r"#{2,} (.+)", line)
         if heading:
             name = heading.group(1).strip().lower()
-            section = name if name in path else None
+            section = name if name in ("studied", "queued") else None
             continue
         if section is None or not line.startswith("- "):
             continue
         item = line[2:].strip()
         bold = re.match(r"\*\*(.+?)\*\*", item)
         name = bold.group(1) if bold else re.split(r" — |: ", item)[0]
+        rest = item[bold.end():] if bold else item[len(name):]
         name = name.strip().rstrip(".")
-        if name:
+        if not name:
+            continue
+        if section == "queued" and re.search(r"\bparked\b", rest, re.I):
+            path["parked"].append(name)
+        else:
             path[section].append(name)
     return path
+
+
+def normalize_title(name: str) -> str:
+    """One talk, two spellings, one key.
+
+    STUDY.md writes "Anger Eating Demons (Ajahn Brahm)"; INDEX.md writes
+    "Dealing with people that irritate us | Ajahn Brahm". Parentheticals
+    and "| Teacher" tails drop away, punctuation flattens, case folds —
+    so both sides meet in the middle.
+    """
+    name = re.sub(r"\([^)]*\)", " ", name or "")
+    name = name.split("|")[0]
+    name = re.sub(r"[^a-z0-9 ]+", " ", name.lower())
+    return " ".join(name.split())
+
+
+def talk_states(path: dict, talks: list[dict]) -> tuple[dict[str, str], list[str]]:
+    """(slug -> "studied"|"queued"|"parked", queued names not yet fetched).
+
+    Matches parse_study names against library titles via normalize_title.
+    Library talks absent from STUDY.md simply get no state; queued names
+    with no library match come back as `unfetched`, so the path ahead
+    stays visible in the sidebar.
+    """
+    by_title = {
+        normalize_title(talk.get("title", talk["slug"])): talk["slug"]
+        for talk in talks
+    }
+    states: dict[str, str] = {}
+    unfetched: list[str] = []
+    for state in ("studied", "parked", "queued"):
+        for name in path.get(state, []):
+            slug = by_title.get(normalize_title(name))
+            if slug:
+                states.setdefault(slug, state)
+            elif state == "queued":
+                unfetched.append(name)
+    return states, unfetched
 
 
 def render_path_strip(path: dict) -> str:
     """A small calm strip: studied talks with a check, queued with an arrow.
 
-    Rendered in the sidebar and again in the #home view. Returns "" when
-    there is nothing to show, so a missing or empty STUDY.md leaves the
-    page untouched (it must stay statically shareable).
+    Rendered in the #home view (the sidebar's talks list carries these
+    states inline now). Returns "" when there is nothing to show, so a
+    missing or empty STUDY.md leaves the page untouched (it must stay
+    statically shareable).
     """
-    marks = (("studied", "✓", "path-done"), ("queued", "→", "path-next"))
+    marks = (
+        ("studied", "✓", "path-done"),
+        ("queued", "→", "path-next"),
+        ("parked", "·", "path-parked"),
+    )
     items = [
         f'<span class="{css}">{mark} {escape(name)}</span>'
         for key, mark, css in marks
@@ -197,6 +247,14 @@ STYLE = """
   #talk-nav a:hover { background: #efe7d9; }
   #talk-nav a.active { background: #efe7d9; }
   .nav-teacher { display: block; color: #a99e8e; font-size: 0.8rem; }
+  .nav-state { font-size: 0.85rem; }
+  .nav-done { color: #6d5f4b; }
+  .nav-next { color: #a99e8e; }
+  .nav-tag { margin-left: 0.5rem; color: #a99e8e; font-size: 0.72rem;
+             border: 1px solid #e8e0d3; border-radius: 999px;
+             padding: 0.05rem 0.5rem; vertical-align: middle; }
+  .nav-unfetched { padding: 0.45rem 0.6rem; color: #a99e8e;
+                   font-size: 0.95rem; line-height: 1.35; cursor: default; }
   .side-muted { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
   .session-item { display: block; width: 100%; text-align: left; font: inherit;
                   color: #5a4d3a; background: none; border: none;
@@ -238,6 +296,7 @@ STYLE = """
                 margin: 0.4rem 0 0; font-size: 0.92rem; }
   .path-done { color: #6d5f4b; }
   .path-next { color: #a99e8e; }
+  .path-parked { color: #c2b8a6; }
   .player-label { margin: 1rem 0 0.3rem; font-size: 0.9rem; color: #6d5f4b; }
   audio { width: 100%; }
   .source-link { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem;
@@ -708,15 +767,42 @@ def render_card(talk: dict, files: dict, reach: str | None) -> str:
     return "\n".join(parts)
 
 
-def render_nav(talks: list[dict]) -> str:
-    """The sidebar's Talks list: one hash link per talk (title + teacher)."""
-    if not talks:
+_NAV_MARKS = {
+    "studied": '<span class="nav-state nav-done">✓</span> ',
+    "queued": '<span class="nav-state nav-next">→</span> ',
+}
+
+
+def render_nav(
+    talks: list[dict],
+    states: dict[str, str] | None = None,
+    unfetched: list[str] | tuple = (),
+) -> str:
+    """The sidebar's Talks list — which IS the path.
+
+    Each entry carries its state inline: ✓ studied, → queued, a muted
+    "parked" tag, or nothing (in the library, not on the path). Queued
+    talks not yet fetched appear last, muted and unclickable, so the
+    path ahead stays visible.
+    """
+    states = states or {}
+    if not talks and not unfetched:
         return '<p class="side-muted">The library is empty so far.</p>'
-    items = [
-        f'<li><a href="#talk/{escape(talk["slug"])}">'
-        f'<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>'
-        f'<span class="nav-teacher">{escape(talk.get("teacher", ""))}</span></a></li>'
-        for talk in talks
+    items = []
+    for talk in talks:
+        state = states.get(talk["slug"])
+        mark = _NAV_MARKS.get(state, "")
+        tag = '<span class="nav-tag">parked</span>' if state == "parked" else ""
+        items.append(
+            f'<li><a href="#talk/{escape(talk["slug"])}">'
+            f'{mark}<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>{tag}'
+            f'<span class="nav-teacher">{escape(talk.get("teacher", ""))}</span></a></li>'
+        )
+    items += [
+        '<li class="nav-unfetched">'
+        f'{_NAV_MARKS["queued"]}<span class="nav-title">{escape(name)}</span>'
+        '<span class="nav-teacher">not fetched yet — ask the guide</span></li>'
+        for name in unfetched
     ]
     return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>"
 
@@ -725,8 +811,10 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     reach = reach or {}
     study_path = library.parent / "STUDY.md"
     study = study_path.read_text() if study_path.exists() else ""
-    path_strip = render_path_strip(parse_study(study))
+    path = parse_study(study)
+    path_strip = render_path_strip(path)  # the home view's small summary
     talks = parse_index((library / "INDEX.md").read_text())
+    states, unfetched = talk_states(path, talks)
     cards = []
     for talk in talks:
         talk_dir = library / talk["slug"]
@@ -788,9 +876,8 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <nav id="sidebar">
 <h1>Second Arrow</h1>
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
-{path_strip}
 <h2>Talks</h2>
-{render_nav(talks)}
+{render_nav(talks, states, unfetched)}
 <div id="sessions-section" hidden>
 <h2>Sessions</h2>
 <div id="session-list"></div>

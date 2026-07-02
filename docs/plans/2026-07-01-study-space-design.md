@@ -230,6 +230,25 @@ phone), revisit with real usage behind the decision.
   view needs the served shelf. Guide contract (CLAUDE.md + SOUL.md):
   artifacts are self-contained single-file HTML, media only via
   relative paths into the talk folder, rebuild_shelf after writing.
+- **Iter 8 — DONE: sidebar is the path; summaries update anytime.**
+  The sidebar's separate path strip merged into the Talks list: each
+  entry carries its state inline (✓ studied, → queued, a muted "parked"
+  tag — a queued item whose STUDY.md note says "parked"), matched
+  between STUDY.md names and INDEX titles by normalize_title (tolerant
+  of parentheticals and "| Teacher" tails); queued talks not yet
+  fetched appear muted and unclickable ("not fetched yet — ask the
+  guide"), and the home view keeps its small summary strip. Session
+  freshness became a tool: update_session_summary (id validated + must
+  exist, title ≤80, summary ≤300, sidecar otherwise preserved) callable
+  anytime by whichever mind holds the conversation — the claude brain
+  via the allowlisted `uv run tools/update_session_summary.py` CLI (its
+  prompt now opens with a `[session: <id>]` line), the ollama loop via
+  a validated in-process tool (told its session id alongside its
+  tools), and the MCP server (14 tools; Hermes conversations are not
+  shelf sessions — known-id use only). The panel already refetches
+  /api/sessions after each completed turn, so fresh titles appear
+  immediately. Persona contract: retitle when the conversation
+  meaningfully turns or wraps — don't wait for the user to leave.
 
 ## Boundaries
 

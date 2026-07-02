@@ -23,6 +23,9 @@ Interactive pages (rendered on the shelf behind a sandboxed iframe + a
 no-network CSP; ~256KB cap, path pinned by serve_shelf.artifact_path):
     write_artifact (library/<slug>/artifacts/<name>.html — one
     self-contained single-file HTML page, inline CSS/JS only)
+Session freshness (shelf sessions under library/.chat/sessions/; note
+Hermes sessions are NOT shelf sessions — use only with a known id):
+    update_session_summary (title ≤80, summary ≤300; sidecar preserved)
 
 There is deliberately NO journal read tool: hosted models see whatever
 tools return, and the journal never leaves the machine. No terminal, no
@@ -376,6 +379,21 @@ def write_artifact(slug: str, name: str, html: str) -> str:
     )
 
 
+def update_session_summary(session_id: str, title: str, summary: str) -> str:
+    """Update a shelf conversation's sidebar title and short summary
+    (title at most 80 chars, summary at most 300). Use only when a shelf
+    session id is actually known — a Hermes conversation is NOT a shelf
+    session and has no id of its own."""
+    sessions_dir = repo_root() / "library" / ".chat" / "sessions"
+    try:
+        meta = load_serve_shelf().update_session_summary(
+            sessions_dir, session_id, title, summary
+        )
+    except ValueError as error:
+        return f"Update rejected: {error}"
+    return f"Session {session_id} is now titled {meta['title']!r}."
+
+
 def append_journal(content: str) -> str:
     """Append a reflection to today's journal entry (journal/YYYY-MM-DD.md,
     created with a date heading if new). Append-only: the journal is
@@ -398,8 +416,8 @@ def append_journal(content: str) -> str:
 
 
 # The whole world: three actions, six reads, three scoped writes, one
-# artifact write — thirteen tools. No journal read, no terminal, no
-# general file access — by design.
+# artifact write, one session-freshness write — fourteen tools. No journal
+# read, no terminal, no general file access — by design.
 TOOL_HANDLERS = {
     "fetch_talk": fetch_talk,
     "rebuild_shelf": rebuild_shelf,
@@ -414,6 +432,7 @@ TOOL_HANDLERS = {
     "update_notes": update_notes,
     "append_journal": append_journal,
     "write_artifact": write_artifact,
+    "update_session_summary": update_session_summary,
 }
 
 
