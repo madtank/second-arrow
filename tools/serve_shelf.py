@@ -2013,14 +2013,22 @@ def check_hermes_wired(
         )
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return False, "GET /v1/toolsets failed", []
-    excess = probe.excess_toolsets(
-        probe.parse_toolsets(payload), probe.ALLOWED_TOOLSETS
-    )
+    exposed = probe.parse_toolsets(payload)
+    excess = probe.excess_toolsets(exposed, probe.ALLOWED_TOOLSETS)
     if excess:
         return (
             False,
             "gateway over-provisioned — toolsets beyond "
             f"{sorted(probe.ALLOWED_TOOLSETS)}: {excess}",
+            [],
+        )
+    if probe.REQUIRED_TOOLSET not in exposed:
+        return (
+            False,
+            f"{probe.REQUIRED_TOOLSET} not exposed — the gateway didn't "
+            "load our MCP server (the guide would have no hands). Try: "
+            "hermes -p second-arrow mcp test second_arrow, then restart "
+            "the gateway",
             [],
         )
     try:

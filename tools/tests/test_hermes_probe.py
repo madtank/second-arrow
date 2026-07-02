@@ -47,6 +47,23 @@ def test_parse_toolsets_data_wrapper_and_junk_items():
     assert probe.parse_toolsets(None) == set()
 
 
+def test_parse_toolsets_respects_the_enabled_flag():
+    # v0.17 gateways list EVERY toolset with an on/off flag; only the
+    # enabled ones are exposed. An absent flag still counts (v0.18 fakes
+    # and bare-string payloads keep working).
+    payload = {
+        "object": "list",
+        "data": [
+            {"name": "web", "enabled": False},
+            {"name": "terminal", "enabled": False},
+            {"name": "clarify", "enabled": True},
+            {"name": "mcp-second_arrow", "enabled": True},
+            {"name": "file"},
+        ],
+    }
+    assert probe.parse_toolsets(payload) == {"mcp-second_arrow", "clarify", "file"}
+
+
 # --- excess_toolsets: the actual gate ----------------------------------------
 
 
@@ -69,3 +86,11 @@ def test_allowed_set_is_our_mcp_toolset_plus_clarify_only():
     # clarify: asks the user questions, touches nothing (docs: "performs
     # user inquiries without resource consumption"). Nothing else.
     assert probe.ALLOWED_TOOLSETS == frozenset({"mcp-second_arrow", "clarify"})
+
+
+def test_required_toolset_is_our_mcp_server():
+    # Without mcp-second_arrow the guide has no hands — an empty (or
+    # clarify-only) gateway passes the subset check but must NOT pass
+    # the gate.
+    assert probe.REQUIRED_TOOLSET == "mcp-second_arrow"
+    assert probe.REQUIRED_TOOLSET in probe.ALLOWED_TOOLSETS

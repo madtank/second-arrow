@@ -2001,6 +2001,38 @@ def test_check_hermes_wired_gate_open_with_routes(fake_gateway):
     assert routes == [{"alias": "deep", "model": "gpt-5.5"}]
 
 
+def test_check_hermes_wired_ignores_disabled_toolsets(fake_gateway):
+    # v0.17 gateways list every built-in toolset with enabled flags; a
+    # locked-down profile shows them all disabled. Only enabled ones
+    # count against the gate.
+    base, _ = fake_gateway(
+        toolsets={
+            "object": "list",
+            "data": [
+                {"name": "web", "enabled": False},
+                {"name": "terminal", "enabled": False},
+                {"name": "browser", "enabled": False},
+                {"name": "clarify", "enabled": True},
+                {"name": "mcp-second_arrow", "enabled": True},
+            ],
+        },
+    )
+    wired, reason, _ = serve_shelf.check_hermes_wired(base=base, api_key="k")
+    assert wired is True and reason is None
+
+
+def test_check_hermes_wired_requires_our_mcp_toolset(fake_gateway):
+    # clarify-only (or empty) passes the subset check but the guide would
+    # have no hands — the gate must refuse and say what's missing.
+    base, _ = fake_gateway(
+        toolsets={"data": [{"name": "clarify", "enabled": True}]},
+    )
+    wired, reason, routes = serve_shelf.check_hermes_wired(base=base, api_key="k")
+    assert wired is False
+    assert "mcp-second_arrow" in reason and "MCP" in reason
+    assert routes == []
+
+
 def test_check_hermes_wired_refuses_an_over_provisioned_gateway(fake_gateway):
     base, _ = fake_gateway(
         toolsets=[{"name": "mcp-second_arrow"}, {"name": "terminal"}, {"name": "web"}]

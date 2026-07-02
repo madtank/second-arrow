@@ -39,6 +39,10 @@ PROBE_TIMEOUT = 10  # seconds per GET
 
 ALLOWED_TOOLSETS = frozenset({"mcp-second_arrow", "clarify"})
 
+# Without our MCP toolset the guide has no hands — a gateway exposing
+# nothing (or clarify only) passes the subset check but must not pass.
+REQUIRED_TOOLSET = "mcp-second_arrow"
+
 
 # --- pure parts (tested in tools/tests/test_hermes_probe.py) ----------------
 
@@ -63,6 +67,10 @@ def parse_toolsets(payload) -> set[str]:
         if isinstance(item, str) and item:
             names.add(item)
         elif isinstance(item, dict):
+            # v0.17 lists EVERY toolset with an on/off flag; only the
+            # enabled ones are exposed. An absent flag counts as exposed.
+            if not item.get("enabled", True):
+                continue
             name = item.get("name") or item.get("id")
             if isinstance(name, str) and name:
                 names.add(name)
@@ -107,6 +115,15 @@ def main() -> int:
         print(
             "GATE CLOSED — toolsets beyond the allowed set "
             f"{sorted(ALLOWED_TOOLSETS)}: {excess}",
+            file=sys.stderr,
+        )
+        return 1
+    if REQUIRED_TOOLSET not in exposed:
+        print(
+            f"GATE CLOSED — {REQUIRED_TOOLSET} is not exposed: the gateway "
+            "didn't load our MCP server (the guide would have no hands). "
+            "Try: hermes -p second-arrow mcp test second_arrow, then "
+            "restart the gateway.",
             file=sys.stderr,
         )
         return 1
