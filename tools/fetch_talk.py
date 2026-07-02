@@ -14,6 +14,7 @@ Run with:
 """
 
 import argparse
+import html as html_module
 import json
 import re
 import shutil
@@ -192,8 +193,12 @@ def classify_url(url: str) -> str:
 
 def find_audio_link(html: str, base_url: str) -> str | None:
     for match in re.finditer(r'href="([^"]+)"', html):
-        href = match.group(1)
+        # Hrefs arrive HTML-escaped (&amp;) and may carry spaces/parens —
+        # unescape, then percent-encode what urllib can't fetch raw.
+        # `%` stays safe so already-encoded links aren't double-encoded.
+        href = html_module.unescape(match.group(1))
         if href.lower().split("?")[0].endswith(AUDIO_EXTENSIONS):
+            href = urllib.parse.quote(href, safe="%/:?=&()!$,;'@+*~._-")
             return urllib.parse.urljoin(base_url, href)
     return None
 

@@ -1,4 +1,5 @@
 import importlib.util
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,33 @@ def test_find_audio_link_in_dhammatalks_page():
 
 def test_find_audio_link_returns_none_when_absent():
     assert fetch_talk.find_audio_link("<p>no audio here</p>", "https://x.test/") is None
+
+
+def test_find_audio_link_unescapes_and_encodes_the_real_dhammatalks_shape():
+    # Real-world regression (Patience & Goodwill, 2026-04-10): hrefs are
+    # HTML-escaped and carry &, parens, and sometimes spaces — requesting
+    # them raw 404s. The link must be HTML-unescaped, then made fetchable
+    # (no bare spaces, no lingering &amp;).
+    html = (
+        '<a href="/Archive/shorttalks/y2026/'
+        '260410(short)_Patience_&amp;_Goodwill.mp3">Listen</a>'
+    )
+    base = "https://www.dhammatalks.org/audio/morning/2026/260410-patience-goodwill.html"
+    link = fetch_talk.find_audio_link(html, base)
+    assert link is not None
+    assert "&amp;" not in link
+    assert "_Patience_&_Goodwill.mp3" in urllib.parse.unquote(link)
+    assert " " not in link
+    # A space in the path gets percent-encoded so urllib can fetch it.
+    spaced = '<a href="/audio/some talk.mp3">x</a>'
+    link = fetch_talk.find_audio_link(spaced, "https://x.test/")
+    assert link == "https://x.test/audio/some%20talk.mp3"
+    # Already-encoded links are not double-encoded.
+    encoded = '<a href="/audio/some%20talk.mp3">x</a>'
+    assert (
+        fetch_talk.find_audio_link(encoded, "https://x.test/")
+        == "https://x.test/audio/some%20talk.mp3"
+    )
 
 
 def test_guess_title_from_filename_strips_date_prefix_and_extension():
