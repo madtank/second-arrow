@@ -390,6 +390,29 @@ STYLE = """
   .seg:hover { background: #f2ece1; }
   .seg.active { background: #efe7d9; }
   .seg-time { color: #a99e8e; font-size: 0.8rem; margin-right: 0.4rem; }
+  #now-playing { position: fixed; top: 0.9rem; right: 1.2rem; z-index: 5;
+                 display: flex; align-items: center; gap: 0.1rem;
+                 background: #fffdf9; border: 1px solid #e8e0d3;
+                 border-radius: 999px; padding: 0.22rem 0.45rem 0.22rem 0.3rem;
+                 box-shadow: 0 4px 14px rgba(60, 56, 51, 0.13); }
+  #now-playing[hidden] { display: none; } /* flex must not defeat hidden */
+  #np-body { display: flex; align-items: center; gap: 0.5rem; font: inherit;
+             background: none; border: none; cursor: pointer;
+             color: #5a4d3a; padding: 0.1rem 0.3rem; min-width: 0; }
+  #np-thumb { width: 2rem; height: 2rem; object-fit: cover;
+              border-radius: 999px; display: block; }
+  #np-glyph { width: 2rem; height: 2rem; line-height: 2rem;
+              text-align: center; background: #efe7d9;
+              border-radius: 999px; font-size: 0.8rem; }
+  #np-title { max-width: 10.5rem; white-space: nowrap; overflow: hidden;
+              text-overflow: ellipsis; font-size: 0.88rem; }
+  #np-time { color: #a99e8e; font-size: 0.8rem;
+             font-variant-numeric: tabular-nums; }
+  #np-play, #np-stop, #np-expand { font: inherit; font-size: 0.85rem;
+             color: #5a4d3a; background: none; border: none;
+             cursor: pointer; padding: 0.35rem 0.5rem;
+             border-radius: 999px; }
+  #np-play:hover, #np-stop:hover, #np-expand:hover { background: #efe7d9; }
   .cluster { border-top: 1px solid #f0e9dd; margin-top: 1.25rem;
              padding-top: 0.75rem; }
   .cur-onshelf { color: #6d5f4b; }
@@ -1069,6 +1092,121 @@ LAYOUT_SCRIPT = """<script>
     });
   });
 
+  // --- now playing: one voice, one visible handle ------------------------
+  // Views hide, they never unmount — so a talk keeps playing across room
+  // changes and chat states. The capsule is its handle: visible whenever
+  // a talk is playing (or paused midway) and its own room is not on
+  // screen; above the conversation overlay; never near the input row.
+  var ytFrames = {}; // slug -> mounted iframe (for command postMessages)
+  var nowPlaying = null; // {slug, kind, title, time, playing, ytInfo}
+  var capsule = document.getElementById("now-playing");
+  var npBody = document.getElementById("np-body");
+  var npThumb = document.getElementById("np-thumb");
+  var npGlyph = document.getElementById("np-glyph");
+  var npTitle = document.getElementById("np-title");
+  var npTime = document.getElementById("np-time");
+  var npPlay = document.getElementById("np-play");
+  var npStop = document.getElementById("np-stop");
+  var npExpand = document.getElementById("np-expand");
+
+  function npClock(seconds) {
+    var total = Math.max(0, Math.floor(seconds || 0));
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
+    var sec = total % 60;
+    var mm = (h && m < 10 ? "0" : "") + m;
+    return (h ? h + ":" : "") + mm + ":" + (sec < 10 ? "0" : "") + sec;
+  }
+
+  function ytCommand(slug, func) {
+    var frame = ytFrames[slug];
+    if (!frame) return;
+    try {
+      frame.contentWindow.postMessage(JSON.stringify(
+        { event: "command", func: func, args: [] }),
+        "https://www.youtube-nocookie.com");
+    } catch (e) { /* mute channel: the capsule still navigates */ }
+  }
+
+  function pauseOthers(slug) {
+    // One voice at a time: whoever starts, everyone else goes quiet.
+    document.querySelectorAll("audio.talk-audio").forEach(function (audio) {
+      if (audio.getAttribute("data-slug") !== slug && !audio.paused) {
+        audio.pause(); // position is saved by the resume feature
+      }
+    });
+    Object.keys(ytFrames).forEach(function (other) {
+      if (other !== slug) ytCommand(other, "pauseVideo");
+    });
+  }
+
+  function setNowPlaying(slug, kind) {
+    var heading = document.querySelector("#talk-" + slug + " h2");
+    nowPlaying = {
+      slug: slug,
+      kind: kind,
+      title: heading ? heading.textContent : slug,
+      time: 0,
+      playing: true,
+      ytInfo: false,
+    };
+    var art = document.querySelector("#talk-" + slug + " .yt-thumb img");
+    npThumb.hidden = !art;
+    npGlyph.hidden = !!art;
+    if (art) npThumb.setAttribute("src", art.getAttribute("src"));
+    updateCapsule();
+  }
+
+  function updateCapsule() {
+    if (!nowPlaying) { capsule.hidden = true; return; }
+    // Only its own room makes the handle redundant; everywhere else —
+    // other rooms, home, over the chat conversation — it stays.
+    capsule.hidden = location.hash === "#talk/" + nowPlaying.slug;
+    if (capsule.hidden) return;
+    npTitle.textContent = nowPlaying.title;
+    npTime.textContent = npClock(nowPlaying.time);
+    npPlay.textContent = nowPlaying.playing ? "❚❚" : "▶";
+    // A YouTube channel that never delivered info can't be trusted with
+    // a toggle — hide it rather than show a control that may not work.
+    npPlay.hidden = nowPlaying.kind === "yt" && !nowPlaying.ytInfo;
+  }
+
+  function goToNowPlaying() {
+    if (nowPlaying) location.hash = "#talk/" + nowPlaying.slug;
+  }
+  npBody.addEventListener("click", goToNowPlaying);
+  npExpand.addEventListener("click", goToNowPlaying);
+
+  npPlay.addEventListener("click", function () {
+    if (!nowPlaying) return;
+    if (nowPlaying.kind === "audio") {
+      var audio = document.querySelector(
+        'audio.talk-audio[data-slug="' + nowPlaying.slug + '"]');
+      if (!audio) return;
+      if (audio.paused) audio.play(); else audio.pause();
+    } else {
+      ytCommand(nowPlaying.slug, nowPlaying.playing ? "pauseVideo" : "playVideo");
+      nowPlaying.playing = !nowPlaying.playing; // infoDelivery corrects us
+      updateCapsule();
+    }
+  });
+
+  npStop.addEventListener("click", function () {
+    if (!nowPlaying) return;
+    if (nowPlaying.kind === "audio") {
+      var audio = document.querySelector(
+        'audio.talk-audio[data-slug="' + nowPlaying.slug + '"]');
+      if (audio) audio.pause();
+    } else {
+      // Pause, never reload or destroy the iframe — resume keeps the place.
+      ytCommand(nowPlaying.slug, "pauseVideo");
+    }
+    nowPlaying = null;
+    updateCapsule();
+  });
+
+  window.addEventListener("hashchange", updateCapsule);
+
   // --- local audio: restore, track, highlight ---------------------------
   document.querySelectorAll("audio.talk-audio").forEach(function (audio) {
     var slug = audio.getAttribute("data-slug");
@@ -1081,10 +1219,33 @@ LAYOUT_SCRIPT = """<script>
     });
     audio.addEventListener("timeupdate", function () {
       highlightSegment(slug, audio.currentTime);
+      if (nowPlaying && nowPlaying.slug === slug) {
+        nowPlaying.time = audio.currentTime;
+        updateCapsule();
+      }
       var now = Date.now();
       if (now - lastSave < 5000) return; // throttled
       lastSave = now;
       savePos(slug, audio.currentTime, audio.duration);
+    });
+    audio.addEventListener("play", function () {
+      pauseOthers(slug);
+      if (!nowPlaying || nowPlaying.slug !== slug) setNowPlaying(slug, "audio");
+      nowPlaying.playing = true;
+      nowPlaying.time = audio.currentTime;
+      updateCapsule();
+    });
+    audio.addEventListener("pause", function () {
+      if (nowPlaying && nowPlaying.slug === slug) {
+        nowPlaying.playing = false; // paused midway: the handle stays
+        updateCapsule();
+      }
+    });
+    audio.addEventListener("ended", function () {
+      if (nowPlaying && nowPlaying.slug === slug) {
+        nowPlaying = null;
+        updateCapsule();
+      }
     });
   });
 
@@ -1117,6 +1278,9 @@ LAYOUT_SCRIPT = """<script>
       } catch (e) { /* degrade: the &start= above already resumed us */ }
     });
     ytMounted[slug] = true;
+    ytFrames[slug] = frame;
+    pauseOthers(slug); // one voice: the new talk takes over
+    setNowPlaying(slug, "yt"); // autoplay: playing until told otherwise
     var box = document.createElement("div");
     box.className = "yt-frame";
     box.appendChild(frame);
@@ -1138,6 +1302,14 @@ LAYOUT_SCRIPT = """<script>
     if (!data || data.event !== "infoDelivery" || !data.info) return;
     var slug = data.id;
     if (!ytMounted[slug] || typeof data.info.currentTime !== "number") return;
+    if (nowPlaying && nowPlaying.slug === slug) {
+      nowPlaying.ytInfo = true; // the command channel is alive
+      nowPlaying.time = data.info.currentTime;
+      if (typeof data.info.playerState === "number") {
+        nowPlaying.playing = data.info.playerState === 1;
+      }
+      updateCapsule();
+    }
     highlightSegment(slug, data.info.currentTime);
     var now = Date.now();
     if (now - (ytLastSave[slug] || 0) < 5000) return; // throttled
@@ -1419,6 +1591,17 @@ Rebuild: <code>uv run tools/build_shelf.py</code>
 </footer>
 </nav>
 <main>
+<div id="now-playing" hidden>
+<button type="button" id="np-body" title="go to this talk">
+<img id="np-thumb" alt="" hidden>
+<span id="np-glyph" hidden>▶</span>
+<span id="np-title"></span>
+<span id="np-time"></span>
+</button>
+<button type="button" id="np-play" title="play / pause"></button>
+<button type="button" id="np-stop" title="stop — your place is kept">■</button>
+<button type="button" id="np-expand" title="go to this talk">⤢</button>
+</div>
 <div id="views">
 <section class="card view" id="view-home">
 <h2>Begin here</h2>

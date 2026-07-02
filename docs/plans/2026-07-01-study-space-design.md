@@ -332,6 +332,21 @@ phone), revisit with real usage behind the decision.
   #reflection-chip[hidden] wins; and WIP pages no longer leak onto the
   user's shelf (test builds go to a temp -o output; library/shelf.html
   is regenerated only from committed code).
+- **Iter 11c — DONE: now playing — one voice, visible handle.** Views
+  hide but never unmount, so a talk keeps playing across rooms and chat
+  states; the capsule is its handle. One voice at a time: starting any
+  talk pauses every other (local audio directly, YouTube via the jsapi
+  command channel already used for infoDelivery). A calm fixed capsule
+  sits top-right of the main pane — tiny thumbnail or ▶ glyph,
+  truncated title, live time, and three explicit controls (play/pause,
+  ■ stop that pauses and clears the handle without ever destroying the
+  iframe — resume keeps the place — and ⤢ expand). The capsule body
+  and ⤢ both navigate to the talk's room. Hidden only in the playing
+  talk's own room or when stopped; visible everywhere else, including
+  above the chat conversation overlay (z 5 over z 4, never near the
+  input row). A YouTube channel that never delivers info hides the
+  play/pause toggle rather than showing a control that might not work
+  — the capsule still navigates.
 
 ## Boundaries
 

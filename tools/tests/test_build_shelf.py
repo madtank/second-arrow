@@ -1025,3 +1025,44 @@ def test_chat_bubbles_carry_avatars_and_run_labels(tmp_path):
     # System lines stay centered and unbubbled (no row/avatar).
     assert "chat-system" in html
 
+
+# --- iteration 11c: now playing — one voice, visible handle -------------------
+
+
+def test_now_playing_capsule_markup(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    capsule = re.search(r'<div id="now-playing" hidden>.*?</div>', html, re.S)
+    assert capsule, "capsule missing"
+    # Three explicit controls + the navigating body; tooltips on all.
+    for control in ("np-body", "np-play", "np-stop", "np-expand"):
+        assert f'id="{control}"' in capsule.group(0)
+    assert capsule.group(0).count('title="') >= 3
+    # The chip lesson, applied: hidden must beat the flex display.
+    assert re.search(r"#now-playing\[hidden\] \{ display: none", html)
+    # Fixed top-right, above the conversation overlay (z 5 over z 4),
+    # far from the input row at the bottom.
+    assert re.search(r"#now-playing \{ position: fixed; top:", html)
+    assert "z-index: 5" in html
+
+
+def test_one_voice_at_a_time(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Starting any talk pauses every other: local audio directly, YouTube
+    # through the jsapi command channel we already listen on.
+    assert "function pauseOthers(slug)" in html
+    assert '"pauseVideo"' in html
+    assert '"playVideo"' in html
+    # Stop pauses and clears the handle — never reloads/destroys the
+    # iframe (position is already saved by the resume feature).
+    assert "nowPlaying = null" in html
+
+
+def test_capsule_hides_only_in_its_own_room(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # In the talk's own room the capsule is redundant; everywhere else —
+    # including over the chat conversation — it stays.
+    assert 'location.hash === "#talk/" + nowPlaying.slug' in html
+    # YouTube with a mute command channel: hide play/pause, keep the
+    # capsule navigating (degrade, never a broken-looking control).
+    assert "ytInfo" in html
+
