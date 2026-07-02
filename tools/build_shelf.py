@@ -86,6 +86,54 @@ def md_to_html(text: str) -> str:
     return "\n".join(out)
 
 
+def parse_study(text: str) -> dict:
+    """Pull the path out of STUDY.md: {"studied": [names], "queued": [names]}.
+
+    Tolerant by design (STUDY.md is hand- and guide-edited): missing
+    sections or plain prose give empty lists. Only top-level `- ` items
+    inside `## Studied` / `## Queued` count; an item's name is its leading
+    **bold** span, else the text before the first " — " or ": "
+    separator. Wrapped continuation lines are ignored.
+    """
+    path: dict = {"studied": [], "queued": []}
+    section = None
+    for line in text.splitlines():
+        heading = re.match(r"#{2,} (.+)", line)
+        if heading:
+            name = heading.group(1).strip().lower()
+            section = name if name in path else None
+            continue
+        if section is None or not line.startswith("- "):
+            continue
+        item = line[2:].strip()
+        bold = re.match(r"\*\*(.+?)\*\*", item)
+        name = bold.group(1) if bold else re.split(r" — |: ", item)[0]
+        name = name.strip().rstrip(".")
+        if name:
+            path[section].append(name)
+    return path
+
+
+def render_path_strip(path: dict) -> str:
+    """A small calm strip: studied talks with a check, queued with an arrow.
+
+    Returns "" when there is nothing to show, so a missing or empty
+    STUDY.md leaves the page untouched (it must stay statically shareable).
+    """
+    marks = (("studied", "✓", "path-done"), ("queued", "→", "path-next"))
+    items = [
+        f'<span class="{css}">{mark} {escape(name)}</span>'
+        for key, mark, css in marks
+        for name in path.get(key, [])
+    ]
+    if not items:
+        return ""
+    return (
+        '<section class="card path-strip">\n<h2>The path</h2>\n'
+        '<p class="path-items">\n' + "\n".join(items) + "\n</p>\n</section>"
+    )
+
+
 def probe(talk_dir: Path) -> dict:
     """See which study artifacts a talk folder actually has."""
     audio = next(
@@ -114,6 +162,11 @@ STYLE = """
   .card h2 { font-size: 1.3rem; margin: 0 0 0.2rem; }
   .meta { color: #8a7f70; font-size: 0.9rem; margin: 0 0 1rem; }
   .reach { color: #6d5f4b; }
+  .path-strip { padding: 1rem 1.75rem; }
+  .path-items { display: flex; flex-wrap: wrap; gap: 0.3rem 1.2rem;
+                margin: 0.4rem 0 0; font-size: 0.92rem; }
+  .path-done { color: #6d5f4b; }
+  .path-next { color: #a99e8e; }
   .player-label { margin: 1rem 0 0.3rem; font-size: 0.9rem; color: #6d5f4b; }
   audio { width: 100%; }
   .source-link { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem;
@@ -364,6 +417,9 @@ def render_card(talk: dict, files: dict, reach: str | None) -> str:
 
 def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
     reach = reach or {}
+    study_path = library.parent / "STUDY.md"
+    study = study_path.read_text() if study_path.exists() else ""
+    path_strip = render_path_strip(parse_study(study))
     cards = []
     for talk in parse_index((library / "INDEX.md").read_text()):
         talk_dir = library / talk["slug"]
@@ -404,6 +460,8 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <h1>Second Arrow — Study Shelf</h1>
 <p>Pain happens. The second arrow is optional.</p>
 </header>
+
+{path_strip}
 
 {body}
 

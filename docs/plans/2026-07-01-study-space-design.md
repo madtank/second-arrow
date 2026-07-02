@@ -156,9 +156,12 @@ phone), revisit with real usage behind the decision.
   under `library/.chat/`), and acts through the reviewed tools only
   (fetch_talk, speak, build_shelf — no general Bash). Brain toggle in
   the panel; bubbles render safe mini-markdown.
-- **Iter 2 — path-flow:** the guide advances the curriculum queue itself
-  (suggest → ingest → primer → discuss → notes), optionally with a
-  nightly prep cron.
+- **Iter 2 — DONE: path-flow.** `STUDY.md` normalized to Where we are /
+  Studied / Queued / Open questions; the guide advances the path when a
+  discussion wraps (distill → move to Studied → queue the next best-fit
+  talk, offering — never auto-running — the fetch), and the shelf shows
+  a small "The path" strip (✓ studied, → queued) parsed from `STUDY.md`.
+  A nightly prep cron stays optional, unscheduled.
 - **Iter 3 — Ollama tool loop:** offline agency for the local brain.
   Honest constraint to design around: local models are weaker discussion
   partners, so the offline guide should lean on retrieval (quote the

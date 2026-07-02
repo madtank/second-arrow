@@ -198,3 +198,85 @@ def test_render_shelf_transcript_renders_inline_and_scrollable(tmp_path):
     # The raw file stays one click away.
     assert 'href="far-talk/transcript.md"' in html
     assert "open raw file" in html
+
+
+# --- parse_study + the path strip -----------------------------------------
+
+STUDY_SNIPPET = """# Study Memory
+
+## Where we are
+- Root cluster: anger, aversion, patience.
+
+## Studied
+- **Patience** (Thanissaro Bhikkhu, 2026-06-12): not grim endurance;
+  the carpenter's adze-handle image for invisible progress.
+
+## Queued
+- **Anger Eating Demons (Ajahn Brahm)** — primer ready: see
+  library/anger-eating-demons/.
+- Dealing with people that irritate us (Ajahn Brahm, 4 min): light taster.
+
+## Open questions
+- Eightfold Path without feeling dumb for forgetting.
+"""
+
+
+def test_parse_study_pulls_studied_and_queued_names():
+    path = build_shelf.parse_study(STUDY_SNIPPET)
+    assert path["studied"] == ["Patience"]
+    # A bold span names the item; a plain one falls back to pre-colon text.
+    assert path["queued"] == [
+        "Anger Eating Demons (Ajahn Brahm)",
+        "Dealing with people that irritate us (Ajahn Brahm, 4 min)",
+    ]
+
+
+def test_parse_study_ignores_other_sections_and_wrapped_lines():
+    path = build_shelf.parse_study(STUDY_SNIPPET)
+    flat = path["studied"] + path["queued"]
+    assert not any("Root cluster" in name for name in flat)
+    assert not any("Eightfold" in name for name in flat)
+    assert not any("adze-handle" in name for name in flat)  # continuation line
+
+
+def test_parse_study_tolerates_missing_sections_and_empty_text():
+    assert build_shelf.parse_study("") == {"studied": [], "queued": []}
+    assert build_shelf.parse_study("# Just a title\n\nprose\n") == {
+        "studied": [],
+        "queued": [],
+    }
+    assert build_shelf.parse_study("## Queued\n- **Next Talk** — soon.\n") == {
+        "studied": [],
+        "queued": ["Next Talk"],
+    }
+
+
+def test_render_shelf_shows_path_strip_when_study_md_exists(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(STUDY_SNIPPET)
+    html = build_shelf.render_shelf(library, {})
+    assert "The path" in html
+    assert "✓ Patience" in html
+    assert "→ Anger Eating Demons (Ajahn Brahm)" in html
+    assert "→ Dealing with people that irritate us (Ajahn Brahm, 4 min)" in html
+
+
+def test_render_shelf_omits_path_strip_without_study_md(tmp_path):
+    library = _make_library(tmp_path)  # no STUDY.md next to library/
+    html = build_shelf.render_shelf(library, {})
+    assert "The path" not in html
+    assert 'class="card path-strip"' not in html
+    # An empty STUDY.md is treated the same (static shareability).
+    (tmp_path / "STUDY.md").write_text("# Study Memory\n")
+    html = build_shelf.render_shelf(library, {})
+    assert 'class="card path-strip"' not in html
+
+
+def test_render_shelf_path_strip_escapes_names(tmp_path):
+    library = _make_library(tmp_path)
+    (tmp_path / "STUDY.md").write_text(
+        "## Studied\n- **Quiet <Talk> & Friends**: done.\n"
+    )
+    html = build_shelf.render_shelf(library, {})
+    assert "✓ Quiet &lt;Talk&gt; &amp; Friends" in html
+    assert "<Talk>" not in html

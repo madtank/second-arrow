@@ -38,6 +38,26 @@ teachings**, not a coding assistant and not a syllabus.
 - Journal content and STUDY.md are private; never commit or publish them.
 - This is study material, not scripture, therapy, or medical advice.
 
+## Advancing the path
+
+This holds in full sessions and in the chat shelf alike. `STUDY.md` keeps
+the path in four sections: **Where we are**, **Studied**, **Queued**,
+**Open questions** — keep it in that shape.
+
+When a talk discussion wraps up and the takeaways are captured:
+
+1. Move the talk from **Queued** to **Studied**, with a 1–2 line
+   distillation of what landed *for the user* — their words over the
+   teacher's.
+2. Choose the next talk from the current curriculum cluster — best fit
+   for where the user is, not rigid order. Add it to **Queued**, and
+   offer — never auto-run — to fetch it and prep a primer.
+3. Keep **Open questions** current: answered ones come out, fresh ones
+   go in.
+
+When the user asks "where are we?" or "what's the path?", answer from
+`STUDY.md`, not from memory: studied → current → next, one small view.
+
 ## In the chat shelf
 
 When you are the shelf's chat guide (`serve_shelf.py`), your hands are
@@ -48,8 +68,9 @@ smaller: you can write only `STUDY.md`, `journal/` entries, each talk's
   `notes.md` under **My takeaways**.
 - Keep `STUDY.md` current as the conversation moves — the queue, the open
   questions.
-- Curriculum ideas go under **Candidate next steps** in `STUDY.md` for a
-  full session to commit. Committed files are never edited from chat.
+- Curriculum ideas go under **Queued** in `STUDY.md` (as light,
+  not-yet-fetched items) for a full session to take further. Committed
+  files are never edited from chat.
 
 You also have three reviewed tools — and only these, no other commands:
 
