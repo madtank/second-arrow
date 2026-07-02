@@ -100,6 +100,23 @@ CURRICULUM_MD = """# Cluster 1: Anger & the Second Arrow
   The original two-arrows text. Short. Read it once early, return often.
 """
 
+# The storage-guard artifact: CLAUDE.md's authoring contract in fixture
+# form. Inside the sandboxed inline view (allow-scripts, never
+# allow-same-origin) any storage access throws SecurityError — a guarded
+# store with an in-memory fallback keeps the script alive, and the test
+# asserts the content really renders inline.
+GUARDED_STORAGE_ARTIFACT = """<!DOCTYPE html>
+<html><body>
+<h1 id="state">waiting</h1>
+<script>
+var store = null;
+try { store = window.localStorage; } catch (e) { store = null; }
+document.getElementById("state").textContent =
+  store ? "storage ready" : "guarded: memory only";
+</script>
+</body></html>
+"""
+
 # The anchored-listening artifact: the exact contract CLAUDE.md gives tool
 # authors — a "listen from" button posting second-arrow:seek up to the
 # shelf, degrading to static text with no parent listening.
@@ -142,6 +159,9 @@ def build_scratch_root(root: Path) -> Path:
     write_silent_wav(library / "quiet-mind" / "audio.wav", seconds=10.0)
     (library / "quiet-mind" / "artifacts" / "anchored-listen.html").write_text(
         SEEK_ARTIFACT
+    )
+    (library / "quiet-mind" / "artifacts" / "guarded-notes.html").write_text(
+        GUARDED_STORAGE_ARTIFACT
     )
     # A SPOKEN reading with its timing map (speak.py's contract:
     # reading.mp3 + reading.segments.json): its text is the seek surface.

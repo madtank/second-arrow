@@ -501,6 +501,22 @@ def test_artifact_iframe_is_sandboxed_behind_the_csp_wall(page, shelf_server):
     assert frame.get_attribute("sandbox") == "allow-scripts"
 
 
+def test_guarded_storage_artifact_renders_inline_under_the_sandbox(page, shelf_server):
+    # CLAUDE.md's storage contract, locked into the suite: under the
+    # sandbox (no allow-same-origin) the storage getter throws — an
+    # artifact that reaches storage THROUGH a guard keeps its script
+    # alive and renders real content inline instead of dying silently.
+    _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+    frame_sel = '.artifact-item[data-name="guarded-notes.html"] iframe.artifact-frame'
+    page.wait_for_selector(frame_sel, state="attached")
+    page.locator(frame_sel).scroll_into_view_if_needed()  # lazy iframes load in view
+    from playwright.sync_api import expect
+
+    expect(page.frame_locator(frame_sel).locator("#state")).to_have_text(
+        "guarded: memory only"
+    )
+
+
 # --- done for now: the manual heard door and the path's primary action -------
 
 

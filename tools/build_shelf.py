@@ -28,6 +28,7 @@ Then:
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".ogg", ".wav", ".flac", ".aac", ".opus")
@@ -542,6 +543,29 @@ def stamp_query(files: dict, rel: str) -> str:
     return f"?v={stamp}" if stamp is not None else ""
 
 
+def artifact_storage_unguarded(text: str) -> bool:
+    """Heuristic lint: does this artifact touch web storage with no
+    guard in sight?
+
+    Inside the shelf's sandboxed iframe (allow-scripts, never
+    allow-same-origin) ANY localStorage/sessionStorage access throws a
+    SecurityError that kills the whole script — the artifact renders as
+    an empty skeleton with no signal, while "open full page" works.
+    CLAUDE.md's authoring contract requires a guarded store; this flags
+    the ones written without it. A try/catch (or an explicit typeof /
+    'in window' feature check) anywhere in the file counts as guarded —
+    a grep-level verdict by design: flag, never block.
+    """
+    if not re.search(r"\b(?:localStorage|sessionStorage)\b", text):
+        return False
+    guarded = (
+        (re.search(r"\btry\b", text) and re.search(r"\bcatch\b", text))
+        or re.search(r"typeof\s+(?:localStorage|sessionStorage)", text)
+        or re.search(r"['\"](?:localStorage|sessionStorage)['\"]\s+in\s+window", text)
+    )
+    return not guarded
+
+
 def is_reading(files: dict, talk: dict | None = None) -> bool:
     """The room-shape verdict: is this entry a reading (a text source)?
 
@@ -754,6 +778,8 @@ STYLE = """
   .artifact-name { color: #6d5f4b; font-size: 0.95rem; }
   .artifact-open { margin-left: 0.75rem; font-size: 0.85rem; color: #a99e8e; }
   .artifact-note { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
+  .artifact-warn { display: block; color: #a5703f; font-size: 0.8rem;
+                   font-style: italic; margin-top: 0.2rem; }
   .make-interactive, .mark-moments, .make-primer, .make-notes,
   .more-moments, .fetch-stub, .ask-stub, .record-reading {
                       font: inherit; font-size: 0.92rem; color: #5a4d3a;
@@ -3799,14 +3825,36 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
             # data-v: the identity stamp mountArtifacts carries onto the
             # iframe src — a rewritten artifact (same filename) changes
             # the markup, so the swap remounts it as a NEW document.
-            items = "\n".join(
-                f'<li class="artifact-item" data-slug="{slug}" data-name="{escape(name)}"'
-                f' data-v="{files["stamps"].get(f"artifacts/{name}", "")}">\n'
-                f'<span class="artifact-name">{escape(name)}</span>\n'
-                f'<a class="artifact-open" href="{slug}/artifacts/{escape(name)}"'
-                ' target="_blank" rel="noopener">open full page ↗</a>\n</li>'
-                for name in files["artifacts"]
-            )
+            item_lines = []
+            for name in files["artifacts"]:
+                warn = ""
+                try:
+                    body = (talk_dir / "artifacts" / name).read_text(errors="replace")
+                except OSError:
+                    body = ""
+                if artifact_storage_unguarded(body):
+                    # Unguarded storage dies with a SecurityError in the
+                    # sandboxed inline view — say so quietly, both to the
+                    # builder (stderr) and next to the entry itself.
+                    print(
+                        f"[build_shelf] warning: {slug}/artifacts/{name} "
+                        "touches localStorage/sessionStorage without a "
+                        "guard — it may die inline in the sandboxed view "
+                        "(see CLAUDE.md's artifact storage contract)",
+                        file=sys.stderr,
+                    )
+                    warn = (
+                        '\n<span class="artifact-warn">⚠ may not run inline '
+                        "— unguarded storage access</span>"
+                    )
+                item_lines.append(
+                    f'<li class="artifact-item" data-slug="{slug}" data-name="{escape(name)}"'
+                    f' data-v="{files["stamps"].get(f"artifacts/{name}", "")}">\n'
+                    f'<span class="artifact-name">{escape(name)}</span>\n'
+                    f'<a class="artifact-open" href="{slug}/artifacts/{escape(name)}"'
+                    f' target="_blank" rel="noopener">open full page ↗</a>{warn}\n</li>'
+                )
+            items = "\n".join(item_lines)
             interactive_body = (
                 '<p class="artifact-note">Interactive pages the guide made for'
                 " this talk. The sandboxed view appears on the served shelf;"

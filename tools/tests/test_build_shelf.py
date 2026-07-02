@@ -760,6 +760,55 @@ def test_artifact_items_carry_stamps_the_iframes_mount_with(tmp_path):
     assert 'data-v="1700000006"' in build_shelf.render_shelf(library, {})
 
 
+def test_artifact_storage_lint_heuristic():
+    flag = build_shelf.artifact_storage_unguarded
+    # Bare storage access dies inline (SecurityError in the sandboxed
+    # iframe kills the whole script) — flag it.
+    assert flag("<script>localStorage.setItem('a','b');</script>")
+    assert flag("<script>var x = sessionStorage.getItem('k');</script>")
+    # A try/catch guard (the CLAUDE.md contract) counts.
+    assert not flag(
+        "<script>var s=null; try { s = window.localStorage; }"
+        " catch (e) { s = null; }</script>"
+    )
+    # No storage at all: nothing to flag.
+    assert not flag("<script>document.title = 'calm';</script>")
+    assert not flag("")
+
+
+def test_artifact_storage_lint_warns_on_stderr_and_marks_the_entry(tmp_path, capsys):
+    library = _make_library(tmp_path)
+    art = library / "quiet-mind" / "artifacts"
+    (art / "risky.html").write_text(
+        "<!DOCTYPE html><html><body><script>"
+        "localStorage.setItem('a','b');</script></body></html>"
+    )
+    (art / "guarded.html").write_text(
+        "<!DOCTYPE html><html><body><script>"
+        "var s=null; try { s = window.localStorage; } catch (e) {}"
+        "</script></body></html>"
+    )
+    html = build_shelf.render_shelf(library, {})
+    err = capsys.readouterr().err
+    assert "risky.html" in err
+    assert "guarded.html" not in err
+    # The quiet inline note sits next to exactly that artifact's entry.
+    risky = re.search(
+        r'<li class="artifact-item"[^>]*data-name="risky\.html"[\s\S]*?</li>', html
+    )
+    assert risky and "may not run inline" in risky.group(0)
+    guarded = re.search(
+        r'<li class="artifact-item"[^>]*data-name="guarded\.html"[\s\S]*?</li>', html
+    )
+    assert guarded and "may not run inline" not in guarded.group(0)
+    # breath-timer (no storage) stays clean too.
+    timer = re.search(
+        r'<li class="artifact-item"[^>]*data-name="breath-timer\.html"[\s\S]*?</li>',
+        html,
+    )
+    assert timer and "may not run inline" not in timer.group(0)
+
+
 def test_version_check_honors_the_media_fingerprint(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # /api/version now carries media_mtime; a change there triggers the
