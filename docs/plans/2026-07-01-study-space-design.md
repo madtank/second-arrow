@@ -367,6 +367,26 @@ phone), revisit with real usage behind the decision.
   the ask, say it in words in the same reply, never act against "stay
   here", ground seeks in transcript.json or don't seek (ollama chunks
   carry no timestamps — its guide navigates to rooms instead).
+- **Iter 13 — DONE: watch it work.** (a) Live narrative: the claude
+  stream surfaces tool_use events mapped to human progress lines
+  (aligned with the ollama loop's), lifted out by the page as centered
+  system lines while the bubble stays clean; a soft pulsing dot marks
+  the sidebar entry the narrative mentions. (b) The shelf refreshes
+  itself: /api/version + an 8s visible-only poll + a post-turn check —
+  reload only when safe (never mid-listen, mid-conversation, or
+  mid-draft; else a gentle chip). (c) Verified ingest: probe-first
+  fetch_talk (--probe-only, --expect-title fuzzy gate, nothing created
+  on mismatch), post-ingest transcript validation (junk fresh ingests
+  removed wholesale; refreshes never delete), sidebar hints split into
+  "ask the guide" vs "needs a URL — tell the guide". (d) Interactive
+  required: the section (renamed from Learning tools) is default-open
+  on every card, with a "✦ create interactive tools" generator when
+  empty that sends the ask through the normal chat path; and artifacts
+  gained an anchored-listening channel — {type:"second-arrow:seek"}
+  postMessages ride the user-click seek path (frame-identity checked,
+  duration-capped, lock exempt: an artifact button is the user's own
+  finger). Auto-fresh covers artifact updates too (any rebuild bumps
+  the mtime).
 
 ## Boundaries
 
