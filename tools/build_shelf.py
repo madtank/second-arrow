@@ -472,27 +472,40 @@ def render_path_strip(path: dict) -> str:
 def probe(talk_dir: Path) -> dict:
     """See which study artifacts a talk folder actually has.
 
-    "reading" is the file-shape verdict: transcript.md with no audio and
-    no transcript.json is a text source (a sutta, an article) — its room
-    renders the text itself, with no player and no timestamps.
+    "reading_mp3" is a reading's spoken version (the guide records it
+    with the speak tool) — see is_reading for the room-shape verdict.
     """
     audio = next(
         (p for p in sorted(talk_dir.glob("audio.*")) if p.suffix.lower() in AUDIO_EXTENSIONS),
         None,
     )
-    transcript_md = (talk_dir / "transcript.md").exists()
-    transcript_json = (talk_dir / "transcript.json").exists()
     return {
         "primer_mp3": (talk_dir / "primer.mp3").exists(),
         "primer_md": (talk_dir / "primer.md").exists(),
         "notes_md": (talk_dir / "notes.md").exists(),
-        "transcript_md": transcript_md,
+        "transcript_md": (talk_dir / "transcript.md").exists(),
         "audio": audio.name if audio else None,
         "artifacts": sorted(p.name for p in (talk_dir / "artifacts").glob("*.html")),
         "thumbnail": (talk_dir / "thumbnail.jpg").exists(),
-        "transcript_json": transcript_json,
-        "reading": transcript_md and audio is None and not transcript_json,
+        "transcript_json": (talk_dir / "transcript.json").exists(),
+        "reading_mp3": (talk_dir / "reading.mp3").exists(),
     }
+
+
+def is_reading(files: dict, talk: dict | None = None) -> bool:
+    """The room-shape verdict: is this entry a reading (a text source)?
+
+    File shape first: transcript.md with no audio and no transcript.json
+    is a reading (a sutta, an article). A spoken version recorded as
+    reading.mp3 never changes that; one saved as audio.mp3 WOULD read as
+    a talk by file shape alone, so the INDEX's `Origin: reading` keeps
+    the verdict honest there.
+    """
+    if not files["transcript_md"] or files["transcript_json"]:
+        return False
+    if files["audio"] is None:
+        return True
+    return ((talk or {}).get("origin") or "").lower().startswith("reading")
 
 
 STYLE = """
@@ -692,14 +705,14 @@ STYLE = """
   .artifact-open { margin-left: 0.75rem; font-size: 0.85rem; color: #a99e8e; }
   .artifact-note { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
   .make-interactive, .mark-moments, .make-primer, .make-notes,
-  .more-moments, .fetch-stub, .ask-stub {
+  .more-moments, .fetch-stub, .ask-stub, .record-reading {
                       font: inherit; font-size: 0.92rem; color: #5a4d3a;
                       background: #f6f1e7; border: 1px dashed #d8cbb4;
                       border-radius: 999px; padding: 0.45rem 1.1rem;
                       cursor: pointer; }
   .make-interactive:hover, .mark-moments:hover, .make-primer:hover,
   .make-notes:hover, .more-moments:hover, .fetch-stub:hover,
-  .ask-stub:hover { background: #efe7d9; }
+  .ask-stub:hover, .record-reading:hover { background: #efe7d9; }
   /* The uniform ✦ pattern: an empty section still renders, holding its
      generate button and one quiet line saying what it creates. */
   .gen-empty { display: flex; flex-direction: column;
@@ -1321,6 +1334,18 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
       + "primer — who the teacher is, what to listen for — into the "
       + "notes under '## Primer', speak it to primer.mp3 with the "
       + "speak tool, then rebuild the shelf.");
+  });
+  // "✦ ask the guide to record this reading" — a reading room's Spoken
+  // section: listening-first extends to texts, so the speak tool turns
+  // transcript.md into <slug>/reading.mp3 the player can carry.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest(".record-reading");
+    if (!button) return;
+    sendOrQueue("Please record this reading as audio: speak the text of "
+      + button.getAttribute("data-title") + " (from its transcript.md, "
+      + "skipping the header) with the speak tool to "
+      + button.getAttribute("data-slug") + "/reading.mp3, then rebuild "
+      + "the shelf. Break it into natural sections if it's long.");
   });
   // "✦ ask the guide to start notes for this talk" — the empty Notes
   // section's generator, same uniform pattern.
@@ -3126,9 +3151,14 @@ def render_card(
 ) -> str:
     slug = talk["slug"]
     title = talk.get("title", slug)
-    # A reading (probe's file-shape verdict) keeps every mark and door on
-    # the same plumbing, but the language reads instead of listening.
-    reading = bool(files.get("reading"))
+    # A reading (is_reading's verdict) keeps every mark and door on the
+    # same plumbing, but the language reads instead of listening. Its
+    # spoken version — reading.mp3 or audio.mp3, recorded by the guide —
+    # plays and tracks exactly like a talk.
+    reading = is_reading(files, talk)
+    spoken = None
+    if reading:
+        spoken = "reading.mp3" if files.get("reading_mp3") else files["audio"]
     cap = duration_to_seconds(talk.get("duration", ""))
     cap_attr = f' data-duration="{cap}"' if cap else ""
     parts = [
@@ -3205,7 +3235,20 @@ def render_card(
         parts.append(
             f'<audio controls preload="none" src="{escape(slug)}/primer.mp3"></audio>'
         )
-    if files["audio"]:
+    if spoken:
+        # Listening-first extends to texts: the spoken reading is a real
+        # talk-audio player — resume, completion, listened-tracking, all
+        # the same plumbing.
+        parts.append(
+            '<p class="player-label">The reading, spoken — '
+            "recorded by the guide</p>"
+        )
+        parts.append(
+            f'<audio controls preload="none" class="talk-audio" '
+            f'data-slug="{escape(slug)}" '
+            f'src="{escape(slug)}/{escape(spoken)}"></audio>'
+        )
+    elif files["audio"]:
         parts.append('<p class="player-label">The talk</p>')
         parts.append(
             f'<audio controls preload="none" class="talk-audio" '
@@ -3253,7 +3296,8 @@ def render_card(
         # the resume position was cleared at the end, so it starts fresh.
         # A not-yet-done talk can also step back to unheard ("come back
         # to this"); done is a path state and keeps its own reopen door.
-        # Readings say "read ✓" and skip replay — there is nothing to play.
+        # Readings say "read ✓"; replay only exists where something can
+        # actually play (a talk's audio, or a reading's spoken version).
         unheard = (
             f' · <button type="button" class="mark-unheard" '
             f'data-slug="{escape(slug)}">mark '
@@ -3263,7 +3307,7 @@ def render_card(
         )
         replay = (
             ""
-            if reading
+            if reading and not spoken
             else f' · <button type="button" class="listened-replay" '
             f'data-slug="{escape(slug)}">replay</button>'
         )
@@ -3466,17 +3510,30 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                             state=states.get(talk["slug"]))]
         slug = escape(talk["slug"])
         title = talk.get("title", talk["slug"])
+        reading = is_reading(files, talk)
         notes_text = (
             (talk_dir / "notes.md").read_text() if files["notes_md"] else ""
         )
         # The completeness standard: Primer / Notes / Transcript·listen
         # for / Interactive each has content or shows its ✦ generator in
         # a details block that still RENDERS — sections never disappear.
+        # A reading gains one more: Spoken — its recorded version, or the
+        # ✦ asking for one (listening-first extends to texts).
+        if reading and not (files["reading_mp3"] or files["audio"]):
+            card.append(
+                "<details open><summary>Spoken</summary>\n"
+                '<p class="gen-empty">'
+                f'<button type="button" class="record-reading" '
+                f'data-title="{escape(title)}" data-slug="{slug}">'
+                "✦ ask the guide to record this reading</button>\n"
+                '<span class="gen-desc">a spoken version — listen to it '
+                "like a talk</span></p>\n</details>"
+            )
         if files["primer_md"]:
             primer = md_to_html((talk_dir / "primer.md").read_text())
             card.append(f"<details><summary>Primer text</summary>\n{primer}\n</details>")
         elif not (files["primer_mp3"] or has_primer_section(notes_text)):
-            if files["reading"]:
+            if reading:
                 # A reading's primer orients the eye, not the ear.
                 primer_gen = render_generator(
                     "make-primer reading-primer",
@@ -3565,7 +3622,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
             )
         if not segments and files["transcript_md"]:
             transcript = md_to_html((talk_dir / "transcript.md").read_text())
-            if files["reading"]:
+            if reading:
                 # A reading room: the text itself IS the talk — open and
                 # prominent at a comfortable reading measure, no scroll
                 # cage, the raw file still a click away.

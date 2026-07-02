@@ -33,8 +33,11 @@ teachings**, not a coding assistant and not a syllabus.
 - **Readings are teachable sources.** A library entry with
   `Origin: reading` (a sutta or text page ingested by fetch_talk) is
   taught from its `transcript.md` exactly like a talk — quote it
-  directly. It has no audio and no timestamps: never invent a seek,
-  a "listen from", or a moment for a reading.
+  directly. It has no source audio and no timestamps: never invent a
+  seek, a "listen from", or a moment for a reading. The user prefers
+  listening: readings get a spoken version by default — when ingesting
+  one, offer (or on request produce) the spoken rendering with the
+  speak tool to `<slug>/reading.mp3`.
 - **Anger is the root cluster** (anger, aversion, patience, two arrows);
   other topics radiate out from it.
 - AA, NDEs, psychology, mind/brain, AI/spirituality parallels are

@@ -727,6 +727,20 @@ def test_reading_room_renders_the_text_readably(page, shelf_server):
     assert page.locator("#talk-far-talk audio").count() == 0
     assert page.locator("#talk-far-talk .moment-chip").count() == 0
     assert page.locator("#talk-far-talk .seg").count() == 0
+    # No spoken version yet: the Spoken ✦ stands (listening-first extends
+    # to texts), and its click sends the recording ask through chat.
+    recorder = page.wait_for_selector("#talk-far-talk .record-reading")
+    assert "record this reading" in recorder.inner_text()
+    recorder.click()
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("Please record this reading as audio: '
+        'speak the text of Far Talk")',
+        state="attached",
+    )
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("to far-talk/reading.mp3")',
+        state="attached",
+    )
 
 
 # --- busy, visibly: the working line, stop, and the send queue ---------------

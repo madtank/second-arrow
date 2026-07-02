@@ -2514,3 +2514,83 @@ def test_reading_primer_js_sends_the_how_to_read_ask(tmp_path):
     assert 'button.classList.contains("reading-primer")' in html
     assert "'how to read this' primer" in html
     assert "innerHTML" not in html
+
+
+# --- readings, spoken: listening-first extends to texts -------------------------
+
+
+def test_reading_room_with_spoken_version_renders_the_player(tmp_path):
+    library = _make_library(tmp_path)
+    (library / "far-talk" / "reading.mp3").write_bytes(b"\x00")
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    # Still a reading room (the text, reading marks)...
+    assert "<details open><summary>The reading</summary>" in far_card
+    assert "mark as read" in far_card
+    # ...with the spoken version playable — and tracked — like a talk.
+    assert "The reading, spoken — recorded by the guide" in far_card
+    audio = re.search(r'<audio[^>]*src="far-talk/reading.mp3"[^>]*>', far_card)
+    assert audio, "spoken reading player missing"
+    assert 'class="talk-audio"' in audio.group(0)
+    assert 'data-slug="far-talk"' in audio.group(0)
+    # The ✦ recorder retires once the recording exists.
+    assert "record-reading" not in far_card
+
+
+def test_reading_room_without_spoken_version_offers_the_recorder(tmp_path):
+    library = _make_library(tmp_path)
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    # One more section in the uniform ✦ pattern: the spoken version.
+    assert "<details open><summary>Spoken</summary>" in far_card
+    rec = re.search(
+        r'<button type="button" class="record-reading"[^>]*>', far_card
+    )
+    assert rec, "recorder ✦ missing"
+    assert 'data-title="Far Talk"' in rec.group(0)
+    assert 'data-slug="far-talk"' in rec.group(0)
+    assert "✦ ask the guide to record this reading" in far_card
+    assert "a spoken version — listen to it like a talk" in far_card
+    assert "<audio" not in far_card
+    # The canned ask (JS): speak transcript.md to <slug>/reading.mp3.
+    assert 'event.target.closest(".record-reading")' in html
+    assert 'sendOrQueue("Please record this reading as audio: speak the text of "' in html
+    assert "skipping the header) with the speak tool to " in html
+    assert "/reading.mp3, then rebuild " in html
+    assert "Break it into natural sections if it's long." in html
+    # Talks never grow a recorder — they already speak.
+    bare_card = re.search(
+        r'<section class="card view" id="talk-bare-yt">.*?</section>', html, re.S
+    ).group(0)
+    assert "record-reading" not in bare_card
+
+
+def test_reading_with_audio_mp3_and_reading_origin_stays_a_reading(tmp_path):
+    # A spoken version saved as audio.mp3 (the other accepted name): the
+    # INDEX's Origin: reading keeps the room a reading — the file shape
+    # alone would have called it a talk.
+    library = _make_library(tmp_path)
+    index = library / "INDEX.md"
+    index.write_text(
+        index.read_text().replace(
+            "- **Title:** Far Talk\n",
+            "- **Title:** Far Talk\n- **Origin:** reading\n",
+        )
+    )
+    (library / "far-talk" / "audio.mp3").write_bytes(b"\x00")
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    assert "<details open><summary>The reading</summary>" in far_card
+    assert "mark as read" in far_card
+    assert "The reading, spoken — recorded by the guide" in far_card
+    audio = re.search(r'<audio[^>]*src="far-talk/audio.mp3"[^>]*>', far_card)
+    assert audio and 'class="talk-audio"' in audio.group(0)
+    assert "record-reading" not in far_card
+    # A heard spoken reading gets its replay back — there is audio now.
+    (library / ".listening.jsonl").write_text(
+        '{"slug": "far-talk", "at": "2026-07-02T06:00:00+00:00"}\n'
+    )
+    html = build_shelf.render_shelf(library, {})
+    far_card = _far_card(html)
+    assert "read ✓ 2026-07-02" in far_card
+    assert "listened-replay" in far_card
