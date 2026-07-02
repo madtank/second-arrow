@@ -372,7 +372,8 @@ def test_soft_refresh_swaps_new_room_content_under_playing_audio(page, shelf_ser
 
 def test_transcript_click_seeks_the_player(page, shelf_server):
     _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
-    page.click("#talk-quiet-mind details:has(.seg-transcript) summary")
+    # The segmented transcript sits behind the quiet sub-expander now.
+    page.click("#talk-quiet-mind details.full-transcript summary")
     page.click('#talk-quiet-mind .seg[data-start="4.5"]')
     # One seek path: the clicked segment's stamp becomes the position and
     # the talk plays from there.
@@ -381,6 +382,28 @@ def test_transcript_click_seeks_the_player(page, shelf_server):
         " return a && !a.paused && Math.abs(a.currentTime - 4.5) < 0.5; }"
     )
     assert page.evaluate("window.saIsPlaying()")
+
+
+def test_transcript_opens_to_moments_first(page, shelf_server):
+    _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+    # The Transcript block opens onto the curated moments; the segmented
+    # transcript waits behind its own closed sub-expander.
+    chip = page.wait_for_selector(
+        '#talk-quiet-mind .moments[data-slug="quiet-mind"] .moment-chip'
+    )
+    assert not page.is_visible('#talk-quiet-mind .seg[data-start="4.5"]')
+    assert not page.evaluate(
+        "document.querySelector('#talk-quiet-mind details.full-transcript').open"
+    )
+    # The chip still seeks — exactly a transcript-line click.
+    chip.click()
+    page.wait_for_function(
+        f"() => {{ const a = {AUDIO_JS};"
+        " return a && !a.paused && Math.abs(a.currentTime - 4) < 0.5; }"
+    )
+    # Behind the sub-expander, the full transcript is all still there.
+    page.click("#talk-quiet-mind details.full-transcript summary")
+    page.wait_for_selector('#talk-quiet-mind .seg[data-start="4.5"]')
 
 
 def test_artifact_iframe_is_sandboxed_behind_the_csp_wall(page, shelf_server):
@@ -527,6 +550,60 @@ def test_moment_chip_seeks_the_player(page, shelf_server):
     # The out-of-range fixture moment (12:00 > 9s transcript) never
     # rendered — grounded chips only.
     assert page.locator('#talk-quiet-mind .moment-chip[data-start="720"]').count() == 0
+
+
+def test_missing_primer_generator_sends_the_canned_ask(page, shelf_server):
+    # far-talk has no primer anywhere: the Primer section still renders,
+    # holding its ✦ invitation.
+    _open_shelf(page, shelf_server.base, "#talk/far-talk")
+    button = page.wait_for_selector("#talk-far-talk .make-primer")
+    assert "ask the guide to write & speak a primer" in button.inner_text()
+    button.click()
+    # The canned ask lands in the conversation as the user's own message…
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("write a 60-90 second primer")',
+        state="attached",
+    )
+    page.wait_for_selector(
+        ".chat-msg.chat-user:has-text(\"under '## Primer', speak it to primer.mp3\")",
+        state="attached",
+    )
+    # …and the guide answers through the normal pipeline.
+    page.wait_for_selector(
+        '.chat-msg.chat-guide:has-text("One breath, then we begin")',
+        state="attached",
+    )
+
+
+def test_prompt_chips_show_on_focus_send_and_hide_on_typing(page, shelf_server):
+    _open_shelf(page, shelf_server.base)
+    # A focused, empty input grows the quiet suggestion strip — home
+    # context offers the path.
+    page.focus("#chat-input")
+    page.wait_for_selector("#prompt-chips:not([hidden])")
+    chips = page.locator("#prompt-chips .prompt-chip").all_inner_texts()
+    assert "where are we on the path?" in chips
+    # Typing is intent: the strip steps aside on the first keystroke.
+    page.keyboard.type("h")
+    page.wait_for_selector("#prompt-chips[hidden]", state="attached")
+    page.fill("#chat-input", "")
+    # In a talk room the suggestions are about the talk.
+    page.evaluate("location.hash = '#talk/quiet-mind'")
+    page.wait_for_selector("#talk-quiet-mind.active")
+    page.focus("#chat-input")
+    page.wait_for_selector("#prompt-chips:not([hidden])")
+    room_chips = page.locator("#prompt-chips .prompt-chip")
+    assert "mark the moments in this talk" in room_chips.all_inner_texts()
+    # One tap sends through the queue-aware door and the strip retires.
+    room_chips.filter(has_text="what should I listen for?").click()
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("what should I listen for?")',
+        state="attached",
+    )
+    page.wait_for_selector(
+        '.chat-msg.chat-guide:has-text("One breath, then we begin")',
+        state="attached",
+    )
 
 
 def test_stub_room_opens_and_offers_the_fetch(page, shelf_server):
