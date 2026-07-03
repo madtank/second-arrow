@@ -882,6 +882,55 @@ def test_stub_room_is_a_decision_point_with_three_doors(page, shelf_server):
     )
 
 
+def test_something_new_door_opens_the_discover_room(page, shelf_server):
+    _open_shelf(page, shelf_server.base)
+    # The sidebar's ✦ door is a real link into the discover room.
+    page.click("#talk-nav li.nav-something-new a")
+    page.wait_for_selector("#talk-something-new.active")
+    assert page.is_visible("#talk-something-new")
+    room = page.inner_text("#talk-something-new")
+    assert "the shelf is not the world — from here we go looking." in room
+    assert "searching is free — nothing downloads until you pick one." in room
+    # Unheard fetched talks wait right here, as links into their rooms.
+    # (bare-yt: the one talk no other test ever hears or studies — the
+    # session-shared server means the rest of the list shifts underfoot.)
+    assert "already waiting on the shelf:" in room
+    page.click('#talk-something-new .discover-waiting a[href="#talk/bare-yt"]')
+    page.wait_for_selector("#talk-bare-yt.active")
+
+
+def test_find_new_door_sends_the_search_ask(page, shelf_server):
+    _open_shelf(page, shelf_server.base, "#talk/something-new")
+    page.wait_for_selector("#talk-something-new.active")
+    # The search door sends the canned ask through the normal
+    # (queue-aware) chat pipeline, in the user's own voice…
+    page.click("#talk-something-new .find-new")
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("Find me something new — search '
+        'beyond the curriculum")',
+        state="attached",
+    )
+    page.wait_for_selector(
+        '.chat-msg.chat-user:has-text("do NOT download anything yet")',
+        state="attached",
+    )
+    # …and the guide answers through the normal pipeline.
+    page.wait_for_selector(
+        '.chat-msg.chat-guide:has-text("One breath, then we begin")',
+        state="attached",
+    )
+    # The describe door puts no words in the user's mouth: it hands the
+    # input over, re-labeled for the search.
+    page.click("#talk-something-new .describe-new")
+    page.wait_for_function(
+        "() => document.activeElement === document.getElementById('chat-input')"
+    )
+    assert (
+        page.get_attribute("#chat-input", "placeholder")
+        == "what are you looking for? your own words…"
+    )
+
+
 def test_skip_sets_aside_instantly_and_the_guide_follows_up(page, shelf_server):
     study_path = shelf_server.root / "STUDY.md"
     _open_shelf(

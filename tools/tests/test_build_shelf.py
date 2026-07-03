@@ -1005,13 +1005,14 @@ def test_chat_focus_typing_is_intent_never_steal(tmp_path):
     assert "typing is intent" in html
     assert 'document.addEventListener("keydown"' in html
     assert "input.blur()" in html
-    # No autofocus without intent: exactly three focus calls — slash,
-    # type-to-focus (both explicit keystrokes), and the after-send
-    # refocus (that IS user intent). Nothing focuses on load, and no
-    # focus ever moves the viewport (the reply streams into the message
-    # list's own scroll container; the page stays where the user left it).
+    # No autofocus without intent: exactly four focus calls — slash,
+    # type-to-focus (both explicit keystrokes), the after-send refocus,
+    # and the describe-new door (a click IS user intent). Nothing
+    # focuses on load, and no focus ever moves the viewport (the reply
+    # streams into the message list's own scroll container; the page
+    # stays where the user left it).
     assert "autofocus" not in html
-    assert html.count("input.focus({ preventScroll: true })") == 3
+    assert html.count("input.focus({ preventScroll: true })") == 4
     assert "input.focus()" not in html
 
 
@@ -2631,6 +2632,40 @@ def test_reading_stub_fetch_message_is_the_reading_ritual(tmp_path):
     assert "I'm asking for; extract the text, verify it's really " in html
     assert "short 'how to read this' primer, update the path, rebuild." in html
     assert " on my path — what is it, and how should we approach it?" in html
+
+
+# --- the something-new room: the door out of the list ----------------------------
+
+
+def test_discover_room_renders_with_doors_and_unheard():
+    talks = [{"slug": "a", "title": "A"}, {"slug": "b", "title": "B"}]
+    states = {"a": "studied"}          # b is fetched, untouched: unheard
+    html = build_shelf.render_discover_card(talks, states, listening={})
+    assert 'id="talk-something-new"' in html
+    assert 'class="find-new"' in html and 'class="describe-new"' in html
+    assert 'already waiting' in html and '#talk/b' in html and '#talk/a' not in html
+    # The room's own copy: honest about scope, quiet about cost.
+    assert "the shelf is not the world" in html
+    assert "searching is free — nothing downloads until you pick one." in html
+
+
+def test_discover_room_omits_waiting_when_all_heard():
+    html = build_shelf.render_discover_card(
+        [{"slug": "a", "title": "A"}], {}, listening={"a": {"seconds": 5}})
+    assert 'already waiting' not in html
+
+
+def test_shelf_carries_one_discover_room_and_its_doors(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # Exactly one room behind the sidebar's ✦ door.
+    assert html.count('id="talk-something-new"') == 1
+    # Its canned ask rides the queue-aware send and guards the pile-up.
+    assert 'sendOrQueue("Find me something new — search beyond the curriculum, "' in html
+    assert "NOT download anything yet." in html
+    assert "still unheard on the shelf, point me to those first instead." in html
+    # The describe door hands the words back to the user, in the input.
+    assert '".describe-new"' in html
+    assert "what are you looking for? your own words…" in html
 
 
 # --- reading rooms: transcript.md, no audio, no timestamps ----------------------

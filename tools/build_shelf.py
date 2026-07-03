@@ -1507,6 +1507,27 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     sendOrQueue("Tell me about " + button.getAttribute("data-title")
       + " on my path — what is it, and how should we approach it?");
   });
+  // The something-new doors: searching is free, downloading stays a
+  // separate explicit pick — the ask says so out loud.
+  document.addEventListener("click", function (event) {
+    if (event.target.closest(".find-new")) {
+      sendOrQueue("Find me something new — search beyond the curriculum, "
+        + "grounded in where we are (STUDY.md, recent notes, what's been "
+        + "landing). Bring back 2-3 candidate talks, each with a one-line "
+        + "why and its source URL, and present them in conversation — do "
+        + "NOT download anything yet. If two or more fetched talks are "
+        + "still unheard on the shelf, point me to those first instead.");
+      return;
+    }
+    var describe = event.target.closest(".describe-new");
+    if (describe) {
+      var input = document.getElementById("chat-input");
+      if (input) {
+        input.placeholder = "what are you looking for? your own words…";
+        input.focus({ preventScroll: true }); // the click IS the intent
+      }
+    }
+  });
   // The optimistic sidebar flip for done (✓) and reopen (→): the entry
   // changes immediately; returns an undo for the failure path. The soft
   // refresh replaces the whole nav with the real state soon after.
@@ -3401,6 +3422,56 @@ def render_stub_card(stub: dict) -> str:
     return "\n".join(parts)
 
 
+def render_discover_card(
+    talks: list[dict], states: dict[str, str], listening: dict[str, dict]
+) -> str:
+    """The room behind the sidebar's ✦ door — a decision point, like the
+    stubs, wearing their clothes (.talk-stub).
+
+    Two doors, both conversation: [✦ find me something new] (a canned
+    search ask — the guide LOOKS and proposes, nothing downloads) and
+    [tell me what you're looking for] (the input, in the user's own
+    words). Before either, the honest check against pile-up: talks
+    already fetched but never heard wait right here as links.
+    """
+    parts = [
+        '<section class="card view talk-stub" id="talk-something-new">',
+        "<h2>something new</h2>",
+        '<p class="meta">a door, not a talk</p>',
+        '<p class="stub-copy">the shelf is not the world — '
+        "from here we go looking.</p>",
+    ]
+    waiting = [
+        talk
+        for talk in talks
+        if talk["slug"] not in listening and states.get(talk["slug"]) != "studied"
+    ]
+    if waiting:
+        links = "\n".join(
+            f'<li><a href="#talk/{escape(talk["slug"])}">'
+            f'{escape(talk.get("title", talk["slug"]))}</a></li>'
+            for talk in waiting
+        )
+        parts.append(
+            '<p class="stub-copy">already waiting on the shelf:</p>\n'
+            f'<ul class="discover-waiting">\n{links}\n</ul>'
+        )
+    parts.append(
+        '<p class="stub-action"><button type="button" class="find-new">'
+        "✦ find me something new</button></p>"
+    )
+    parts.append(
+        '<p class="stub-action"><button type="button" class="describe-new">'
+        "tell me what you're looking for</button></p>"
+    )
+    parts.append(
+        '<p class="state-note">searching is free — nothing downloads '
+        "until you pick one.</p>"
+    )
+    parts.append("</section>")
+    return "\n".join(parts)
+
+
 def render_card(
     talk: dict,
     files: dict,
@@ -4041,7 +4112,13 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
         )
         card.append("</section>")
         cards.append("\n".join(card))
-    talk_views = "\n\n".join(cards + [render_stub_card(stub) for stub in stubs])
+    # After the real rooms and the rooms-in-waiting, the door out of the
+    # list: the something-new room the sidebar's ✦ entry opens.
+    talk_views = "\n\n".join(
+        cards
+        + [render_stub_card(stub) for stub in stubs]
+        + [render_discover_card(talks, states, listening)]
+    )
     empty_note = "" if cards else "\n<p>The library is empty so far.</p>"
     # One plain sentence next to the path summary, so "done" never needs
     # guessing at. Only when there is a path to explain — an empty study
