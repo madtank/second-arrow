@@ -605,8 +605,6 @@ STYLE = """
   .nav-state { font-size: 0.85rem; }
   .nav-done { color: #6d5f4b; }
   .nav-next { color: #a99e8e; }
-  .nav-legend { margin: 0.6rem 0 0; padding: 0 0.6rem; color: #a99e8e;
-                font-size: 0.75rem; }
   .nav-unfetched a { color: #a99e8e; } /* a room-in-waiting: muted, real */
   .side-muted { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
   .begin-link { display: inline-block; margin: 1rem 0 0; color: #6d5f4b;
@@ -3545,7 +3543,18 @@ _NAV_MARKS = {
     "queued": '<span class="nav-state nav-next">→</span> ',
 }
 
-_NAV_LEGEND = '<p class="nav-legend">✓ done · → current</p>'
+_NAV_SOMETHING_NEW = (
+    '<li class="nav-something-new"><a href="#talk/something-new">'
+    '✦ <span class="nav-title">something new</span></a></li>'
+)
+
+
+def _nav_item(talk: dict, mark: str, li_attrs: str = "") -> str:
+    return (
+        f'<li{li_attrs}><a href="#talk/{escape(talk["slug"])}">'
+        f'{mark}<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>'
+        f'<span class="nav-teacher">{escape(talk.get("teacher", ""))}</span></a></li>'
+    )
 
 
 def render_nav(
@@ -3553,27 +3562,33 @@ def render_nav(
     states: dict[str, str] | None = None,
     stubs: list[dict] | tuple = (),
 ) -> str:
-    """The sidebar's Talks list — which IS the path.
+    """The sidebar's Talks list — which IS the path, focused on what lives.
 
     Three states only, so a glance answers "am I done with this one?":
     ✓ done, → current, or nothing (in the library, untouched). Parked
     talks read as done here — their nuance stays in STUDY.md and notes.
     Queued talks not yet fetched appear last as rooms-in-waiting: real
     links into their stub rooms (render_stub_card), muted but no longer
-    dead ends. One tiny legend line keeps the marks self-explanatory.
+    dead ends. Studied talks rest behind a "show more" toggle so the
+    list stays the path ahead, not a museum; ✦ something new is the
+    door out of the list — always rendered, even (especially) when the
+    library is empty.
     """
     states = states or {}
     if not talks and not stubs:
-        return '<p class="side-muted">The library is empty so far.</p>'
+        return (
+            '<p class="side-muted">The library is empty so far.</p>\n'
+            '<ul id="talk-nav">\n' + _NAV_SOMETHING_NEW + "\n</ul>"
+        )
     items = []
+    archived = []
     for talk in talks:
         state = states.get(talk["slug"])
         mark = _NAV_MARKS.get(state, "")
-        items.append(
-            f'<li><a href="#talk/{escape(talk["slug"])}">'
-            f'{mark}<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>'
-            f'<span class="nav-teacher">{escape(talk.get("teacher", ""))}</span></a></li>'
-        )
+        if state == "studied":
+            archived.append(_nav_item(talk, mark, ' class="nav-archived" hidden'))
+        else:
+            items.append(_nav_item(talk, mark))
     for stub in stubs:
         hint = (
             "not fetched yet — open to fetch it"
@@ -3585,7 +3600,15 @@ def render_nav(
             f'{_NAV_MARKS["queued"]}<span class="nav-title">{escape(stub["name"])}</span>'
             f'<span class="nav-teacher">{hint}</span></a></li>'
         )
-    return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>\n" + _NAV_LEGEND
+    items.append(_NAV_SOMETHING_NEW)
+    if archived:
+        label = f"show more · {len(archived)}"
+        items.append(
+            '<li class="nav-archive-toggle"><button type="button" '
+            f'id="nav-archive-toggle" data-label="{label}">{label}</button></li>'
+        )
+        items.extend(archived)
+    return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>"
 
 
 _URL_IN_HTML = re.compile(r"https?://[^\s<]+")

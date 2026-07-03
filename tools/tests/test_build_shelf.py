@@ -343,15 +343,26 @@ def test_sidebar_talks_list_is_the_path(tmp_path):
     (tmp_path / "STUDY.md").write_text(SIDEBAR_STUDY)
     html = build_shelf.render_shelf(library, {})
     sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
-    # State marks ride inline on the talk entries.
-    quiet = re.search(r'<li><a href="#talk/quiet-mind">.*?</a></li>', sidebar, re.S).group(0)
+    # State marks ride inline on the talk entries. Studied talks rest in
+    # the hidden archive tail behind "show more" — still marked ✓ there.
+    quiet = re.search(
+        r'<li class="nav-archived" hidden><a href="#talk/quiet-mind">.*?</a></li>',
+        sidebar, re.S,
+    ).group(0)
     assert '<span class="nav-state nav-done">✓</span>' in quiet
     far = re.search(r'<li><a href="#talk/far-talk">.*?</a></li>', sidebar, re.S).group(0)
     assert '<span class="nav-state nav-next">→</span>' in far
-    # Parked reads as done in the sidebar — no chip, no fourth state.
-    demon = re.search(r'<li><a href="#talk/demon-story">.*?</a></li>', sidebar, re.S).group(0)
+    # Parked reads as done in the sidebar — no chip, no fourth state —
+    # and done means archived.
+    demon = re.search(
+        r'<li class="nav-archived" hidden><a href="#talk/demon-story">.*?</a></li>',
+        sidebar, re.S,
+    ).group(0)
     assert '<span class="nav-state nav-done">✓</span>' in demon
     assert "nav-tag" not in sidebar
+    # The living path (and the ✦ door) come before the archive toggle.
+    assert sidebar.index("#talk/far-talk") < sidebar.index("nav-archive-toggle")
+    assert "show more · 2" in sidebar
     # A queued talk not yet in the library appears muted but is a REAL
     # link now — a room-in-waiting. No curriculum in this fixture, so
     # its stub room can only ask the guide (never a fetch without a URL).
@@ -385,6 +396,35 @@ def test_sidebar_escapes_unfetched_names(tmp_path):
     html = build_shelf.render_shelf(library, {})
     assert "Sneaky &lt;Talk&gt; &amp; Co" in html
     assert "<Talk>" not in html
+
+
+def test_render_nav_archives_studied_behind_show_more():
+    talks = [
+        {"slug": "a", "title": "A"},
+        {"slug": "b", "title": "B"},
+        {"slug": "c", "title": "C"},
+    ]
+    states = {"a": "studied", "b": "queued"}
+    html = build_shelf.render_nav(talks, states)
+    # The living path stays visible, ahead of the archive toggle.
+    assert html.index("#talk/b") < html.index("nav-archive-toggle")
+    assert "show more · 1" in html
+    # The studied item is inside the archived (hidden) tail.
+    assert html.index("nav-archive-toggle") < html.index("#talk/a")
+    assert "nav-archived" in html and "hidden" in html
+    assert "✓ done" not in html  # legend gone
+    assert "#talk/something-new" in html and "✦" in html
+
+
+def test_render_nav_no_archive_when_nothing_studied():
+    html = build_shelf.render_nav([{"slug": "b", "title": "B"}], {"b": "queued"})
+    assert "nav-archive-toggle" not in html
+    assert "#talk/something-new" in html
+
+
+def test_render_nav_empty_library_still_offers_the_door():
+    html = build_shelf.render_nav([], {})
+    assert "#talk/something-new" in html
 
 
 # --- youtube_embed_url ------------------------------------------------------
@@ -1360,8 +1400,10 @@ DONE_STUDY = """# Study Memory
 
 
 def _nav_entry(sidebar, slug):
+    # Living entries are bare <li>; studied ones carry the archived class
+    # and hidden attribute — the state mark rides inline either way.
     return re.search(
-        rf'<li><a href="#talk/{slug}">.*?</a></li>', sidebar, re.S
+        rf'<li[^>]*><a href="#talk/{slug}">.*?</a></li>', sidebar, re.S
     ).group(0)
 
 
@@ -1385,17 +1427,16 @@ def test_sidebar_shows_three_states_only(tmp_path):
     assert "nav-state" not in bare
 
 
-def test_sidebar_legend_and_home_state_note(tmp_path):
+def test_sidebar_drops_legend_but_home_keeps_state_note(tmp_path):
     library = _make_library(tmp_path)
     (tmp_path / "STUDY.md").write_text(DONE_STUDY)
     html = build_shelf.render_shelf(library, {})
-    # One tiny legend line under the talks list...
+    # The legend line is gone — the marks carry themselves now that the
+    # studied tail rests behind "show more"...
     sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
-    legend = re.search(r'<p class="nav-legend">(.*?)</p>', sidebar)
-    assert legend, "sidebar legend missing"
-    assert legend.group(1) == "✓ done · → current"
-    # ...and one plain sentence on the begin-here status area saying how
-    # "done" happens.
+    assert 'class="nav-legend"' not in sidebar
+    # ...but the plain sentence on the begin-here status area saying how
+    # "done" happens stays.
     home = re.search(
         r'<section class="card view" id="view-home">.*?</section>', html, re.S
     ).group(0)
