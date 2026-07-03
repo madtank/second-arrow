@@ -95,6 +95,9 @@ def test_page_loads_and_sidebar_shows_the_path(page, shelf_server):
 def test_rooms_navigate_by_hash(page, shelf_server):
     _open_shelf(page, shelf_server.base)
     assert page.locator("#view-home.active").count() == 1
+    # quiet-mind is studied — it rests in the archive, so the real user
+    # path to its link runs through "show more" first.
+    page.click("#nav-archive-toggle")
     page.click('#talk-nav a[href="#talk/quiet-mind"]')
     page.wait_for_selector("#talk-quiet-mind.active")
     assert page.evaluate("location.hash") == "#talk/quiet-mind"
@@ -104,6 +107,57 @@ def test_rooms_navigate_by_hash(page, shelf_server):
     # An unknown hash lands safely home.
     page.evaluate("location.hash = '#talk/no-such-talk'")
     page.wait_for_selector("#view-home.active")
+
+
+# --- the sidebar archive: show more, remembered ------------------------------
+
+
+def test_archive_show_more_toggles_and_persists(page, shelf_server):
+    _open_shelf(page, shelf_server.base)
+    # Studied talks start tucked away: the archived entry is attached but
+    # hidden until the reader asks for it.
+    archived_link = page.locator(
+        '#talk-nav li.nav-archived a[href="#talk/quiet-mind"]'
+    )
+    assert archived_link.count() == 1
+    assert not archived_link.is_visible()
+    toggle = page.locator("#nav-archive-toggle")
+    label = toggle.get_attribute("data-label")
+    assert label.startswith("show more · ")
+    assert toggle.inner_text() == label
+    assert toggle.get_attribute("aria-expanded") == "false"
+    # One tap opens the archive and the button says how to close it.
+    toggle.click()
+    page.wait_for_selector(
+        '#talk-nav li.nav-archived a[href="#talk/quiet-mind"]', state="visible"
+    )
+    assert toggle.inner_text() == "show less"
+    assert toggle.get_attribute("aria-expanded") == "true"
+    # The choice is remembered (localStorage) across a full reload.
+    _open_shelf(page, shelf_server.base)
+    page.wait_for_selector(
+        '#talk-nav li.nav-archived a[href="#talk/quiet-mind"]', state="visible"
+    )
+    assert page.inner_text("#nav-archive-toggle") == "show less"
+    # And one more tap tucks it back behind its own label.
+    page.click("#nav-archive-toggle")
+    page.wait_for_selector(
+        '#talk-nav li.nav-archived a[href="#talk/quiet-mind"]', state="hidden"
+    )
+    toggle = page.locator("#nav-archive-toggle")
+    assert toggle.inner_text() == toggle.get_attribute("data-label")
+    assert toggle.get_attribute("aria-expanded") == "false"
+
+
+def test_active_archived_talk_expands_archive(page, shelf_server):
+    # Landing directly in an archived room pulls the archive open around
+    # it — the sidebar never hides the room the reader is standing in.
+    _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+    page.wait_for_selector(
+        '#talk-nav a[href="#talk/quiet-mind"].active', state="visible"
+    )
+    assert page.get_attribute("#nav-archive-toggle", "aria-expanded") == "true"
+    assert page.inner_text("#nav-archive-toggle") == "show less"
 
 
 def test_settings_room_carries_the_machinery_card(page, shelf_server):
@@ -228,10 +282,12 @@ def test_sidebar_arrow_opens_the_sidebar_in_conversation_mode(page, shelf_server
     page.wait_for_function(
         "() => !document.body.classList.contains('sidebar-collapsed')"
     )
-    assert page.locator('#talk-nav a[href="#talk/quiet-mind"]').is_visible()
+    # A living-path link proves the sidebar is really back (quiet-mind
+    # now rests in the collapsed archive, so it can't be the witness).
+    assert page.locator('#talk-nav a[href="#talk/far-talk"]').is_visible()
     # Picking a talk navigates AND docks the chat — browsing wins.
-    page.click('#talk-nav a[href="#talk/quiet-mind"]')
-    page.wait_for_selector("#talk-quiet-mind.active")
+    page.click('#talk-nav a[href="#talk/far-talk"]')
+    page.wait_for_selector("#talk-far-talk.active")
     page.wait_for_selector("#guide-chat.chat-docked")
 
 
@@ -609,8 +665,12 @@ def test_done_is_server_first_and_reopen_is_its_inverse(page, shelf_server):
     page.wait_for_selector(
         '#talk-demon-story .done-for-now:has-text("✓ done — finding what\'s next…")'
     )
+    # (attached, not visible: the soft refresh may already have tucked
+    # the now-studied entry into the collapsed archive — the ✓ is real
+    # either way.)
     page.wait_for_selector(
-        '#talk-nav a[href="#talk/demon-story"] .nav-state.nav-done'
+        '#talk-nav a[href="#talk/demon-story"] .nav-state.nav-done',
+        state="attached",
     )
     # The mark is REAL with no guide involvement: the SERVER moved the
     # path (the fake brain only ever streams canned text — it could not
@@ -637,9 +697,13 @@ def test_done_is_server_first_and_reopen_is_its_inverse(page, shelf_server):
     )
     # --- the round trip: reopen is the exact inverse, also server-first.
     page.click("#talk-demon-story .reopen-talk")
+    # The optimistic → lands on the (still archived, so hidden) entry at
+    # once; the swap soon re-lists it on the living path.
     page.wait_for_selector(
-        '#talk-nav a[href="#talk/demon-story"] .nav-state.nav-next'
+        '#talk-nav a[href="#talk/demon-story"] .nav-state.nav-next',
+        state="attached",
     )
+    page.wait_for_selector('#talk-nav a[href="#talk/demon-story"]')
     _wait_for_text_in_file(study_path, "- **Demon Story** — (reopened ")
     assert "(done for now — not yet discussed)" not in study_path.read_text().split(
         "## Studied"

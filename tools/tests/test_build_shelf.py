@@ -411,9 +411,13 @@ def test_render_nav_archives_studied_behind_show_more():
     assert "show more · 1" in html
     # The studied item is inside the archived (hidden) tail.
     assert html.index("nav-archive-toggle") < html.index("#talk/a")
-    assert "nav-archived" in html and "hidden" in html
+    assert 'class="nav-archived" hidden' in html
+    # The toggle starts closed and announces itself to assistive tech.
+    assert 'aria-expanded="false"' in html
     assert "✓ done" not in html  # legend gone
     assert "#talk/something-new" in html and "✦" in html
+    # The ✦ door stands with the living path, before the archive toggle.
+    assert html.index("something-new") < html.index("nav-archive-toggle")
 
 
 def test_render_nav_no_archive_when_nothing_studied():

@@ -606,6 +606,15 @@ STYLE = """
   .nav-done { color: #6d5f4b; }
   .nav-next { color: #a99e8e; }
   .nav-unfetched a { color: #a99e8e; } /* a room-in-waiting: muted, real */
+  /* The archive toggle whispers like the teacher lines; the ✦ door is a
+     touch warmer — it is a real place, not a control. */
+  .nav-archive-toggle button { display: block; width: 100%; text-align: left;
+                               padding: 0.45rem 0.6rem; border: none;
+                               border-radius: 8px; background: none;
+                               font: inherit; font-size: 0.8rem;
+                               color: #a99e8e; cursor: pointer; }
+  .nav-archive-toggle button:hover { background: #efe7d9; color: #6d5f4b; }
+  .nav-something-new a { color: #8a7f70; font-size: 0.9rem; }
   .side-muted { color: #a99e8e; font-size: 0.85rem; font-style: italic; }
   .begin-link { display: inline-block; margin: 1rem 0 0; color: #6d5f4b;
                 font-size: 0.92rem; text-decoration: none;
@@ -2360,6 +2369,8 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     var oldNav = document.getElementById("talk-nav");
     if (newNav && oldNav) {
       oldNav.replaceWith(document.importNode(newNav, true));
+      // The fresh nav arrives collapsed: re-apply the remembered choice.
+      if (window.saApplyArchiveState) window.saApplyArchiveState();
     }
     var playingSlug = window.saPlayingSlug ? window.saPlayingSlug() : null;
     var keepIds = {};
@@ -2663,6 +2674,28 @@ LAYOUT_SCRIPT = """<script>
   var toggle = document.getElementById("sidebar-toggle");
   document.body.classList.add("js"); // hiding starts here, never in the HTML
 
+  // The archive stays tucked unless the reader asked otherwise — one
+  // remembered choice, and never hiding the room you are standing in.
+  function applyArchiveState(expand) {
+    var archiveToggle = document.getElementById("nav-archive-toggle");
+    if (!archiveToggle) return;
+    var open = typeof expand === "boolean" ? expand
+      : (function () {
+          try { return localStorage.getItem("nav-archive") === "open"; }
+          catch (e) { return false; }
+        })();
+    document.querySelectorAll("#talk-nav .nav-archived").forEach(function (li) {
+      li.hidden = !open;
+    });
+    // data-label carries the render side's "show more · N".
+    archiveToggle.textContent =
+      open ? "show less" : archiveToggle.getAttribute("data-label");
+    archiveToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    try { localStorage.setItem("nav-archive", open ? "open" : "closed"); }
+    catch (e) { /* no memory is fine */ }
+  }
+  window.saApplyArchiveState = applyArchiveState;
+
   function show() {
     var hash = location.hash || "#home";
     var id = "view-home";
@@ -2678,9 +2711,13 @@ LAYOUT_SCRIPT = """<script>
     document.querySelectorAll("#talk-nav a").forEach(function (link) {
       link.classList.toggle("active", link.getAttribute("href") === hash);
     });
+    // An archived talk opened directly pulls its archive open around it.
+    var here = document.querySelector("#talk-nav a.active");
+    if (here && here.closest("li.nav-archived")) applyArchiveState(true);
     keepPlayingViewAlive(); // the playing talk's embed survives the switch
   }
   window.addEventListener("hashchange", show);
+  applyArchiveState(); // the remembered choice, before the first route
   show();
 
   toggle.addEventListener("click", function () {
@@ -2708,6 +2745,11 @@ LAYOUT_SCRIPT = """<script>
   } catch (e) { /* fresh page each time is fine */ }
   // Delegated: the soft refresh replaces the nav list whole.
   sidebar.addEventListener("click", function (event) {
+    var archiveToggle = event.target.closest("#nav-archive-toggle");
+    if (archiveToggle) {
+      applyArchiveState(archiveToggle.getAttribute("aria-expanded") !== "true");
+      return;
+    }
     if (event.target.closest("#talk-nav a")) {
       sidebar.classList.remove("open"); // narrow screens: picking closes it
       if (document.body.classList.contains("chat-conversation-mode")
@@ -3550,6 +3592,7 @@ _NAV_SOMETHING_NEW = (
 
 
 def _nav_item(talk: dict, mark: str, li_attrs: str = "") -> str:
+    """One sidebar talk entry: state mark, title, teacher line."""
     return (
         f'<li{li_attrs}><a href="#talk/{escape(talk["slug"])}">'
         f'{mark}<span class="nav-title">{escape(talk.get("title", talk["slug"]))}</span>'
@@ -3602,10 +3645,11 @@ def render_nav(
         )
     items.append(_NAV_SOMETHING_NEW)
     if archived:
-        label = f"show more · {len(archived)}"
+        label = f"show more · {len(archived)}"  # data-label: collapsed-state text
         items.append(
             '<li class="nav-archive-toggle"><button type="button" '
-            f'id="nav-archive-toggle" data-label="{label}">{label}</button></li>'
+            f'id="nav-archive-toggle" aria-expanded="false" '
+            f'data-label="{label}">{label}</button></li>'
         )
         items.extend(archived)
     return '<ul id="talk-nav">\n' + "\n".join(items) + "\n</ul>"
