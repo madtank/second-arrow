@@ -2672,11 +2672,15 @@ LAYOUT_SCRIPT = """<script>
 (function () {
   var sidebar = document.getElementById("sidebar");
   var toggle = document.getElementById("sidebar-toggle");
-  document.body.classList.add("js"); // hiding starts here, never in the HTML
+  // View-hiding starts under this class (no JS: everything renders
+  // stacked); only the archive tail arrives hidden from the render side.
+  document.body.classList.add("js");
 
   // The archive stays tucked unless the reader asked otherwise — one
   // remembered choice, and never hiding the room you are standing in.
-  function applyArchiveState(expand) {
+  // remember=false applies without persisting: passing through an
+  // archived room is not a preference.
+  function applyArchiveState(expand, remember) {
     var archiveToggle = document.getElementById("nav-archive-toggle");
     if (!archiveToggle) return;
     var open = typeof expand === "boolean" ? expand
@@ -2691,8 +2695,10 @@ LAYOUT_SCRIPT = """<script>
     archiveToggle.textContent =
       open ? "show less" : archiveToggle.getAttribute("data-label");
     archiveToggle.setAttribute("aria-expanded", open ? "true" : "false");
-    try { localStorage.setItem("nav-archive", open ? "open" : "closed"); }
-    catch (e) { /* no memory is fine */ }
+    if (remember !== false) {
+      try { localStorage.setItem("nav-archive", open ? "open" : "closed"); }
+      catch (e) { /* no memory is fine */ }
+    }
   }
   window.saApplyArchiveState = applyArchiveState;
 
@@ -2711,9 +2717,12 @@ LAYOUT_SCRIPT = """<script>
     document.querySelectorAll("#talk-nav a").forEach(function (link) {
       link.classList.toggle("active", link.getAttribute("href") === hash);
     });
-    // An archived talk opened directly pulls its archive open around it.
+    // An archived talk opened directly pulls its archive open around it
+    // — for this visit only, never overwriting the remembered choice.
     var here = document.querySelector("#talk-nav a.active");
-    if (here && here.closest("li.nav-archived")) applyArchiveState(true);
+    if (here && here.closest("li.nav-archived")) {
+      applyArchiveState(true, false);
+    }
     keepPlayingViewAlive(); // the playing talk's embed survives the switch
   }
   window.addEventListener("hashchange", show);

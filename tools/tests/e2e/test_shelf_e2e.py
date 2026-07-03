@@ -158,6 +158,15 @@ def test_active_archived_talk_expands_archive(page, shelf_server):
     )
     assert page.get_attribute("#nav-archive-toggle", "aria-expanded") == "true"
     assert page.inner_text("#nav-archive-toggle") == "show less"
+    # Passing through is not a preference: the stored choice stays
+    # closed — only the toggle's own click writes "open"...
+    assert page.evaluate('localStorage.getItem("nav-archive")') == "closed"
+    # ...so a later visit home starts collapsed again.
+    _open_shelf(page, shelf_server.base)
+    page.wait_for_selector(
+        '#talk-nav li.nav-archived a[href="#talk/quiet-mind"]', state="hidden"
+    )
+    assert page.get_attribute("#nav-archive-toggle", "aria-expanded") == "false"
 
 
 def test_settings_room_carries_the_machinery_card(page, shelf_server):
