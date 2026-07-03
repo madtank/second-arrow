@@ -2482,14 +2482,15 @@ def check_hermes_wired(
     """The wired-gate, live: (wired, reason, routes).
 
     Same wall as tools/hermes_probe.py (whose parse_toolsets /
-    excess_toolsets / config_mcp_wired this reuses): the gateway must
-    answer /health, expose enabled toolsets ⊆ {mcp-second_arrow,
-    clarify}, and the profile config must register our MCP server
-    (/v1/toolsets only enumerates built-ins — mcp-<server> toolsets
-    never appear there). An over-provisioned gateway is NOT wired —
-    that refusal is a safety wall, keep it in code. Routes ride along
-    from /v1/models once the gate is open (display-only; absent routes
-    are a fine answer).
+    config_mcp_wired this reuses): the gateway must answer /health,
+    answer /v1/toolsets with our key (auth is part of wired), and the
+    profile config must register our MCP server (/v1/toolsets only
+    enumerates built-ins — mcp-<server> toolsets never appear there).
+    Extra toolsets on the door do NOT close the gate: full tools are
+    the owner's explicit choice (2026-07-03) — the wall that remains
+    is the one that matters, the guide's reviewed hands must be
+    present. Routes ride along from /v1/models once the gate is open
+    (display-only; absent routes are a fine answer).
     """
     probe = load_hermes_probe()
     base = base or HERMES_URL
@@ -2499,7 +2500,7 @@ def check_hermes_wired(
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return False, f"gateway unreachable at {base}", []
     try:
-        payload = _hermes_get("/v1/toolsets", key, base)
+        _hermes_get("/v1/toolsets", key, base)
     except urllib.error.HTTPError as error:
         return (
             False,
@@ -2509,15 +2510,6 @@ def check_hermes_wired(
         )
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return False, "GET /v1/toolsets failed", []
-    exposed = probe.parse_toolsets(payload)
-    excess = probe.excess_toolsets(exposed, probe.ALLOWED_TOOLSETS)
-    if excess:
-        return (
-            False,
-            "gateway over-provisioned — toolsets beyond "
-            f"{sorted(probe.ALLOWED_TOOLSETS)}: {excess}",
-            [],
-        )
     config = config_path or (HERMES_PROFILE_DIR / "config.yaml")
     try:
         config_text = config.read_text()

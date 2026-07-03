@@ -2271,19 +2271,21 @@ def test_check_hermes_wired_requires_mcp_wiring_in_the_profile_config(
     assert wired is False and "wire_hermes_profile" in reason
 
 
-def test_check_hermes_wired_refuses_an_over_provisioned_gateway(
+def test_check_hermes_wired_accepts_a_widely_provisioned_gateway(
     fake_gateway, wired_config
 ):
+    # Full tools on the shelf door are the owner's explicit choice
+    # (2026-07-03): extra toolsets no longer close the gate. The wall
+    # that remains is the one that matters — the reviewed hands
+    # (mcp-second_arrow wiring) must be present.
     base, _ = fake_gateway(
         toolsets=[{"name": "terminal"}, {"name": "web"}, {"name": "clarify"}],
     )
     wired, reason, routes = serve_shelf.check_hermes_wired(
         base=base, api_key="k", config_path=wired_config
     )
-    assert wired is False
-    assert "over-provisioned" in reason
-    assert "terminal" in reason and "web" in reason
-    assert routes == []
+    assert wired is True
+    assert reason is None
 
 
 def test_check_hermes_wired_unreachable_and_bad_key(fake_gateway):

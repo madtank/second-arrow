@@ -2,12 +2,13 @@
 # /// script
 # dependencies = []
 # ///
-"""Startup gate for the Hermes bridge: is the gateway scoped as promised?
+"""Startup gate for the Hermes bridge: does the guide have its hands?
 
 Reads HERMES_URL (default http://127.0.0.1:8642) and HERMES_API_KEY from
 the environment, GETs /health and /v1/toolsets off the hermes-agent API
-server (bearer auth), prints what is exposed, and exits 0 only when the
-exposed toolsets are a subset of ALLOWED_TOOLSETS:
+server (bearer auth), prints what is exposed, and exits 0 when the
+gateway answers AND the profile config registers our MCP server. The
+reviewed set ALLOWED_TOOLSETS still names the guide's core hands:
 
     mcp-second_arrow  — the toolset Hermes derives from our MCP server
                         (docs: "Each configured MCP server generates a
@@ -16,10 +17,12 @@ exposed toolsets are a subset of ALLOWED_TOOLSETS:
                         "performs user inquiries without resource
                         consumption")
 
-Anything else — terminal, file, web, browser, code_execution, ... — means
-the ~/.hermes config drifted, the probe exits 1 listing the excess, and
-the bridge brain in serve_shelf must refuse to start. Read-only: two GETs,
-no reconfiguration.
+Toolsets beyond that set — terminal, file, web, browser, ... — are the
+owner's explicit choice (full tools, 2026-07-03) and print as a note,
+not a closed gate. What still closes it: an unreachable or
+unauthenticated gateway, or a profile config with no mcp-second_arrow
+wiring (the guide would have no hands). Read-only: two GETs, no
+reconfiguration.
 
 Run:
     HERMES_API_KEY=... uv run tools/hermes_probe.py
@@ -133,12 +136,13 @@ def main() -> int:
     print(f"exposed toolsets: {sorted(exposed) or '(none reported)'}")
     excess = excess_toolsets(exposed, ALLOWED_TOOLSETS)
     if excess:
+        # Informational since 2026-07-03: full tools on the shelf door
+        # are the owner's explicit choice — the gate no longer closes
+        # on extra toolsets, only on missing reviewed hands (below).
         print(
-            "GATE CLOSED — toolsets beyond the allowed set "
-            f"{sorted(ALLOWED_TOOLSETS)}: {excess}",
-            file=sys.stderr,
+            "note: toolsets beyond the reviewed set "
+            f"{sorted(ALLOWED_TOOLSETS)} (owner's choice): {excess}"
         )
-        return 1
     profile_dir = Path(
         os.environ.get(
             "HERMES_PROFILE_DIR",
@@ -160,7 +164,7 @@ def main() -> int:
         )
         return 1
     print(f"mcp evidence: {REQUIRED_TOOLSET} wired in {config_path}")
-    print(f"gate open: exposed ⊆ {sorted(ALLOWED_TOOLSETS)}")
+    print("gate open: reviewed hands present")
     return 0
 
 
