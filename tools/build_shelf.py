@@ -620,7 +620,10 @@ STYLE = """
                     background: #efe7d9; border: 1px solid #e8e0d3;
                     border-radius: 8px; padding: 0.2rem 0.7rem;
                     cursor: pointer; }
-  main { flex: 1; min-width: 0; max-width: 680px; margin: 0 auto;
+  /* A calm reading measure that still breathes with the screen: 680px
+     on a laptop, growing toward 60rem on wide displays. */
+  main { flex: 1; min-width: 0; max-width: clamp(680px, 72vw, 60rem);
+         margin: 0 auto;
          padding: 2rem 1.5rem 11rem; } /* room for the fixed tray */
   .js .view { display: none; }
   .js .view.active { display: block; }
@@ -895,7 +898,9 @@ STYLE = """
                 background: transparent; box-shadow: none;
                 display: flex; flex-direction: column;
                 justify-content: flex-end;
-                padding: 0 max(1.5rem, calc(50% - 340px)) 1rem;
+                /* mirror main's measure so the conversation and the room
+                   share one column: half the leftover space, floored. */
+                padding: 0 max(1.5rem, calc((100% - clamp(680px, 72vw, 60rem)) / 2)) 1rem;
                 transition: left 0.25s ease;
                 pointer-events: none; }
   #guide-chat > * { pointer-events: auto; }

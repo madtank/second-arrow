@@ -2874,3 +2874,13 @@ def test_text_only_reading_gets_no_moments_even_with_a_moments_section(tmp_path)
     assert "moment-chip" not in far_card
     assert "mark-moments" not in far_card
     assert '<div class="reading-text">' in far_card
+
+
+def test_room_and_chat_share_one_widening_measure(tmp_path):
+    # User feedback: the column was pinned at 680px and left wide screens
+    # mostly empty. The room grows with the viewport (clamped), and the
+    # chat mirrors the same measure so conversation and room are one
+    # column, docked or immersed.
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    assert "max-width: clamp(680px, 72vw, 60rem)" in html
+    assert "calc((100% - clamp(680px, 72vw, 60rem)) / 2)" in html
