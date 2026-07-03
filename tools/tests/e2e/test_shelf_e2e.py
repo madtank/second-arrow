@@ -434,6 +434,43 @@ def test_soft_refresh_swaps_new_room_content_under_playing_audio(page, shelf_ser
     assert page.evaluate(f"!{AUDIO_JS}.paused")
 
 
+def test_soft_refresh_freshens_the_playing_room_around_the_player(
+    page, shelf_server
+):
+    # The hard case: the guide marks moments on the VERY talk being
+    # listened to. The room's content freshens in place; the player's own
+    # DOM chain is never touched, so the voice never blinks.
+    notes = shelf_server.library / "quiet-mind" / "notes.md"
+    original = notes.read_text()
+    try:
+        _wait_for_version_baseline(page, shelf_server.base, "#talk/quiet-mind")
+        page.evaluate(f"{AUDIO_JS}.play()")
+        page.wait_for_function("() => window.saIsPlaying && window.saIsPlaying()")
+        page.evaluate("window.__e2e_marker = 1")
+        # Node identity is the proof no swap touched the player: an expando
+        # property never survives a clone.
+        page.evaluate(f"{AUDIO_JS}.__e2e_same_node = 1")
+        # Into the ## Moments section itself — a plain append can land
+        # under a later section (the server adds ## Listening on a
+        # completed listen).
+        notes.write_text(original.replace(
+            "- 0:04 — how it settles",
+            "- 0:04 — how it settles\n- 0:07 — a fresh landmark from the guide",
+        ))
+        shelf_server.rebuild_shelf()
+        # The new chip lands in the playing room, no reload, no pause.
+        page.wait_for_selector(
+            '#talk-quiet-mind .moment-chip[data-start="7"]', timeout=25_000
+        )
+        assert page.evaluate("window.__e2e_marker") == 1
+        assert page.evaluate(f"!{AUDIO_JS}.paused")
+        assert page.evaluate(f"{AUDIO_JS}.__e2e_same_node") == 1
+        assert page.evaluate("window.saPlayingSlug()") == "quiet-mind"
+    finally:
+        notes.write_text(original)
+        shelf_server.rebuild_shelf()
+
+
 # --- the primer rides the now-playing capsule --------------------------------
 # (These run BEFORE the restamp tests below, which deliberately leave
 # primer.mp3 undecodable.)

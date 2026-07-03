@@ -2447,11 +2447,50 @@ __GUIDE_VIGNETTE__<h2>the guide</h2>
     });
   }
 
+  // The playing room freshens too — around the player. Every top-level
+  // child of the room is replaced EXCEPT the one holding the live
+  // player element, whose DOM chain never moves: a reparented audio
+  // would survive, but a YouTube iframe reloads on ANY detach — so
+  // nothing in that chain is touched at all. Returns the imported
+  // nodes (for rebinding), or null when the fresh room has no matching
+  // player — then the room waits, as it always did.
+  function mergeAroundPlayer(oldView, newView, playerEl) {
+    var keep = playerEl;
+    while (keep && keep.parentElement !== oldView) keep = keep.parentElement;
+    if (!keep) return null;
+    var slug = playerEl.getAttribute("data-slug") || "";
+    var sel = playerEl.classList.contains("primer-audio")
+      ? "audio.primer-audio"
+      : playerEl.classList.contains("talk-audio")
+        ? "audio.talk-audio"
+        : ".yt-embed";
+    var newPlayerEl = newView.querySelector(sel + '[data-slug="' + slug + '"]');
+    var newKeep = newPlayerEl;
+    while (newKeep && newKeep.parentElement !== newView) {
+      newKeep = newKeep.parentElement;
+    }
+    if (!newKeep) return null;
+    carryDetails(oldView, newView);
+    Array.prototype.slice.call(oldView.children).forEach(function (child) {
+      if (child !== keep) oldView.removeChild(child);
+    });
+    var imported = [];
+    var after = false;
+    Array.prototype.slice.call(newView.children).forEach(function (child) {
+      if (child === newKeep) { after = true; return; }
+      var node = document.importNode(child, true);
+      if (after) oldView.appendChild(node);
+      else oldView.insertBefore(node, keep);
+      imported.push(node);
+    });
+    return imported;
+  }
+
   // Swap the fresh page in under the reader: the sidebar path and every
-  // room EXCEPT the one holding the playing player (its embed must never
-  // blink). DOM import/replace only — nothing is ever parsed as markup
-  // in place. Returns false when the fetched page doesn't look like the
-  // shelf.
+  // room — the playing room through mergeAroundPlayer (its player must
+  // never blink), the rest wholesale. DOM import/replace only — nothing
+  // is ever parsed as markup in place. Returns false when the fetched
+  // page doesn't look like the shelf.
   function swapShelf(doc) {
     var container = document.getElementById("views");
     var newViews = doc.getElementById("views");
@@ -2464,20 +2503,34 @@ __GUIDE_VIGNETTE__<h2>the guide</h2>
       if (window.saApplyArchiveState) window.saApplyArchiveState();
     }
     var playingSlug = window.saPlayingSlug ? window.saPlayingSlug() : null;
+    var playingRoomId = playingSlug ? "talk-" + playingSlug : null;
     var keepIds = {};
-    if (playingSlug) keepIds["talk-" + playingSlug] = true;
+    if (playingRoomId) keepIds[playingRoomId] = true;
     // An expanded artifact is in use exactly like a playing player —
-    // its room waits for the next safe swap.
+    // its room waits for the next safe swap (no merge either: the
+    // reader is standing IN the expanded tool).
+    var untouchable = {};
     document.querySelectorAll(".artifact-item.expanded").forEach(function (item) {
       var view = item.closest(".view");
-      if (view && view.id) keepIds[view.id] = true;
+      if (view && view.id) { keepIds[view.id] = true; untouchable[view.id] = true; }
     });
+    var playingEl = window.saPlayingEl ? window.saPlayingEl() : null;
     var freshIds = {};
     var swapped = [];
     Array.prototype.slice.call(newViews.children).forEach(function (view) {
       if (!view.classList.contains("view") || !view.id) return;
       freshIds[view.id] = true;
-      if (keepIds[view.id]) return; // playing/expanded rooms are untouchable
+      if (keepIds[view.id]) {
+        // The playing room still freshens, around its live player.
+        if (view.id !== playingRoomId || untouchable[view.id] || !playingEl) {
+          return;
+        }
+        var room = document.getElementById(view.id);
+        if (!room || !room.contains(playingEl)) return;
+        var merged = mergeAroundPlayer(room, view, playingEl);
+        if (merged) merged.forEach(function (node) { swapped.push(node); });
+        return;
+      }
       var node = document.importNode(view, true);
       var old = document.getElementById(view.id);
       if (old) {
@@ -3346,7 +3399,16 @@ LAYOUT_SCRIPT = """<script>
   // chat side's soft refresh can rebind exactly the rooms it swapped in
   // (window.saBindRoom). Page load wires the whole document once.
   function bindRoom(root) {
-    root.querySelectorAll(".seg-transcript").forEach(function (box) {
+    // querySelectorAll never matches the root itself — but the soft
+    // refresh's playing-room merge hands top-level children through
+    // here, and one of those can BE the bindable element (a card's
+    // audio tags sit directly under the section).
+    function all(sel) {
+      var list = Array.prototype.slice.call(root.querySelectorAll(sel));
+      if (root.matches && root.matches(sel)) list.unshift(root);
+      return list;
+    }
+    all(".seg-transcript").forEach(function (box) {
       box.addEventListener("click", function (event) {
         var seg = event.target.closest(".seg");
         if (!seg) return;
@@ -3356,7 +3418,7 @@ LAYOUT_SCRIPT = """<script>
     });
     // "Listen for" chips: the guide's curated moments seek exactly like
     // a transcript-line click — the same ONE seek path.
-    root.querySelectorAll(".moments").forEach(function (box) {
+    all(".moments").forEach(function (box) {
       box.addEventListener("click", function (event) {
         var chip = event.target.closest(".moment-chip");
         if (!chip) return;
@@ -3364,7 +3426,7 @@ LAYOUT_SCRIPT = """<script>
           parseFloat(chip.getAttribute("data-start")) || 0);
       });
     });
-    root.querySelectorAll(".listened-replay").forEach(function (button) {
+    all(".listened-replay").forEach(function (button) {
       button.addEventListener("click", function () {
         var slug = button.getAttribute("data-slug");
         var audio = document.querySelector(
@@ -3375,12 +3437,12 @@ LAYOUT_SCRIPT = """<script>
         if (holder) mountFrame(holder, 0);
       });
     });
-    root.querySelectorAll(".guide-lock").forEach(function (button) {
+    all(".guide-lock").forEach(function (button) {
       button.addEventListener("click", function () { setGuideLock(!guideLock); });
     });
-    root.querySelectorAll("audio.talk-audio").forEach(bindAudio);
-    root.querySelectorAll("audio.primer-audio").forEach(bindPrimer);
-    root.querySelectorAll(".yt-embed").forEach(function (holder) {
+    all("audio.talk-audio").forEach(bindAudio);
+    all("audio.primer-audio").forEach(bindPrimer);
+    all(".yt-embed").forEach(function (holder) {
       var button = holder.querySelector(".yt-play");
       if (!button) return;
       button.addEventListener("click", function () { mountFrame(holder); });
@@ -3397,6 +3459,16 @@ LAYOUT_SCRIPT = """<script>
   window.saShowView = show;
   window.saPlayingSlug = function () {
     return nowPlaying ? nowPlaying.slug : null;
+  };
+  // The live player ELEMENT — the DOM chain the soft refresh must never
+  // detach (an iframe reloads on any move; the audio must not blink).
+  window.saPlayingEl = function () {
+    if (!nowPlaying) return null;
+    if (nowPlaying.kind === "yt") {
+      return document.querySelector(
+        '.yt-embed[data-slug="' + nowPlaying.slug + '"]');
+    }
+    return playbackTarget();
   };
 })();
 </script>"""

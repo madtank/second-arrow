@@ -1287,7 +1287,7 @@ def test_primer_player_rides_the_capsule(tmp_path):
     assert 'class="primer-audio"' in primer.group(0)
     assert 'data-slug="quiet-mind"' in primer.group(0)
     # ...bound by its own narrow binder (one voice, a visible handle)...
-    assert 'root.querySelectorAll("audio.primer-audio").forEach(bindPrimer);' in html
+    assert 'all("audio.primer-audio").forEach(bindPrimer);' in html
     binder = re.search(r"function bindPrimer\(audio\) \{[\s\S]*?\n  \}", html)
     assert binder, "bindPrimer missing"
     # ...that never records a listen: a primer is an invitation, not the
@@ -2751,6 +2751,15 @@ def test_shelf_carries_one_discover_room_and_its_doors(tmp_path):
     # The describe door hands the words back to the user, in the input.
     assert '".describe-new"' in html
     assert "what are you looking for? your own words…" in html
+
+
+def test_soft_refresh_carries_the_playing_room_merge(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The playing room freshens around its live player: the merge helper,
+    # the live-element window seam, and a root-inclusive rebind.
+    assert "function mergeAroundPlayer(" in html
+    assert "window.saPlayingEl = function ()" in html
+    assert "if (root.matches && root.matches(sel)) list.unshift(root);" in html
 
 
 def test_describe_door_borrows_the_placeholder_and_gives_it_back(tmp_path):
