@@ -165,8 +165,9 @@ def build_scratch_root(root: Path) -> Path:
     write_silent_wav(library / "quiet-mind" / "audio.wav", seconds=10.0)
     # The primer too — real (silent) wav bytes under the .mp3 name
     # (Chromium sniffs the container from content), so the capsule tests
-    # can genuinely play it.
-    write_silent_wav(library / "quiet-mind" / "primer.mp3", seconds=6.0)
+    # can genuinely play it. Long enough that a slow run never hits the
+    # natural end mid-test.
+    write_silent_wav(library / "quiet-mind" / "primer.mp3", seconds=30.0)
     (library / "quiet-mind" / "artifacts" / "anchored-listen.html").write_text(
         SEEK_ARTIFACT
     )

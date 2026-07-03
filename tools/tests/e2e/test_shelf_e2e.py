@@ -874,6 +874,46 @@ def test_prompt_chips_show_on_focus_send_and_hide_on_typing(page, shelf_server):
     )
 
 
+def test_chat_input_grows_with_writing_and_settles_after_send(page, shelf_server):
+    # The box follows the writing: focus alone never moves it, a few
+    # lines grow it, ~five lines is the ceiling (then it scrolls
+    # inside), and a send folds it back to one line.
+    _open_shelf(page, shelf_server.base)
+    page.click("#chat-open")
+    input_js = "document.getElementById('chat-input')"
+    # "settled": any height transition has finished — the box stands at
+    # the height autoGrow asked for (or was never grown at all).
+    settled = (
+        f"() => {input_js}.style.height === '' || "
+        f"Math.abs(parseFloat({input_js}.style.height) - {input_js}.offsetHeight) < 2"
+    )
+    baseline = page.evaluate(f"{input_js}.offsetHeight")
+    page.focus("#chat-input")
+    page.wait_for_timeout(250)  # a beat — focus alone must NOT resize
+    assert page.evaluate(f"{input_js}.offsetHeight") == baseline
+    # Three lines: the box grows past its one-line self.
+    page.fill("#chat-input", "one\ntwo\nthree")
+    page.wait_for_function(f"() => {input_js}.offsetHeight > {baseline} + 10")
+    page.wait_for_function(settled)
+    grown = page.evaluate(f"{input_js}.offsetHeight")
+    # Twelve lines: the ceiling holds — taller than three lines, but
+    # nowhere near twelve.
+    page.fill("#chat-input", "\n".join(["line"] * 12))
+    page.wait_for_function(f"() => {input_js}.offsetHeight >= {grown}")
+    page.wait_for_function(settled)
+    capped = page.evaluate(f"{input_js}.offsetHeight")
+    assert capped < baseline * 6
+    # More lines still: not one pixel taller.
+    page.fill("#chat-input", "\n".join(["line"] * 20))
+    page.wait_for_function(settled)
+    assert page.evaluate(f"{input_js}.offsetHeight") == capped
+    # Send clears the input — the box folds back to one line.
+    page.click("#chat-send")
+    page.wait_for_function(
+        f"() => Math.abs({input_js}.offsetHeight - {baseline}) < 2"
+    )
+
+
 def test_stub_room_opens_and_offers_the_fetch(page, shelf_server):
     _open_shelf(page, shelf_server.base)
     # The queued-but-unfetched entry is a real link now, not a dead end.

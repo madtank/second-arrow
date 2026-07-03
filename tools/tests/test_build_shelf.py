@@ -1350,6 +1350,21 @@ def test_chat_bar_is_a_modern_capsule(tmp_path):
     assert "var busy = false;" in html
 
 
+def test_chat_input_autogrow_is_measured_and_capped(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The standard pattern, wired to input only (focus never resizes):
+    # height auto to measure, then min(scrollHeight, cap) to settle.
+    assert "function autoGrow()" in html
+    assert 'input.style.height = "auto"' in html
+    assert "Math.min(input.scrollHeight + chrome, GROW_CAP)" in html
+    assert "var GROW_CAP = 146;" in html  # ~five lines, then it scrolls
+    # The CSS ceiling agrees with the JS cap, and the height glides.
+    assert "max-height: 146px" in html
+    assert "transition: height 0.12s ease" in html
+    # The send path clears the input AND folds the box back to one line.
+    assert re.search(r'input\.value = "";\s*updateSendState\(\);\s*autoGrow\(\);', html)
+
+
 def test_sidebar_collapser_persists_and_spares_mobile(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # A chevron on the sidebar edge; a floating one to reopen; the choice

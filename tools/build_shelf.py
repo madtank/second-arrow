@@ -1094,7 +1094,9 @@ STYLE = """
   #chat-form textarea { flex: 1; font: inherit; color: inherit; resize: none;
                background: #fbf8f2; border: 1px solid transparent;
                border-radius: 14px; padding: 0.6rem 0.9rem;
-               line-height: 1.45; max-height: 6.4rem;
+               line-height: 1.45; box-sizing: border-box;
+               max-height: 146px; /* ~five lines — autoGrow's cap, agreed */
+               transition: height 0.12s ease;
                box-shadow: inset 0 1px 3px rgba(60, 56, 51, 0.05); }
   #chat-form textarea::placeholder { color: #b3a893; font-style: italic; }
   #chat-form textarea:focus { outline: none; border-color: #d3bd92;
@@ -1286,9 +1288,19 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     }).catch(function () { /* nothing streaming: the line clears itself */ });
   });
 
+  // The box follows the writing: one line when empty, up to ~five lines
+  // tall, scrolling inside beyond that. Only the input event (and the
+  // send path's clear) calls this — focus alone never moves the bar.
+  var GROW_CAP = 146; // ~five lines; the CSS max-height agrees
+
   function autoGrow() {
-    input.style.height = "auto";
-    input.style.height = Math.min(input.scrollHeight, 100) + "px";
+    var standing = input.style.height; // where the box stands now
+    input.style.height = "auto"; // let the content say how tall
+    var chrome = input.offsetHeight - input.clientHeight; // the borders
+    var target = Math.min(input.scrollHeight + chrome, GROW_CAP);
+    input.style.height = standing; // step back so the height can glide
+    void input.offsetHeight; // reflow: the transition needs a from
+    input.style.height = target + "px";
   }
 
   input.addEventListener("input", function () {
@@ -3178,6 +3190,7 @@ LAYOUT_SCRIPT = """<script>
         nowPlaying = null;
         updateCapsule();
         keepPlayingViewAlive();
+        updateRoomLocks();
       }
     });
   }
