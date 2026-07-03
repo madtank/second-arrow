@@ -1192,13 +1192,15 @@ def test_locked_cues_become_offers_not_actions(tmp_path):
 
 def test_chat_bubbles_carry_avatars_and_run_labels(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
-    # Inline-SVG avatars live in static templates (cloned per message —
-    # never built from message content): a bodhi leaf for the guide (an
-    # enso read as a loading spinner at bubble size — no rings, ever),
-    # a small person for the user.
-    guide = re.search(r'<template id="avatar-guide">\s*<svg.*?</template>', html, re.S)
-    assert guide and guide.group(0).count("<path") == 2  # outline + vein
-    assert "<circle" not in guide.group(0)  # nothing ring-shaped
+    # Avatars live in static templates (cloned per message — never built
+    # from message content): the guide wears the painted ensō when the
+    # asset exists, a small person marks the user. The old rule — a bare
+    # SVG ring reads as a loading spinner at bubble size — still binds
+    # the FALLBACK glyph: a bodhi leaf, two paths, nothing ring-shaped.
+    guide = re.search(r'<template id="avatar-guide">\s*<img.*?</template>', html, re.S)
+    assert guide and 'class="guide-face"' in guide.group(0)
+    assert build_shelf.GUIDE_LEAF_GLYPH.count("<path") == 2  # outline + vein
+    assert "<circle" not in build_shelf.GUIDE_LEAF_GLYPH  # no bare rings
     assert re.search(r'<template id="avatar-user">\s*<svg', html)
     assert "cloneNode(true)" in html
     # The real thinking indicator stays text in the bubble, never a ring.
@@ -3026,3 +3028,45 @@ def test_room_and_chat_share_one_widening_measure(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     assert "max-width: clamp(680px, 72vw, 60rem)" in html
     assert "calc((100% - clamp(680px, 72vw, 60rem)) / 2)" in html
+
+
+# --- identity art: the guide's face and the app's mark -------------------
+# Four small PNGs live in tools/assets/ and are inlined at build time as
+# data: URIs so the page stays one self-contained file. A missing asset
+# never breaks the build — the page keeps its original SVG glyphs.
+
+
+def test_asset_data_uri_for_existing_and_missing_art():
+    uri = build_shelf.asset_data_uri("guide-enso-96.png")
+    assert uri is not None and uri.startswith("data:image/png;base64,")
+    assert build_shelf.asset_data_uri("no-such-art.png") is None
+
+
+def test_render_shelf_embeds_identity_art_when_assets_exist(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The favicon: the small arrow-leaf mark, inlined in the head.
+    assert '<link rel="icon" href="data:image/png;base64,' in html
+    # The sidebar mark sits quietly above the title.
+    assert re.search(
+        r'<img class="side-mark" src="data:image/png;base64,[^"]+"[^>]*>'
+        r"\s*<h1>Second Arrow</h1>",
+        html,
+    )
+    # The guide's face: the ensō as the chat avatar (cloned from the
+    # template for every guide bubble) …
+    assert '<img class="guide-face" src="data:image/png;base64,' in html
+    # … and the larger vignette by the conversation header.
+    assert '<img id="chat-vignette" src="data:image/png;base64,' in html
+
+
+def test_render_shelf_without_assets_keeps_the_old_glyphs(tmp_path, monkeypatch):
+    # The art is optional: point the build at an empty assets dir and the
+    # page still renders whole, wearing the leaf glyph it always had.
+    monkeypatch.setattr(build_shelf, "ASSETS_DIR", tmp_path / "no-assets")
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    assert "data:image/png" not in html
+    assert '<template id="avatar-guide">' in html
+    assert "M12 21.2" in html  # the leaf path, unchanged
+    assert '<link rel="icon"' not in html
+    assert '<img class="side-mark"' not in html
+    assert '<img id="chat-vignette"' not in html

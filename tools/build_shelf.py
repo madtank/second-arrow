@@ -26,12 +26,31 @@ Then:
 """
 
 import argparse
+import base64
 import json
 import re
 import sys
 from pathlib import Path
 
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".ogg", ".wav", ".flac", ".aac", ".opus")
+
+# Identity art — the guide's ensō face, the arrow-leaf app mark — lives in
+# tools/assets/ and is inlined at build time so the page stays one
+# self-contained file.
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+
+
+def asset_data_uri(name: str) -> str | None:
+    """tools/assets/<name> as a data: URI — None when the art is absent.
+
+    A missing picture never breaks the build: callers fall back to the
+    SVG glyphs the page has always carried.
+    """
+    try:
+        data = (ASSETS_DIR / name).read_bytes()
+    except OSError:
+        return None
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
 
 
 def escape(text: str) -> str:
@@ -591,6 +610,10 @@ STYLE = """
              padding: 2rem 1.25rem 1.5rem; position: sticky; top: 0;
              height: 100vh; overflow-y: auto; }
   #sidebar h1 { font-size: 1.35rem; margin: 0 0 0.2rem; }
+  /* The arrow-leaf mark above the title — small and round, so its
+     paper edge never draws a box on the sidebar's cream. */
+  .side-mark { width: 2.5rem; height: 2.5rem; display: block;
+               border-radius: 50%; margin: 0 0 0.55rem; }
   #sidebar h2 { font-size: 0.95rem; color: #8a7f70; margin: 1.75rem 0 0.5rem;
                 text-transform: lowercase; letter-spacing: 0.03em; }
   .epigraph { color: #8a7f70; font-style: italic; margin-top: 0;
@@ -978,6 +1001,10 @@ STYLE = """
   .chat-avatar { width: 1.7rem; height: 1.7rem; flex-shrink: 0;
                  margin-top: 0.15rem; }
   .chat-avatar svg { width: 100%; height: 100%; display: block; }
+  /* The painted face: its paper is a shade off the page's own cream,
+     so a round crop keeps the edge quiet. */
+  .chat-avatar img, #peek-mark img { width: 100%; height: 100%;
+                 display: block; border-radius: 50%; }
   .chat-row:not(.chat-run-start) .chat-avatar { visibility: hidden; }
   .chat-body { flex: 1; min-width: 0; }
   .chat-row-user .chat-body { display: flex; flex-direction: column;
@@ -1005,6 +1032,13 @@ STYLE = """
   #guide-chat.chat-docked #chat-identity:focus-within { opacity: 1; }
   #guide-chat.chat-conversation { top: 0; background: #fcf9f3;
                 pointer-events: auto; padding-top: 2rem; }
+  /* The ensō sits above "the guide" only in conversation — a presence
+     at the head of the exchange, never a badge on the docked bar. */
+  #chat-vignette { display: none; }
+  .chat-conversation #chat-vignette { display: block; width: 84px;
+                height: 84px; border-radius: 50%;
+                margin: 0.1rem 0 0.4rem; }
+  .chat-conversation #chat-vignette + h2 { margin-top: 0; }
   #guide-chat.chat-conversation #chat-messages { flex: 1; max-height: none;
                                                  font-size: 1.02rem; }
   #chat-peek { display: flex; align-items: flex-start; gap: 0.55rem;
@@ -1120,6 +1154,10 @@ STYLE = """
 """
 
 
+# The guide's fallback face: the leaf glyph the chat wore before it had a
+# painted one. It stays the avatar whenever the ensō asset is missing.
+GUIDE_LEAF_GLYPH = """<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.2 C9.6 18.4 4.9 15.7 4.9 10.7 C4.9 6.6 8 3.6 12 2.9 C16 3.6 19.1 6.6 19.1 10.7 C19.1 15.7 14.4 18.4 12 21.2 Z" fill="none" stroke="#a9853f" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/><path d="M12 5.6 V18.4" fill="none" stroke="#a9853f" stroke-width="1.1" stroke-linecap="round" opacity="0.65"/></svg>"""
+
 # The panel starts hidden and only appears when /health answers — so the
 # static file:// shelf keeps working unchanged. Guide replies stream in as
 # chunked plain text (fetch + ReadableStream); errors before the stream
@@ -1127,14 +1165,16 @@ STYLE = """
 # sent to (per-request "brain" field), driven by /health's availability
 # map. Replies are rendered with textContent (never innerHTML): model
 # output stays inert text.
+# __GUIDE_FACE__ and __GUIDE_VIGNETTE__ are filled by render_shelf: the
+# ensō when tools/assets/ has it, the leaf glyph (or nothing) when not.
 CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
 <template id="avatar-guide">
-<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.2 C9.6 18.4 4.9 15.7 4.9 10.7 C4.9 6.6 8 3.6 12 2.9 C16 3.6 19.1 6.6 19.1 10.7 C19.1 15.7 14.4 18.4 12 21.2 Z" fill="none" stroke="#a9853f" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/><path d="M12 5.6 V18.4" fill="none" stroke="#a9853f" stroke-width="1.1" stroke-linecap="round" opacity="0.65"/></svg>
+__GUIDE_FACE__
 </template>
 <template id="avatar-user">
 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.4" r="3.4" fill="#7a6a50"/><path d="M4.6 20c1.6-4 5-5.6 7.4-5.6s5.8 1.6 7.4 5.6" fill="none" stroke="#7a6a50" stroke-width="2.4" stroke-linecap="round"/></svg>
 </template>
-<h2>the guide</h2>
+__GUIDE_VIGNETTE__<h2>the guide</h2>
 <button type="button" id="chat-minimize" title="back to the page — everything stays as you left it">▾ back to the room</button>
 <p class="meta" id="chat-identity" hidden>
 <a href="#settings" id="identity-link" title="settings — the guide's brain, fallbacks, nightly prep"></a>
@@ -4217,12 +4257,38 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
         if (path_strip or listening)
         else ""
     )
+    # Identity art, inlined so the page stays one file. Each piece is
+    # optional: absent art leaves the page exactly as it was — the leaf
+    # glyph keeps being the guide's face, the head keeps no favicon.
+    enso_small = asset_data_uri("guide-enso-96.png")
+    enso_large = asset_data_uri("guide-enso-320.png")
+    mark_small = asset_data_uri("arrow-mark-64.png")
+    mark_large = asset_data_uri("arrow-mark-240.png")
+    guide_face = (
+        f'<img class="guide-face" src="{enso_small}" alt="">'
+        if enso_small
+        else GUIDE_LEAF_GLYPH
+    )
+    vignette = (
+        f'<img id="chat-vignette" src="{enso_large}" alt="" aria-hidden="true">\n'
+        if enso_large
+        else ""
+    )
+    chat_panel = CHAT_PANEL.replace("__GUIDE_FACE__", guide_face).replace(
+        "__GUIDE_VIGNETTE__", vignette
+    )
+    favicon = f'\n<link rel="icon" href="{mark_small}">' if mark_small else ""
+    side_mark = (
+        f'\n<img class="side-mark" src="{mark_large}" alt="" aria-hidden="true">'
+        if mark_large
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Second Arrow — Study Shelf</title>
+<title>Second Arrow — Study Shelf</title>{favicon}
 <style>{STYLE}</style>
 </head>
 <body>
@@ -4234,7 +4300,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <nav id="sidebar">
 <button type="button" id="sidebar-collapse" title="hide the sidebar" aria-label="hide the sidebar">
 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.2 12h15.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M9.8 6.8 4.2 12l5.6 5.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.6 12l3.1-2.9M14.6 12l3.1 2.9M17.4 12l3.1-2.9M17.4 12l3.1 2.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-</button>
+</button>{side_mark}
 <h1>Second Arrow</h1>
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
 <a class="begin-link" href="#home">begin here</a>{curriculum_link}
@@ -4281,7 +4347,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 {talk_views}
 </div>
 
-{CHAT_PANEL}
+{chat_panel}
 </main>
 </div>
 {LAYOUT_SCRIPT}
