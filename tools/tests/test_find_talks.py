@@ -1,0 +1,66 @@
+import importlib.util
+import json
+from pathlib import Path
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "find_talks.py"
+SPEC = importlib.util.spec_from_file_location("find_talks", MODULE_PATH)
+find_talks = importlib.util.module_from_spec(SPEC)
+assert SPEC and SPEC.loader
+SPEC.loader.exec_module(find_talks)
+
+
+def test_search_flattens_entries(monkeypatch):
+    captured = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            captured["opts"] = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, target, download=True):
+            assert download is False
+            captured["target"] = target
+            return {
+                "entries": [
+                    {
+                        "title": "Unentangled Knowing",
+                        "channel": "dhammatalks",
+                        "duration": 900.0,
+                        "url": "https://youtu.be/abc",
+                    },
+                    None,
+                    {"title": "No duration", "uploader": "someone", "url": "u2"},
+                ]
+            }
+
+    monkeypatch.setattr(find_talks, "_ydl", lambda: FakeYoutubeDL)
+
+    rows = find_talks.search("thanissaro feelings", limit=3)
+
+    assert captured["target"] == "ytsearch3:thanissaro feelings"
+    assert captured["opts"]["extract_flat"] is True
+    assert len(rows) == 2
+    assert rows[0] == {
+        "title": "Unentangled Knowing",
+        "channel": "dhammatalks",
+        "duration": 900,
+        "url": "https://youtu.be/abc",
+    }
+    assert rows[1]["channel"] == "someone"
+    assert rows[1]["duration"] is None
+
+
+def test_main_prints_json_lines(monkeypatch, capsys):
+    row = {"title": "T", "channel": "C", "duration": 60, "url": "u"}
+    monkeypatch.setattr(find_talks, "search", lambda query, limit=5: [row])
+
+    find_talks.main(["some query", "--limit", "2"])
+
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1
+    assert json.loads(out[0]) == row
