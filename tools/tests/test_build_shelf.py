@@ -344,7 +344,7 @@ def test_sidebar_talks_list_is_the_path(tmp_path):
     html = build_shelf.render_shelf(library, {})
     sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
     # State marks ride inline on the talk entries. Studied talks rest in
-    # the hidden archive tail behind "show more" — still marked ✓ there.
+    # the hidden archive tail behind "already listened" — still marked ✓ there.
     quiet = re.search(
         r'<li class="nav-archived" hidden><a href="#talk/quiet-mind">.*?</a></li>',
         sidebar, re.S,
@@ -362,7 +362,7 @@ def test_sidebar_talks_list_is_the_path(tmp_path):
     assert "nav-tag" not in sidebar
     # The living path (and the ✦ door) come before the archive toggle.
     assert sidebar.index("#talk/far-talk") < sidebar.index("nav-archive-toggle")
-    assert "show more · 2" in sidebar
+    assert "already listened · 2" in sidebar
     # A queued talk not yet in the library appears muted but is a REAL
     # link now — a room-in-waiting. No curriculum in this fixture, so
     # its stub room can only ask the guide (never a fetch without a URL).
@@ -408,7 +408,8 @@ def test_render_nav_archives_studied_behind_show_more():
     html = build_shelf.render_nav(talks, states)
     # The living path stays visible, ahead of the archive toggle.
     assert html.index("#talk/b") < html.index("nav-archive-toggle")
-    assert "show more · 1" in html
+    # The collapsed group is named for what it holds, not a bare "more".
+    assert "already listened · 1" in html
     # The studied item is inside the archived (hidden) tail.
     assert html.index("nav-archive-toggle") < html.index("#talk/a")
     assert 'class="nav-archived" hidden' in html
@@ -429,6 +430,38 @@ def test_render_nav_no_archive_when_nothing_studied():
 def test_render_nav_empty_library_still_offers_the_door():
     html = build_shelf.render_nav([], {})
     assert "#talk/something-new" in html
+
+
+def test_render_nav_living_path_newest_first():
+    # INDEX order is ingest order (oldest first); the sidebar leads with
+    # what arrived most recently.
+    talks = [
+        {"slug": "old", "title": "Old"},
+        {"slug": "mid", "title": "Mid"},
+        {"slug": "new", "title": "New"},
+    ]
+    html = build_shelf.render_nav(talks, {})
+    assert html.index("#talk/new") < html.index("#talk/mid") < html.index("#talk/old")
+
+
+def test_render_nav_archive_orders_by_most_recent_listen():
+    # The listened group reads newest finish first; a studied talk with
+    # no listen on record falls to the end (newest ingest first there).
+    talks = [
+        {"slug": "a", "title": "A"},
+        {"slug": "b", "title": "B"},
+        {"slug": "c", "title": "C"},
+        {"slug": "d", "title": "D"},
+    ]
+    states = {"a": "studied", "b": "studied", "c": "studied"}
+    listening = {
+        "a": {"count": 1, "last": "2026-06-20T10:00:00+00:00"},
+        "c": {"count": 2, "last": "2026-07-01T09:00:00+00:00"},
+    }
+    html = build_shelf.render_nav(talks, states, (), listening)
+    assert html.index("#talk/c") < html.index("#talk/a") < html.index("#talk/b")
+    # ...and the living item still leads the whole list.
+    assert html.index("#talk/d") < html.index("nav-archive-toggle")
 
 
 # --- youtube_embed_url ------------------------------------------------------
@@ -1476,7 +1509,7 @@ def test_sidebar_drops_legend_but_home_keeps_state_note(tmp_path):
     (tmp_path / "STUDY.md").write_text(DONE_STUDY)
     html = build_shelf.render_shelf(library, {})
     # The legend line is gone — the marks carry themselves now that the
-    # studied tail rests behind "show more"...
+    # studied tail rests behind "already listened"...
     sidebar = re.search(r'<nav id="sidebar">.*?</nav>', html, re.S).group(0)
     assert 'class="nav-legend"' not in sidebar
     # ...but the plain sentence on the begin-here status area saying how
@@ -2711,6 +2744,10 @@ def test_shelf_carries_one_discover_room_and_its_doors(tmp_path):
     assert 'sendOrQueue("Find me something new — search beyond the curriculum, "' in html
     assert "NOT download anything yet." in html
     assert "still unheard on the shelf, point me to those first instead." in html
+    # ...and it names the consent handshake, so the guide never has to be
+    # convinced twice: the pick IS the download request.
+    assert "that pick IS my explicit request" in html
+    assert "no second confirmation" in html
     # The describe door hands the words back to the user, in the input.
     assert '".describe-new"' in html
     assert "what are you looking for? your own words…" in html

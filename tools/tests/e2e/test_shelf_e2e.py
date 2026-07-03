@@ -97,7 +97,7 @@ def test_rooms_navigate_by_hash(page, shelf_server):
     _open_shelf(page, shelf_server.base)
     assert page.locator("#view-home.active").count() == 1
     # quiet-mind is studied — it rests in the archive, so the real user
-    # path to its link runs through "show more" first.
+    # path to its link runs through "already listened" first.
     page.click("#nav-archive-toggle")
     page.click('#talk-nav a[href="#talk/quiet-mind"]')
     page.wait_for_selector("#talk-quiet-mind.active")
@@ -110,7 +110,7 @@ def test_rooms_navigate_by_hash(page, shelf_server):
     page.wait_for_selector("#view-home.active")
 
 
-# --- the sidebar archive: show more, remembered ------------------------------
+# --- the sidebar archive: already listened, remembered ------------------------------
 
 
 def test_archive_show_more_toggles_and_persists(page, shelf_server):
@@ -124,7 +124,7 @@ def test_archive_show_more_toggles_and_persists(page, shelf_server):
     assert not archived_link.is_visible()
     toggle = page.locator("#nav-archive-toggle")
     label = toggle.get_attribute("data-label")
-    assert label.startswith("show more · ")
+    assert label.startswith("already listened · ")
     assert toggle.inner_text() == label
     assert toggle.get_attribute("aria-expanded") == "false"
     # One tap opens the archive and the button says how to close it.
@@ -132,14 +132,14 @@ def test_archive_show_more_toggles_and_persists(page, shelf_server):
     page.wait_for_selector(
         '#talk-nav li.nav-archived a[href="#talk/quiet-mind"]', state="visible"
     )
-    assert toggle.inner_text() == "show less"
+    assert toggle.inner_text() == "hide listened"
     assert toggle.get_attribute("aria-expanded") == "true"
     # The choice is remembered (localStorage) across a full reload.
     _open_shelf(page, shelf_server.base)
     page.wait_for_selector(
         '#talk-nav li.nav-archived a[href="#talk/quiet-mind"]', state="visible"
     )
-    assert page.inner_text("#nav-archive-toggle") == "show less"
+    assert page.inner_text("#nav-archive-toggle") == "hide listened"
     # And one more tap tucks it back behind its own label.
     page.click("#nav-archive-toggle")
     page.wait_for_selector(
@@ -158,7 +158,7 @@ def test_active_archived_talk_expands_archive(page, shelf_server):
         '#talk-nav a[href="#talk/quiet-mind"].active', state="visible"
     )
     assert page.get_attribute("#nav-archive-toggle", "aria-expanded") == "true"
-    assert page.inner_text("#nav-archive-toggle") == "show less"
+    assert page.inner_text("#nav-archive-toggle") == "hide listened"
     # Passing through is not a preference: the stored choice stays
     # closed — only the toggle's own click writes "open"...
     assert page.evaluate('localStorage.getItem("nav-archive")') == "closed"

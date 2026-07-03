@@ -1573,7 +1573,10 @@ __GUIDE_VIGNETTE__<h2>the guide</h2>
         + "landing). Bring back 2-3 candidate talks, each with a one-line "
         + "why and its source URL, and present them in conversation — do "
         + "NOT download anything yet. If two or more fetched talks are "
-        + "still unheard on the shelf, point me to those first instead.");
+        + "still unheard on the shelf, point me to those first instead. "
+        + "When I then pick a candidate, "
+        + "that pick IS my explicit request to download it — "
+        + "run the full fetch ritual right away, no second confirmation.");
       return;
     }
     var describe = event.target.closest(".describe-new");
@@ -2779,9 +2782,9 @@ LAYOUT_SCRIPT = """<script>
     document.querySelectorAll("#talk-nav .nav-archived").forEach(function (li) {
       li.hidden = !open;
     });
-    // data-label carries the render side's "show more · N".
+    // data-label carries the render side's "already listened · N".
     archiveToggle.textContent =
-      open ? "show less" : archiveToggle.getAttribute("data-label");
+      open ? "hide listened" : archiveToggle.getAttribute("data-label");
     archiveToggle.setAttribute("aria-expanded", open ? "true" : "false");
     if (remember !== false) {
       try { localStorage.setItem("nav-archive", open ? "open" : "closed"); }
@@ -3812,6 +3815,7 @@ def render_nav(
     talks: list[dict],
     states: dict[str, str] | None = None,
     stubs: list[dict] | tuple = (),
+    listening: dict[str, dict] | None = None,
 ) -> str:
     """The sidebar's Talks list — which IS the path, focused on what lives.
 
@@ -3820,26 +3824,44 @@ def render_nav(
     talks read as done here — their nuance stays in STUDY.md and notes.
     Queued talks not yet fetched appear last as rooms-in-waiting: real
     links into their stub rooms (render_stub_card), muted but no longer
-    dead ends. Studied talks rest behind a "show more" toggle so the
-    list stays the path ahead, not a museum; ✦ something new is the
-    door out of the list — always rendered, even (especially) when the
-    library is empty.
+    dead ends. Studied talks rest behind an "already listened" toggle
+    so the list stays the path ahead, not a museum; ✦ something new is
+    the door out of the list — always rendered, even (especially) when
+    the library is empty. Both groups read newest first: the living
+    path by ingest recency (INDEX order reversed), the listened group
+    by most recent listen (load_listening's "last"), never-listened
+    studied talks trailing by ingest recency.
     """
     states = states or {}
+    listening = listening or {}
     if not talks and not stubs:
         return (
             '<p class="side-muted">The library is empty so far.</p>\n'
             '<ul id="talk-nav">\n' + _NAV_SOMETHING_NEW + "\n</ul>"
         )
-    items = []
-    archived = []
-    for talk in talks:
-        state = states.get(talk["slug"])
-        mark = _NAV_MARKS.get(state, "")
-        if state == "studied":
-            archived.append(_nav_item(talk, mark, ' class="nav-archived" hidden'))
+    living = []
+    studied = []
+    for talk in reversed(talks):  # INDEX is ingest order — newest first
+        if states.get(talk["slug"]) == "studied":
+            studied.append(talk)
         else:
-            items.append(_nav_item(talk, mark))
+            living.append(talk)
+    studied.sort(  # stable: ties keep ingest recency
+        key=lambda talk: listening.get(talk["slug"], {}).get("last", ""),
+        reverse=True,
+    )
+    items = [
+        _nav_item(talk, _NAV_MARKS.get(states.get(talk["slug"]), ""))
+        for talk in living
+    ]
+    archived = [
+        _nav_item(
+            talk,
+            _NAV_MARKS.get(states.get(talk["slug"]), ""),
+            ' class="nav-archived" hidden',
+        )
+        for talk in studied
+    ]
     for stub in stubs:
         hint = (
             "not fetched yet — open to fetch it"
@@ -3853,7 +3875,9 @@ def render_nav(
         )
     items.append(_NAV_SOMETHING_NEW)
     if archived:
-        label = f"show more · {len(archived)}"  # data-label: collapsed-state text
+        # data-label: collapsed-state text — names the group, not a bare
+        # "more", so tucking it away feels right.
+        label = f"already listened · {len(archived)}"
         items.append(
             '<li class="nav-archive-toggle"><button type="button" '
             f'id="nav-archive-toggle" aria-expanded="false" '
@@ -4305,7 +4329,7 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <p class="epigraph">Pain happens. The second arrow is optional.</p>
 <a class="begin-link" href="#home">begin here</a>{curriculum_link}
 <h2 id="talks-heading">Talks</h2>
-{render_nav(talks, states, stubs)}
+{render_nav(talks, states, stubs, listening)}
 <footer>
 <a class="side-settings" href="#settings">settings</a>
 </footer>
