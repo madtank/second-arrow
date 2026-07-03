@@ -163,6 +163,10 @@ def build_scratch_root(root: Path) -> Path:
     # real audio. Same talk, same probe result, playable bytes.
     (library / "quiet-mind" / "audio.mp3").unlink()
     write_silent_wav(library / "quiet-mind" / "audio.wav", seconds=10.0)
+    # The primer too — real (silent) wav bytes under the .mp3 name
+    # (Chromium sniffs the container from content), so the capsule tests
+    # can genuinely play it.
+    write_silent_wav(library / "quiet-mind" / "primer.mp3", seconds=6.0)
     (library / "quiet-mind" / "artifacts" / "anchored-listen.html").write_text(
         SEEK_ARTIFACT
     )

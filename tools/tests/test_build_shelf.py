@@ -1233,13 +1233,35 @@ def test_now_playing_capsule_markup(tmp_path):
 def test_one_voice_at_a_time(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # Starting any talk pauses every other: local audio directly, YouTube
-    # through the jsapi command channel we already listen on.
-    assert "function pauseOthers(slug)" in html
+    # through the jsapi command channel we already listen on. Primers are
+    # voices too — the quieting sweep covers them in both directions.
+    assert "function pauseOthers(slug, keep)" in html
+    assert 'document.querySelectorAll("audio.talk-audio, audio.primer-audio")' in html
     assert '"pauseVideo"' in html
     assert '"playVideo"' in html
     # Stop pauses and clears the handle — never reloads/destroys the
     # iframe (position is already saved by the resume feature).
     assert "nowPlaying = null" in html
+
+
+def test_primer_player_rides_the_capsule(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The primer player is a first-class voice: tagged so JS can find it...
+    primer = re.search(r"<audio[^>]*src=\"quiet-mind/primer\.mp3\?v=\d+\"[^>]*>", html)
+    assert primer, "primer player missing"
+    assert 'class="primer-audio"' in primer.group(0)
+    assert 'data-slug="quiet-mind"' in primer.group(0)
+    # ...bound by its own narrow binder (one voice, a visible handle)...
+    assert 'root.querySelectorAll("audio.primer-audio").forEach(bindPrimer);' in html
+    binder = re.search(r"function bindPrimer\(audio\) \{[\s\S]*?\n  \}", html)
+    assert binder, "bindPrimer missing"
+    # ...that never records a listen: a primer is an invitation, not the
+    # talk — no completion report, no resume position.
+    assert "reportListened" not in binder.group(0)
+    assert "savePos" not in binder.group(0)
+    assert "loadPos" not in binder.group(0)
+    # The capsule names it plainly, in front of the talk's own title.
+    assert '"Primer — " + title' in html
 
 
 def test_capsule_visibility_predicate_under_node(tmp_path):

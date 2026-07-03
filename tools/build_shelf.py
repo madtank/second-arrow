@@ -2918,13 +2918,16 @@ LAYOUT_SCRIPT = """<script>
     }).catch(function () { /* static shelf: the server remembers next time */ });
   }
 
-  function pauseOthers(slug) {
+  function pauseOthers(slug, keep) {
     // One voice at a time: whoever starts, everyone else goes quiet.
-    document.querySelectorAll("audio.talk-audio").forEach(function (audio) {
-      if (audio.getAttribute("data-slug") !== slug && !audio.paused) {
-        audio.pause(); // position is saved by the resume feature
-      }
-    });
+    // Exempt by ELEMENT, not slug — a primer shares its talk's slug,
+    // and each must be able to silence the other.
+    document.querySelectorAll("audio.talk-audio, audio.primer-audio")
+      .forEach(function (audio) {
+        if (audio !== keep && !audio.paused) {
+          audio.pause(); // position is saved by the resume feature
+        }
+      });
     Object.keys(ytFrames).forEach(function (other) {
       if (other !== slug) ytCommand(other, "pauseVideo");
     });
@@ -2932,10 +2935,14 @@ LAYOUT_SCRIPT = """<script>
 
   function setNowPlaying(slug, kind) {
     var heading = document.querySelector("#talk-" + slug + " h2");
+    var title = heading ? heading.textContent : slug;
+    // The primer speaks in the talk's room — same slug, its own voice,
+    // named plainly on the handle.
+    if (kind === "primer") title = "Primer — " + title;
     nowPlaying = {
       slug: slug,
       kind: kind,
-      title: heading ? heading.textContent : slug,
+      title: title,
       time: 0,
       playing: true,
       ytInfo: false,
@@ -3060,13 +3067,21 @@ LAYOUT_SCRIPT = """<script>
     return null;
   };
 
+  // The element the capsule is driving right now: the talk's own player
+  // or its primer's — null for YouTube (that goes over the wire).
+  function playbackTarget() {
+    if (!nowPlaying || nowPlaying.kind === "yt") return null;
+    var cls = nowPlaying.kind === "primer" ? "primer-audio" : "talk-audio";
+    return document.querySelector(
+      "audio." + cls + '[data-slug="' + nowPlaying.slug + '"]');
+  }
+
   // ONE playback switch — the capsule button and the guide's pause/play
   // cues both use it.
   function setPlayback(playing) {
     if (!nowPlaying) return false;
-    if (nowPlaying.kind === "audio") {
-      var audio = document.querySelector(
-        'audio.talk-audio[data-slug="' + nowPlaying.slug + '"]');
+    if (nowPlaying.kind !== "yt") {
+      var audio = playbackTarget();
       if (!audio) return false;
       if (playing) audio.play(); else audio.pause();
       return true;
@@ -3083,9 +3098,8 @@ LAYOUT_SCRIPT = """<script>
 
   npStop.addEventListener("click", function () {
     if (!nowPlaying) return;
-    if (nowPlaying.kind === "audio") {
-      var audio = document.querySelector(
-        'audio.talk-audio[data-slug="' + nowPlaying.slug + '"]');
+    if (nowPlaying.kind !== "yt") {
+      var audio = playbackTarget();
       if (audio) audio.pause();
     } else {
       // Pause, never reload or destroy the iframe — resume keeps the place.
@@ -3128,9 +3142,15 @@ LAYOUT_SCRIPT = """<script>
       var saved = loadPos(slug);
       if (saved > 0 && saved < audio.duration - 15) audio.currentTime = saved;
     });
+    // "The handle is mine": same slug is not enough — the talk's primer
+    // shares it, so the kind must match too.
+    function mine() {
+      return nowPlaying && nowPlaying.slug === slug
+        && nowPlaying.kind === "audio";
+    }
     audio.addEventListener("timeupdate", function () {
       highlightSegment(slug, audio.currentTime);
-      if (nowPlaying && nowPlaying.slug === slug) {
+      if (mine()) {
         nowPlaying.time = audio.currentTime;
         updateCapsule();
       }
@@ -3140,25 +3160,61 @@ LAYOUT_SCRIPT = """<script>
       savePos(slug, audio.currentTime, audio.duration);
     });
     audio.addEventListener("play", function () {
-      pauseOthers(slug);
-      if (!nowPlaying || nowPlaying.slug !== slug) setNowPlaying(slug, "audio");
+      pauseOthers(slug, audio);
+      if (!mine()) setNowPlaying(slug, "audio");
       nowPlaying.playing = true;
       nowPlaying.time = audio.currentTime;
       updateCapsule();
     });
     audio.addEventListener("pause", function () {
-      if (nowPlaying && nowPlaying.slug === slug) {
+      if (mine()) {
         nowPlaying.playing = false; // paused midway: the handle stays
         updateCapsule();
       }
     });
     audio.addEventListener("ended", function () {
       reportListened(slug); // it played to the end
-      if (nowPlaying && nowPlaying.slug === slug) {
+      if (mine()) {
         nowPlaying = null;
         updateCapsule();
         keepPlayingViewAlive();
       }
+    });
+  }
+
+  // --- primer audio: the capsule carries it, nothing records it ----------
+  // A primer is an invitation, not a listen: no resume position, no
+  // completion report — but one voice and one visible handle apply in
+  // full, so wandering off never orphans the guide's spoken primer.
+  function bindPrimer(audio) {
+    var slug = audio.getAttribute("data-slug");
+    function mine() {
+      return nowPlaying && nowPlaying.slug === slug
+        && nowPlaying.kind === "primer";
+    }
+    audio.addEventListener("play", function () {
+      pauseOthers(null, audio); // even its own talk goes quiet
+      if (!mine()) setNowPlaying(slug, "primer");
+      nowPlaying.playing = true;
+      nowPlaying.time = audio.currentTime;
+      updateCapsule();
+    });
+    audio.addEventListener("timeupdate", function () {
+      if (!mine()) return;
+      nowPlaying.time = audio.currentTime;
+      updateCapsule();
+    });
+    audio.addEventListener("pause", function () {
+      if (!mine()) return;
+      nowPlaying.playing = false; // paused midway: the handle stays
+      updateCapsule();
+    });
+    audio.addEventListener("ended", function () {
+      if (!mine()) return;
+      nowPlaying = null; // finished: the handle steps away
+      updateCapsule();
+      keepPlayingViewAlive();
+      updateRoomLocks();
     });
   }
 
@@ -3267,6 +3323,7 @@ LAYOUT_SCRIPT = """<script>
       button.addEventListener("click", function () { setGuideLock(!guideLock); });
     });
     root.querySelectorAll("audio.talk-audio").forEach(bindAudio);
+    root.querySelectorAll("audio.primer-audio").forEach(bindPrimer);
     root.querySelectorAll(".yt-embed").forEach(function (holder) {
       var button = holder.querySelector(".yt-play");
       if (!button) return;
@@ -3578,8 +3635,11 @@ def render_card(
         parts.append(f'<p class="reach"><em>{escape(reach)}</em></p>')
     if files["primer_mp3"]:
         parts.append('<p class="player-label">Primer — 1 min, spoken by the guide</p>')
+        # A real voice on the page: tagged so the now-playing system can
+        # carry it across rooms (bindPrimer) — but never as a listen.
         parts.append(
-            f'<audio controls preload="none" '
+            f'<audio controls preload="none" class="primer-audio" '
+            f'data-slug="{escape(slug)}" '
             f'src="{escape(slug)}/primer.mp3{stamp_query(files, "primer.mp3")}">'
             "</audio>"
         )

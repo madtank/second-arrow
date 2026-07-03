@@ -19,6 +19,7 @@ import pytest
 pytestmark = pytest.mark.e2e
 
 AUDIO_JS = 'document.querySelector(\'audio.talk-audio[data-slug="quiet-mind"]\')'
+PRIMER_JS = 'document.querySelector(\'audio.primer-audio[data-slug="quiet-mind"]\')'
 
 
 def _get(base: str, path: str):
@@ -431,6 +432,57 @@ def test_soft_refresh_swaps_new_room_content_under_playing_audio(page, shelf_ser
     assert page.evaluate("window.__e2e_marker") == 1
     assert page.evaluate("window.saPlayingSlug()") == "quiet-mind"
     assert page.evaluate(f"!{AUDIO_JS}.paused")
+
+
+# --- the primer rides the now-playing capsule --------------------------------
+# (These run BEFORE the restamp tests below, which deliberately leave
+# primer.mp3 undecodable.)
+
+
+def test_primer_keeps_the_capsule_across_rooms(page, shelf_server):
+    # The user listens primer-first: wandering off must not orphan the
+    # primer's voice — the capsule is its handle, exactly like a talk's.
+    _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+    page.evaluate(f"{PRIMER_JS}.play()")
+    page.wait_for_function("() => window.saIsPlaying && window.saIsPlaying()")
+    # In its own room (the talk's room) the handle would be redundant.
+    assert page.is_hidden("#now-playing")
+    page.evaluate("location.hash = '#home'")
+    page.wait_for_selector("#now-playing", state="visible")
+    assert page.inner_text("#np-title") == "Primer — Quiet Mind & <Friends>"
+    # Time ticks in the capsule as the primer speaks...
+    page.wait_for_function(
+        "() => document.getElementById('np-time').textContent !== '0:00'"
+    )
+    # ...its pause button really pauses the primer — and paused midway,
+    # the handle stays (the way back)...
+    page.click("#np-play")
+    page.wait_for_function(f"() => {PRIMER_JS}.paused")
+    assert page.is_visible("#now-playing")
+    # ...and play picks it back up.
+    page.click("#np-play")
+    page.wait_for_function(f"() => !{PRIMER_JS}.paused")
+
+
+def test_talk_and_primer_take_turns_speaking(page, shelf_server):
+    # One voice at a time, in BOTH directions: the talk quiets the
+    # primer, the primer quiets the talk.
+    _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+    page.evaluate(f"{PRIMER_JS}.play()")
+    page.wait_for_function(f"() => !{PRIMER_JS}.paused")
+    page.evaluate(f"{AUDIO_JS}.play()")
+    page.wait_for_function(f"() => {PRIMER_JS}.paused && !{AUDIO_JS}.paused")
+    # The handle now names the talk itself, not the primer.
+    page.evaluate("location.hash = '#home'")
+    page.wait_for_selector("#now-playing", state="visible")
+    assert page.inner_text("#np-title") == "Quiet Mind & <Friends>"
+    # The primer takes the voice back.
+    page.evaluate(f"{PRIMER_JS}.play()")
+    page.wait_for_function(f"() => {AUDIO_JS}.paused && !{PRIMER_JS}.paused")
+    page.wait_for_function(
+        "() => document.getElementById('np-title')"
+        ".textContent.indexOf('Primer — ') === 0"
+    )
 
 
 def _newer_than_the_shelf(shelf_server) -> float:
@@ -891,12 +943,15 @@ def test_something_new_door_opens_the_discover_room(page, shelf_server):
     room = page.inner_text("#talk-something-new")
     assert "the shelf is not the world — from here we go looking." in room
     assert "searching is free — nothing downloads until you pick one." in room
-    # Unheard fetched talks wait right here, as links into their rooms.
-    # (bare-yt: the one talk no other test ever hears or studies — the
-    # session-shared server means the rest of the list shifts underfoot.)
+    # Unheard fetched talks wait right here, as links into their rooms —
+    # whichever talks the session has left unheard: derive, don't pin.
     assert "already waiting on the shelf:" in room
-    page.click('#talk-something-new .discover-waiting a[href="#talk/bare-yt"]')
-    page.wait_for_selector("#talk-bare-yt.active")
+    waiting = page.locator("#talk-something-new .discover-waiting a")
+    assert waiting.count() > 0
+    first_href = waiting.first.get_attribute("href")
+    assert first_href and first_href.startswith("#talk/")
+    waiting.first.click()
+    page.wait_for_selector(f"#talk-{first_href.split('/', 1)[1]}.active")
 
 
 def test_find_new_door_sends_the_search_ask(page, shelf_server):
