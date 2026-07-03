@@ -185,7 +185,9 @@ def test_find_talks_builds_the_argv_and_passes_output_through(monkeypatch):
     monkeypatch.setattr(mod, "run_tool", _record_runner(ran))
     result = mod.TOOL_HANDLERS["find_talks"]("thanissaro anger", limit=3)
     script = MODULE_PATH.parent / "find_talks.py"
-    assert ran == [["uv", "run", str(script), "thanissaro anger", "--limit", "3"]]
+    # --limit precedes "--": argparse treats everything after "--" as
+    # positional, so the guard must come last, just before the query.
+    assert ran == [["uv", "run", str(script), "--limit", "3", "--", "thanissaro anger"]]
     assert "succeeded" in result
 
 

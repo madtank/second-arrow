@@ -296,13 +296,19 @@ def search_history(query: str) -> str:
 def find_talks(query: str, limit: int = 5) -> str:
     """Search for candidate talks (read-only). Present candidates in
     conversation; downloads stay explicit via fetch_talk."""
+    # Absolute script path: run_tool runs with cwd=repo_root(), which
+    # SECOND_ARROW_ROOT can point somewhere else entirely — anchoring to
+    # this file keeps the tool findable regardless.
+    # "--limit" before "--": argparse treats everything after "--" as
+    # positional, so the guard sits last, protecting a leading-dash query.
     argv = [
         "uv",
         "run",
         str(Path(__file__).resolve().parent / "find_talks.py"),
-        query,
         "--limit",
         str(limit),
+        "--",
+        query,
     ]
     ok, summary = run_tool(argv)
     return summary
