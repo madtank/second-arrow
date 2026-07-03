@@ -929,6 +929,12 @@ def test_find_new_door_sends_the_search_ask(page, shelf_server):
         page.get_attribute("#chat-input", "placeholder")
         == "what are you looking for? your own words…"
     )
+    # The re-label is a loan: leaving the room gives the words back.
+    page.evaluate("location.hash = '#home'")
+    page.wait_for_function(
+        "() => document.getElementById('chat-input').placeholder"
+        " === 'Where are you right now?'"
+    )
 
 
 def test_skip_sets_aside_instantly_and_the_guide_follows_up(page, shelf_server):

@@ -811,6 +811,10 @@ STYLE = """
   /* The stub room's decision copy and its quieter second door. */
   .stub-copy { color: #6d5f4b; margin: 0.8rem 0 0.2rem; }
   .stub-action { margin: 0.7rem 0 0.2rem; }
+  /* The discover room's already-waiting list keeps the card's rhythm. */
+  .discover-waiting { margin: 0.2rem 0 0; padding-left: 1.2rem;
+                      color: #6d5f4b; }
+  .discover-waiting li { margin: 0.15rem 0; }
   .skip-stub { font: inherit; font-size: 0.92rem; color: #7a6a50;
                background: none; border: 1px dashed #d8cbb4;
                border-radius: 999px; padding: 0.45rem 1.1rem;
@@ -1509,6 +1513,7 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
   });
   // The something-new doors: searching is free, downloading stays a
   // separate explicit pick — the ask says so out loud.
+  var restingPlaceholder = null; // the input's own words, while on loan
   document.addEventListener("click", function (event) {
     if (event.target.closest(".find-new")) {
       sendOrQueue("Find me something new — search beyond the curriculum, "
@@ -1523,10 +1528,20 @@ CHAT_PANEL = """<section class="chat-docked" id="guide-chat" hidden>
     if (describe) {
       var input = document.getElementById("chat-input");
       if (input) {
+        if (restingPlaceholder === null) restingPlaceholder = input.placeholder;
         input.placeholder = "what are you looking for? your own words…";
         input.focus({ preventScroll: true }); // the click IS the intent
       }
     }
+  });
+  // The describe door's re-label is a loan, not a rename: leaving the
+  // discover room hands the input's own placeholder back.
+  window.addEventListener("hashchange", function () {
+    if (restingPlaceholder === null) return;
+    if (location.hash === "#talk/something-new") return;
+    var input = document.getElementById("chat-input");
+    if (input) input.placeholder = restingPlaceholder;
+    restingPlaceholder = null;
   });
   // The optimistic sidebar flip for done (✓) and reopen (→): the entry
   // changes immediately; returns an undo for the failure path. The soft
@@ -4153,8 +4168,6 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
 <h2 id="talks-heading">Talks</h2>
 {render_nav(talks, states, stubs)}
 <footer>
-Private — generated from your library.
-Rebuild: <code>uv run tools/build_shelf.py</code><br>
 <a class="side-settings" href="#settings">settings</a>
 </footer>
 </nav>

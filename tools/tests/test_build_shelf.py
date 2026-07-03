@@ -2024,6 +2024,15 @@ def test_settings_room_is_routable_and_linked(tmp_path):
     assert "the room's machinery → settings" in home
 
 
+def test_sidebar_footer_says_one_thing(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The footer is just the settings door — no rebuild lecture.
+    footer = re.search(r"<footer>.*?</footer>", html, re.S).group(0)
+    assert '<a class="side-settings" href="#settings">settings</a>' in footer
+    assert "generated from your library" not in html
+    assert "Rebuild:" not in html
+
+
 def test_brain_and_route_picks_persist_and_fall_back_out_loud(tmp_path):
     html = build_shelf.render_shelf(_make_library(tmp_path), {})
     # Sticky selection: restored on load, written only on the user's own
@@ -2666,6 +2675,22 @@ def test_shelf_carries_one_discover_room_and_its_doors(tmp_path):
     # The describe door hands the words back to the user, in the input.
     assert '".describe-new"' in html
     assert "what are you looking for? your own words…" in html
+
+
+def test_describe_door_borrows_the_placeholder_and_gives_it_back(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The re-label is a loan, not a rename: leaving the discover room
+    # hands the input's original placeholder back on the hash change.
+    assert "var restingPlaceholder = null;" in html
+    assert 'location.hash === "#talk/something-new"' in html
+    assert "input.placeholder = restingPlaceholder;" in html
+
+
+def test_discover_waiting_list_sits_in_the_card_rhythm(tmp_path):
+    html = build_shelf.render_shelf(_make_library(tmp_path), {})
+    # The waiting list keeps the stub card's spacing, not the browser's.
+    assert re.search(r"\.discover-waiting \{[^}]*margin: 0\.2rem 0 0", html)
+    assert re.search(r"\.discover-waiting \{[^}]*padding-left: 1\.2rem", html)
 
 
 # --- reading rooms: transcript.md, no audio, no timestamps ----------------------
