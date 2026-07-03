@@ -1,9 +1,9 @@
 """Tests for tools/mcp_second_arrow.py — the guide's entire world for Hermes.
 
 Only the pure/offline parts are tested here: the tool table (exactly the
-expected set — three actions, six reads, three scoped writes), handler
-behavior with a stubbed runner, path guards, pagination, and the write
-allowlist. The action wall itself is serve_shelf.validate_tool_call,
+expected set — three actions, six reads, one discovery search, three
+scoped writes), handler behavior with a stubbed runner, path guards,
+pagination, and the write allowlist. The action wall itself is serve_shelf.validate_tool_call,
 tested in test_serve_shelf.py — these tests only assert that every action
 handler routes through it (same argv, same rejections). The MCP wire
 protocol is exercised by the standalone smoke script, not here (the `mcp`
@@ -40,6 +40,8 @@ EXPECTED_TOOLS = {
     # reads (pinned inside the study space)
     "get_path", "get_library_index", "read_transcript", "read_notes",
     "get_curriculum", "search_history",
+    # discovery (read-only search; downloads stay explicit via fetch_talk)
+    "find_talks",
     # scoped writes (the claude chat brain's allowlist, mirrored)
     "update_path", "update_notes", "append_journal",
     # interactive pages (sandboxed + CSP-walled on the shelf)
@@ -67,7 +69,7 @@ def space(tmp_path, monkeypatch):
 
 def test_the_tool_table_is_exactly_the_expected_set():
     assert set(mod.TOOL_HANDLERS) == EXPECTED_TOOLS
-    assert len(mod.TOOL_HANDLERS) == len(EXPECTED_TOOLS) == 14
+    assert len(mod.TOOL_HANDLERS) == len(EXPECTED_TOOLS) == 15
     # The journal is write-only by design: hosted models see what tools
     # return, so no tool reads journal/ back.
     assert not any("journal" in name and name != "append_journal"
@@ -106,6 +108,11 @@ def test_handler_signatures_carry_the_expected_parameters():
     assert all(
         p.default is inspect.Parameter.empty for p in speak.parameters.values()
     )
+
+    find = inspect.signature(mod.TOOL_HANDLERS["find_talks"])
+    assert list(find.parameters) == ["query", "limit"]
+    assert find.parameters["query"].default is inspect.Parameter.empty  # required
+    assert find.parameters["limit"].default == 5
 
 
 # --- the wall stays serve_shelf's: same argv, same rejections --------------
@@ -171,6 +178,25 @@ def test_validation_errors_come_back_as_messages_not_exceptions(monkeypatch):
     assert result.startswith("Tool call rejected:")
     result = mod.TOOL_HANDLERS["speak"](text="hi", out_name="###")
     assert result.startswith("Tool call rejected:")
+
+
+def test_find_talks_builds_the_argv_and_passes_output_through(monkeypatch):
+    ran = []
+    monkeypatch.setattr(mod, "run_tool", _record_runner(ran))
+    result = mod.TOOL_HANDLERS["find_talks"]("thanissaro anger", limit=3)
+    script = MODULE_PATH.parent / "find_talks.py"
+    assert ran == [["uv", "run", str(script), "thanissaro anger", "--limit", "3"]]
+    assert "succeeded" in result
+
+
+def test_find_talks_failure_comes_back_as_the_error_string(monkeypatch):
+    monkeypatch.setattr(
+        mod,
+        "run_tool",
+        lambda argv: (False, "find_talks.py failed (exit 1):\nsearch failed: boom"),
+    )
+    result = mod.TOOL_HANDLERS["find_talks"]("anything")
+    assert "failed" in result and "boom" in result
 
 
 def test_runner_failure_is_reported_as_text(monkeypatch):

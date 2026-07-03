@@ -22,11 +22,26 @@ def _ydl():
     return yt_dlp.YoutubeDL
 
 
+def _download_error():
+    """yt-dlp's DownloadError class, imported lazily so tests can monkeypatch."""
+    import yt_dlp
+
+    return yt_dlp.utils.DownloadError
+
+
 def search(query: str, limit: int = 5) -> list[dict]:
     """Flat-search YouTube; return rows of title/channel/duration/url."""
-    opts = {"extract_flat": True, "skip_download": True, "quiet": True}
-    with _ydl()(opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+    opts = {
+        "extract_flat": True,
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    try:
+        with _ydl()(opts) as ydl:
+            info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+    except _download_error() as error:
+        raise SystemExit(f"search failed: {error}")
     rows = []
     for entry in (info or {}).get("entries") or []:
         if not entry:

@@ -15,6 +15,9 @@ Reads (pinned inside the study space; "not found" messages, not exceptions):
     read_transcript (paginated ~8k chars per call), read_notes,
     get_curriculum (curriculum/*.md concatenated),
     search_history (past conversations, via serve_shelf.search_sessions)
+Discovery (read-only search via tools/find_talks.py; nothing downloaded):
+    find_talks (candidate talks as JSON lines; fetch_talk stays the only
+    way anything enters the library)
 Scoped writes (the claude chat brain's allowlist, mirrored; ~64KB cap;
 every result says what changed):
     update_path (STUDY.md, wholesale), update_notes (library/<slug>/notes.md),
@@ -290,6 +293,21 @@ def search_history(query: str) -> str:
     return "\n".join(lines)
 
 
+def find_talks(query: str, limit: int = 5) -> str:
+    """Search for candidate talks (read-only). Present candidates in
+    conversation; downloads stay explicit via fetch_talk."""
+    argv = [
+        "uv",
+        "run",
+        str(Path(__file__).resolve().parent / "find_talks.py"),
+        query,
+        "--limit",
+        str(limit),
+    ]
+    ok, summary = run_tool(argv)
+    return summary
+
+
 def _search_fallback(query: str, sessions_dir: Path, limit: int = 8) -> list[dict]:
     """Minimal keyword search over sessions/*.jsonl — only used if the
     working-tree serve_shelf ever loses search_sessions."""
@@ -415,9 +433,9 @@ def append_journal(content: str) -> str:
     return f"Created journal/{today}.md with the entry ({len(content)} chars)."
 
 
-# The whole world: three actions, six reads, three scoped writes, one
-# artifact write, one session-freshness write — fourteen tools. No journal
-# read, no terminal, no general file access — by design.
+# The whole world: three actions, six reads, one discovery search, three
+# scoped writes, one artifact write, one session-freshness write — fifteen
+# tools. No journal read, no terminal, no general file access — by design.
 TOOL_HANDLERS = {
     "fetch_talk": fetch_talk,
     "rebuild_shelf": rebuild_shelf,
@@ -428,6 +446,7 @@ TOOL_HANDLERS = {
     "read_notes": read_notes,
     "get_curriculum": get_curriculum,
     "search_history": search_history,
+    "find_talks": find_talks,
     "update_path": update_path,
     "update_notes": update_notes,
     "append_journal": append_journal,
@@ -446,7 +465,8 @@ def build_server():
         instructions=(
             "The Second Arrow study space: read the study path, the "
             "library index, transcripts, notes, and curriculum; search "
-            "past conversations; ingest a talk the user asked for; rebuild "
+            "past conversations; search for candidate talks (read-only); "
+            "ingest a talk the user asked for; rebuild "
             "the shelf page; record a short spoken reflection; and keep "
             "STUDY.md, per-talk notes, and the journal current. Use a tool "
             "only when the conversation asks for the thing it does."
