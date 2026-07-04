@@ -585,6 +585,29 @@ def artifact_storage_unguarded(text: str) -> bool:
     return not guarded
 
 
+_ARTIFACT_MEDIA_REF = re.compile(
+    r"""["']((?:\.\./)+[\w./-]+\.(?:mp3|wav|m4a|ogg|mp4|webm|jpe?g|png|gif|webp|svg))"""
+    r"""(?:\?[^"']*)?["']""",
+    re.I,
+)
+
+
+def artifact_media_offpath(text: str) -> bool:
+    """Heuristic lint: relative media that can't resolve in the inline view.
+
+    The iframe's document lives at /artifacts/<slug>/<name>, the full
+    page at /<slug>/artifacts/<name>; only ../../<slug>/<file> resolves
+    under both (and over file://). A one-level '../clip.mp3' plays on
+    the full page and silently 404s inline — the reader sees a dead
+    0:00 player. Grep-level: flag, never block (the write gate in
+    serve_shelf is the enforcer; this catches artifacts that predate it).
+    """
+    return any(
+        match.group(1).count("../") != 2
+        for match in _ARTIFACT_MEDIA_REF.finditer(text)
+    )
+
+
 def is_reading(files: dict, talk: dict | None = None) -> bool:
     """The room-shape verdict: is this entry a reading (a text source)?
 
@@ -4304,6 +4327,18 @@ def render_shelf(library: Path, reach: dict[str, str] | None = None) -> str:
                     warn = (
                         '\n<span class="artifact-warn">⚠ may not run inline '
                         "— unguarded storage access</span>"
+                    )
+                if artifact_media_offpath(body):
+                    print(
+                        f"[build_shelf] warning: {slug}/artifacts/{name} "
+                        "references media off the ../../<slug>/ shape — "
+                        "it will 404 in the inline view (see CLAUDE.md's "
+                        "artifact media contract)",
+                        file=sys.stderr,
+                    )
+                    warn += (
+                        '\n<span class="artifact-warn">⚠ media may not load '
+                        "inline — off-shape path</span>"
                     )
                 item_lines.append(
                     f'<li class="artifact-item" data-slug="{slug}" data-name="{escape(name)}"'

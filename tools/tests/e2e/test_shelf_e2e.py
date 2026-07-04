@@ -636,14 +636,20 @@ def test_transcript_opens_to_moments_first(page, shelf_server):
 
 
 def test_artifact_iframe_is_sandboxed_behind_the_csp_wall(page, shelf_server):
-    # Both artifact routes serve with the no-network CSP + nosniff.
+    # Both artifact routes serve with the no-network CSP + nosniff. The
+    # wall names the serving origin (never bare 'self' alone): inside
+    # the sandbox the document's origin is null, where 'self' matches
+    # nothing — the talk's own audio needs the named origin to load.
     for route in (
         "/artifacts/quiet-mind/breath-timer.html",
         "/quiet-mind/artifacts/breath-timer.html",
     ):
         status, headers, _ = _get(shelf_server.base, route)
         assert status == 200
-        assert headers["Content-Security-Policy"] == shelf_server.module.ARTIFACT_CSP
+        assert headers["Content-Security-Policy"] == shelf_server.module.artifact_csp(
+            shelf_server.base
+        )
+        assert f"media-src 'self' {shelf_server.base}" in headers["Content-Security-Policy"]
         assert headers["X-Content-Type-Options"] == "nosniff"
     # The served shelf mounts artifacts as allow-scripts-only iframes —
     # never the same-origin grant.
@@ -669,6 +675,43 @@ def test_guarded_storage_artifact_renders_inline_under_the_sandbox(page, shelf_s
     expect(page.frame_locator(frame_sel).locator("#state")).to_have_text(
         "guarded: memory only"
     )
+
+
+def test_artifact_audio_plays_inside_the_sandboxed_iframe(page, shelf_server):
+    # The bug this locks out (2026-07-04): contract-shaped audio
+    # (../../<slug>/<file>) played on the full page but sat dead at 0:00
+    # inside the inline view — the sandboxed document's null origin made
+    # CSP 'self' match nothing. The wall now NAMES the serving origin,
+    # so the talk's own media resolves inside the sandbox too.
+    art = shelf_server.library / "quiet-mind" / "artifacts" / "voice-door.html"
+    art.write_text(
+        "<!DOCTYPE html><html><body>"
+        '<audio id="clip" controls preload="metadata" '
+        'src="../../quiet-mind/audio.wav"></audio></body></html>'
+    )
+    try:
+        shelf_server.rebuild_shelf()
+        _open_shelf(page, shelf_server.base, "#talk/quiet-mind")
+        frame_sel = '.artifact-item[data-name="voice-door.html"] iframe.artifact-frame'
+        page.wait_for_selector(frame_sel, state="attached")
+        page.locator(frame_sel).scroll_into_view_if_needed()
+        clip = page.frame_locator(frame_sel).locator("#clip")
+        # Metadata arriving is the proof the media request survived the
+        # CSP: a blocked load never leaves readyState 0 / duration NaN.
+        state = {}
+        for _ in range(100):
+            state = clip.evaluate(
+                "a => ({ready: a.readyState, dur: a.duration || 0,"
+                " err: a.error && a.error.code})"
+            )
+            if state["ready"] >= 1 and state["dur"] > 0:
+                break
+            assert not state["err"], f"media error inside the sandbox: {state}"
+            page.wait_for_timeout(100)
+        assert state["ready"] >= 1 and state["dur"] > 0, state
+    finally:
+        art.unlink()
+        shelf_server.rebuild_shelf()
 
 
 # --- done for now: the manual heard door and the path's primary action -------

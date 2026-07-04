@@ -226,11 +226,26 @@ ROLLOVER_IDLE = 6 * 3600  # seconds idle before an episode quietly closes
 ARTIFACT_MAX_BYTES = 256 * 1024  # one self-contained page, kept light
 TALK_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # lowercase talk slugs
 ARTIFACT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*\.html")  # slug chars + .html
-ARTIFACT_CSP = (
-    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-    "img-src 'self' data:; media-src 'self'; frame-ancestors 'self'; "
-    "form-action 'none'; base-uri 'none'"
-)
+def artifact_csp(origin: str | None) -> str:
+    """The no-network wall, with our own origin NAMED beside 'self'.
+
+    The artifact iframe is sandboxed without allow-same-origin, so its
+    document runs in a null origin — and CSP 'self' matches nothing
+    there. That silently blocked the talk's own audio inside embedded
+    tools (the full page played; the inline view didn't). Naming the
+    serving origin explicitly keeps the wall exactly as tight — only
+    our host — while letting relative media and images resolve inside
+    the sandbox. 'self' stays for the un-sandboxed full-page render.
+    """
+    own = f" {origin}" if origin else ""
+    return (
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+        f"img-src 'self'{own} data:; media-src 'self'{own}; frame-ancestors 'self'; "
+        "form-action 'none'; base-uri 'none'"
+    )
+
+
+ARTIFACT_CSP = artifact_csp(None)
 LISTENING_PATH = LIBRARY / ".listening.jsonl"  # private, gitignored
 LISTEN_DEDUPE_SECONDS = 3600  # refresh loops / double events fold into one
 
@@ -842,6 +857,65 @@ def artifact_path(library: Path, slug: str, name: str) -> Path:
     return library / slug / "artifacts" / name
 
 
+_ARTIFACT_MEDIA_RE = re.compile(
+    r"""["']((?:\.\./)+[\w./-]+\.(?:mp3|wav|m4a|ogg|mp4|webm|jpe?g|png|gif|webp|svg))"""
+    r"""(?:\?[^"']*)?["']""",
+    re.I,
+)
+_ARTIFACT_HTTP_SRC_RE = re.compile(r"""src=["']https?://""", re.I)
+_ARTIFACT_STAMP_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
+
+
+def lint_artifact_contracts(html: str, slug: str, library: Path) -> list[str]:
+    """The authoring contract, enforced at the gate — teaching errors.
+
+    Born 2026-07-04, after two guide-written listening rooms shipped
+    broken in ways only a reader's click reveals: media on '../clip.mp3'
+    paths (resolve full-page, 404 inside the iframe's /artifacts/<slug>/
+    route) and moment lists whose timestamps seek nothing. The pattern
+    is deterministic, so the gate checks it: (1) relative media must use
+    ../../<slug>/<file> — the one shape that resolves in the iframe
+    route, the full page, and file://; (2) every referenced file must
+    exist; (3) a page showing 3+ distinct mm:ss stamps must carry the
+    second-arrow:seek bridge — decorative timestamps are a broken
+    promise. External src= URLs are refused outright (the no-network
+    CSP would eat them silently).
+    """
+    problems = []
+    if _ARTIFACT_HTTP_SRC_RE.search(html):
+        problems.append(
+            "external src= URL — the sandbox CSP blocks all network loads; "
+            "inline the asset, or serve media from the talk folder via "
+            f"../../{slug}/<file>"
+        )
+    for match in _ARTIFACT_MEDIA_RE.finditer(html):
+        ref = match.group(1)
+        shaped = re.fullmatch(r"\.\./\.\./([a-z0-9][a-z0-9-]*)/([\w./-]+)", ref)
+        if not shaped or ref.count("../") != 2:
+            problems.append(
+                f"media path {ref!r} only resolves on the full page — use "
+                f"../../{slug}/<file>, the one shape that works in the "
+                "inline view, the full page, and file://"
+            )
+            continue
+        target = library / shaped.group(1) / shaped.group(2)
+        if not target.is_file():
+            problems.append(
+                f"media path {ref!r} points at a file that does not exist — "
+                f"speak or save it into library/{shaped.group(1)}/ first"
+            )
+    if len(set(_ARTIFACT_STAMP_RE.findall(html))) >= 3 and (
+        "second-arrow:seek" not in html
+    ):
+        problems.append(
+            "this page shows timestamps but never seeks — wire each one to "
+            'parent.postMessage({type: "second-arrow:seek", start: '
+            "<seconds>}, \"*\") and degrade to plain mm:ss text when no "
+            "parent is listening (CLAUDE.md's anchored-listening contract)"
+        )
+    return problems
+
+
 def write_artifact(library: Path, slug: str, name: str, html) -> Path:
     """Validate and write one artifact; the single write path for the
     ollama tool loop and the MCP server (the claude chat brain writes
@@ -849,7 +923,9 @@ def write_artifact(library: Path, slug: str, name: str, html) -> Path:
 
     The page must be self-contained: the CSP wall on the render side
     means anything external simply won't load, so the cap keeps a
-    single inline-everything page honest.
+    single inline-everything page honest. lint_artifact_contracts is
+    the pattern-keeper: a page that would break under the reader's
+    click is refused HERE, with the fix in the error text.
     """
     path = artifact_path(library, slug, name)
     if not isinstance(html, str) or not html.strip():
@@ -859,6 +935,12 @@ def write_artifact(library: Path, slug: str, name: str, html) -> Path:
         raise ValueError(
             f"html is {size} bytes — the cap is {ARTIFACT_MAX_BYTES} bytes; "
             "keep it one light self-contained page"
+        )
+    problems = lint_artifact_contracts(html, slug, library)
+    if problems:
+        raise ValueError(
+            "the artifact contract gate refused this page:\n- "
+            + "\n- ".join(problems)
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(html, encoding="utf-8")
@@ -3384,7 +3466,7 @@ def stream_hermes(
 
 
 def create_app(brain: str, ollama_model: str):
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
     from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
 
@@ -3562,32 +3644,40 @@ def create_app(brain: str, ollama_model: str):
         except ValueError as error:
             return JSONResponse({"error": str(error)}, status_code=400)
 
-    def artifact_response(slug: str, name: str):
-        """One artifact behind the CSP wall; a clean 404 on any miss."""
+    def artifact_response(request: Request, slug: str, name: str):
+        """One artifact behind the CSP wall; a clean 404 on any miss.
+
+        The CSP names the request's own origin (scheme://host:port as the
+        browser sent it) so relative media resolves inside the sandboxed
+        iframe, whose null origin makes 'self' match nothing.
+        """
         try:
             path = artifact_path(LIBRARY, slug, name)
         except ValueError:
             return JSONResponse({"error": "no such artifact"}, status_code=404)
         if not path.is_file():
             return JSONResponse({"error": "no such artifact"}, status_code=404)
-        return FileResponse(
-            path, media_type="text/html", headers=dict(ARTIFACT_HEADERS)
-        )
+        headers = dict(ARTIFACT_HEADERS)
+        if request.url.netloc:
+            headers["Content-Security-Policy"] = artifact_csp(
+                f"{request.url.scheme}://{request.url.netloc}"
+            )
+        return FileResponse(path, media_type="text/html", headers=headers)
 
     # HEAD is registered explicitly: FastAPI's @app.get answers GET only,
     # and an unmatched HEAD would fall through to the CSP-less static
     # mount (verified live) — the walls must hold for every method.
     @app.api_route("/artifacts/{slug}/{name}", methods=["GET", "HEAD"])
-    def artifact(slug: str, name: str):
+    def artifact(request: Request, slug: str, name: str):
         # The route the sandboxed iframes point at (wall 2: ARTIFACT_CSP).
-        return artifact_response(slug, name)
+        return artifact_response(request, slug, name)
 
     @app.api_route("/{slug}/artifacts/{name}", methods=["GET", "HEAD"])
-    def artifact_in_place(slug: str, name: str):
+    def artifact_in_place(request: Request, slug: str, name: str):
         # The file-layout twin ("open full page" links, file://-shaped
         # paths). Registered before the static mount, so these bytes are
         # NEVER served without the CSP wall.
-        return artifact_response(slug, name)
+        return artifact_response(request, slug, name)
 
     @app.post("/api/chat")
     def chat(body: dict):

@@ -1548,6 +1548,62 @@ def test_write_artifact_enforces_the_size_cap(tmp_path):
             serve_shelf.write_artifact(library, "patience", "big.html", empty)
 
 
+def test_write_artifact_rejects_offpath_media(tmp_path):
+    # The pattern, enforced at the gate (2026-07-04, after two artifacts
+    # shipped with '../clip.mp3' paths that resolve full-page but point
+    # nowhere under the iframe's /artifacts/<slug>/<name> route): media
+    # must use the one shape that resolves EVERYWHERE — ../../<slug>/<file>.
+    library = _artifact_library(tmp_path)
+    html = ('<!DOCTYPE html><html><body>'
+            '<audio src="../audio-orientation.mp3"></audio></body></html>')
+    with pytest.raises(ValueError, match=r"\.\./\.\./patience/"):
+        serve_shelf.write_artifact(library, "patience", "room.html", html)
+    # http(s) media dies behind the no-network CSP — refused with the why.
+    html = ('<!DOCTYPE html><html><body>'
+            '<audio src="https://example.org/clip.mp3"></audio></body></html>')
+    with pytest.raises(ValueError, match="CSP"):
+        serve_shelf.write_artifact(library, "patience", "room.html", html)
+
+
+def test_write_artifact_rejects_media_that_does_not_exist(tmp_path):
+    library = _artifact_library(tmp_path)
+    html = ('<!DOCTYPE html><html><body>'
+            '<audio src="../../patience/ghost.mp3"></audio></body></html>')
+    with pytest.raises(ValueError, match="ghost.mp3"):
+        serve_shelf.write_artifact(library, "patience", "room.html", html)
+
+
+def test_write_artifact_rejects_dead_timestamps(tmp_path):
+    # Three or more mm:ss stamps with no second-arrow:seek bridge is the
+    # decorative-moments smell — timestamps the reader clicks and nothing
+    # happens. The error teaches the exact contract.
+    library = _artifact_library(tmp_path)
+    stamps = "<li>0:05 one</li><li>1:15 two</li><li>2:45 three</li>"
+    html = f"<!DOCTYPE html><html><body><ul>{stamps}</ul></body></html>"
+    with pytest.raises(ValueError, match="second-arrow:seek"):
+        serve_shelf.write_artifact(library, "patience", "room.html", html)
+    # One or two stamps (a duration line, a single citation) pass freely.
+    html = "<!DOCTYPE html><html><body><p>runs 3:52</p></body></html>"
+    serve_shelf.write_artifact(library, "patience", "ok.html", html)
+
+
+def test_write_artifact_accepts_the_full_contract(tmp_path):
+    library = _artifact_library(tmp_path)
+    (library / "patience" / "clip.mp3").write_bytes(b"\x00")
+    html = (
+        '<!DOCTYPE html><html><body>'
+        '<audio src="../../patience/clip.mp3"></audio>'
+        '<button data-start="5">0:05 — opening</button>'
+        '<button data-start="75">1:15 — middle</button>'
+        '<button data-start="165">2:45 — close</button>'
+        '<script>document.querySelectorAll("[data-start]").forEach(b =>'
+        'b.onclick = () => parent.postMessage({type: "second-arrow:seek",'
+        'start: Number(b.dataset.start)}, "*"));</script></body></html>'
+    )
+    path = serve_shelf.write_artifact(library, "patience", "room.html", html)
+    assert path.is_file()
+
+
 def test_validate_tool_call_write_artifact_marker_argv():
     argv = serve_shelf.validate_tool_call(
         "write_artifact",
@@ -1583,10 +1639,28 @@ def test_artifact_csp_walls_off_the_network():
     # No form exfiltration, no <base> games; connect-src falls back to
     # default-src 'none', so fetch/XHR/WebSocket are all blocked.
     assert "form-action 'none'" in csp
+
+
+def test_artifact_csp_names_the_serving_origin():
+    # The artifact iframe is sandboxed WITHOUT allow-same-origin, so its
+    # document runs in a null origin — and CSP 'self' matches nothing
+    # there. That silently blocked the talk's own audio inside embedded
+    # tools (full page played fine). Naming the serving origin keeps the
+    # wall exactly as tight (only our host) while letting relative
+    # media/images resolve inside the sandbox.
+    csp = serve_shelf.artifact_csp("http://127.0.0.1:8765")
+    assert "media-src 'self' http://127.0.0.1:8765" in csp
+    assert "img-src 'self' http://127.0.0.1:8765 data:" in csp
+    assert "default-src 'none'" in csp
+    assert "connect-src" not in csp  # network stays walled off
     assert "base-uri 'none'" in csp
-    assert "connect-src" not in csp  # inherited 'none' — do not loosen it
+    # With no origin known, the static wall stands unchanged.
+    assert serve_shelf.artifact_csp(None) == serve_shelf.ARTIFACT_CSP
     assert serve_shelf.ARTIFACT_HEADERS["X-Content-Type-Options"] == "nosniff"
-    assert serve_shelf.ARTIFACT_HEADERS["Content-Security-Policy"] == csp
+    assert (
+        serve_shelf.ARTIFACT_HEADERS["Content-Security-Policy"]
+        == serve_shelf.ARTIFACT_CSP
+    )
     # The guide rewrites artifacts mid-conversation — never serve stale.
     assert serve_shelf.ARTIFACT_HEADERS["Cache-Control"] == "no-store"
 

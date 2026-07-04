@@ -853,6 +853,31 @@ def test_artifact_storage_lint_heuristic():
     assert not flag("")
 
 
+def test_artifact_media_offpath_heuristic():
+    flag = build_shelf.artifact_media_offpath
+    # One level up resolves full-page only — the inline view 404s.
+    assert flag('<audio src="../audio-orientation.mp3"></audio>')
+    assert flag("const clips={a:'../clip.mp3'};")
+    # Three levels is equally wrong.
+    assert flag('<img src="../../../elsewhere/pic.png">')
+    # The contract shape passes, with or without a cache stamp.
+    assert not flag('<audio src="../../patience/clip.mp3"></audio>')
+    assert not flag('<audio src="../../patience/clip.mp3?v=123"></audio>')
+    # No media at all: nothing to flag.
+    assert not flag("<p>runs 3:52, quiet throughout</p>")
+
+
+def test_artifact_media_offpath_marks_the_entry(tmp_path, capsys):
+    library = _make_library(tmp_path)
+    art = library / "quiet-mind" / "artifacts"
+    (art / "listening-room.html").write_text(
+        '<!DOCTYPE html><html><body><audio src="../clip.mp3"></audio></body></html>'
+    )
+    html = build_shelf.render_shelf(library, {})
+    assert "media may not load inline" in html
+    assert "off the ../../<slug>/ shape" in capsys.readouterr().err
+
+
 def test_artifact_storage_lint_warns_on_stderr_and_marks_the_entry(tmp_path, capsys):
     library = _make_library(tmp_path)
     art = library / "quiet-mind" / "artifacts"
